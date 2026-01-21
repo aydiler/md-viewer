@@ -1,0 +1,48 @@
+[package]
+name = "egui_commonmark_macros"
+authors = ["Erlend Walstad"]
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+description = "Embed markdown directly into the binary as egui widgets"
+keywords = ["commonmark", "egui"]
+categories = ["gui"]
+readme = "README.md"
+documentation = "https://docs.rs/egui_commonmark_macros"
+include = ["src/**/*.rs", "LICENSE-MIT", "LICENSE-APACHE", "Cargo.toml"]
+
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2.0"
+quote = { version = "1.0", default-features = false }
+proc-macro2 = { version = "1.0", default-features = false }
+
+pulldown-cmark = { workspace = true, default-features = false }
+
+egui_commonmark_backend = { workspace = true }
+egui = { workspace = true }
+
+document-features = { workspace = true, optional = true }
+
+# Dependency resolution is hard...
+proc-macro-crate = "3.1"
+
+[dev-dependencies]
+trybuild = "1.0"
+
+[features]
+# Internal Debugging tool only!
+dump-macro = []
+
+## Enable tracking of markdown files to recompile when their content changes
+nightly = []
+
+[package.metadata.docs.rs]
+features = ["document-features"]
