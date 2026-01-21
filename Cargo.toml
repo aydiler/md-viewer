@@ -1,0 +1,51 @@
+[package]
+name = "md-viewer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.76"
+description = "Lightweight markdown viewer"
+authors = ["Ahmet"]
+
+[dependencies]
+# Core GUI framework - eframe re-exports egui
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+    "persistence",
+] }
+egui = "0.33"
+
+# Markdown rendering with syntax highlighting
+egui_commonmark = { version = "0.22", features = [
+    "better_syntax_highlighting",
+    "svg",
+    "load-images",
+] }
+
+# Image format support
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+
+# File operations
+rfd = "0.17"
+notify = "6.1"
+notify-debouncer-mini = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+# Performance
+mimalloc = "0.1"
+
+# Serialization for persistence
+serde = { version = "1", features = ["derive"] }
+
+# Logging
+env_logger = "0.11"
+log = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
