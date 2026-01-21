@@ -4,22 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Branch Context
 
-**Branch:** `feature/layout-fix`
-**Purpose:** Fix layout issues in markdown rendering
+**Branch:** `main`
+**Purpose:** Stable, production-ready code
 
-## Documentation
+## Project Documentation
 
-Full documentation is auto-loaded from `.claude/rules/`:
-- `architecture.md` - Core components, libraries, rendering flow
+These docs are versioned with code and imported via `@path`:
+
+- @docs/ARCHITECTURE.md - Core components, libraries, rendering flow
+- @docs/KEYBOARD_SHORTCUTS.md - All keyboard shortcuts
+- @docs/TARGET_METRICS.md - Performance targets and planned features
+
+## Claude Instructions
+
+Stable instructions are auto-loaded from `.claude/rules/`:
 - `build-commands.md` - cargo build, run, clippy, make install
-- `keyboard-shortcuts.md` - All keyboard shortcuts
-- `target-metrics.md` - Performance targets and planned features
 - `devlog-workflow.md` - How to document feature implementations
 - `worktree-workflow.md` - How to create and manage worktrees
 - `system-dependencies.md` - Arch Linux packages
 
 ## Branch-Specific Notes
 
-Working on line-height and layout calculations.
-
-See @docs/devlog/002-line-height-investigation.md for current progress.
+This is the main branch. All new work should happen in feature worktrees.
+Use `/feature <description>` or create a worktree manually.
