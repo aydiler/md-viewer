@@ -41,6 +41,65 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
+/// Parse local markdown file links and anchor links from content, skipping code blocks.
+/// Returns a list of link destinations that should be handled internally (not opened in browser).
+fn parse_local_links(content: &str) -> Vec<String> {
+    // Match markdown links: [text](destination)
+    let link_re = Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
+    let mut links = Vec::new();
+    let mut in_code_block = false;
+
+    for line in content.lines() {
+        // Toggle code block state on fence lines
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        // Skip lines inside code blocks
+        if in_code_block {
+            continue;
+        }
+
+        // Find all links in the line
+        for cap in link_re.captures_iter(line) {
+            let destination = &cap[2];
+            // Check if it's a local file link or anchor-only link
+            if is_local_markdown_link(destination) || destination.starts_with('#') {
+                links.push(destination.to_string());
+            }
+        }
+    }
+
+    links
+}
+
+/// Check if a link destination points to a local markdown file
+fn is_local_markdown_link(destination: &str) -> bool {
+    // Skip external links (http, https, mailto, etc.)
+    if destination.starts_with("http://")
+        || destination.starts_with("https://")
+        || destination.starts_with("mailto:")
+        || destination.starts_with("tel:")
+        || destination.starts_with("ftp://")
+        || destination.starts_with('#')  // Skip anchor-only links
+    {
+        return false;
+    }
+
+    // Remove anchor part if present (e.g., "file.md#heading" -> "file.md")
+    let path_part = destination.split('#').next().unwrap_or(destination);
+
+    // Check if it ends with a markdown extension
+    let path = std::path::Path::new(path_part);
+    path.extension()
+        .map(|ext| {
+            let ext = ext.to_string_lossy().to_lowercase();
+            ext == "md" || ext == "markdown" || ext == "txt"
+        })
+        .unwrap_or(false)
+}
+
 /// Parse markdown headers from content, skipping code blocks.
 /// Extracts the first h1 as document title and returns remaining headers for outline.
 fn parse_headers(content: &str) -> ParsedHeaders {
@@ -146,6 +205,11 @@ struct MarkdownApp {
     show_outline: bool,
     pending_scroll_offset: Option<f32>,
     last_content_height: f32,
+    // Navigation history for link following
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
+    // Cached local links for the current document
+    local_links: Vec<String>,
 }
 
 impl MarkdownApp {
@@ -166,6 +230,7 @@ impl MarkdownApp {
         let show_outline = persisted.show_outline.unwrap_or(true);
 
         let parsed = parse_headers(SAMPLE_MARKDOWN);
+        let local_links = parse_local_links(SAMPLE_MARKDOWN);
         let mut app = Self {
             cache: CommonMarkCache::default(),
             content: SAMPLE_MARKDOWN.to_string(),
@@ -185,6 +250,9 @@ impl MarkdownApp {
             show_outline,
             pending_scroll_offset: None,
             last_content_height: 0.0,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            local_links,
         };
 
         // Determine which file to load: CLI argument takes priority, then persisted last file
@@ -228,6 +296,12 @@ impl MarkdownApp {
                 let parsed = parse_headers(&self.content);
                 self.document_title = parsed.document_title;
                 self.outline_headers = parsed.outline_headers;
+
+                // Parse and register local links for link hook handling
+                self.local_links = parse_local_links(&self.content);
+                for link in &self.local_links {
+                    self.cache.add_link_hook(link);
+                }
 
                 if had_invalid_utf8 {
                     self.error_message = Some("Warning: File contains invalid UTF-8 characters (replaced with �)".to_string());
@@ -389,6 +463,106 @@ impl MarkdownApp {
             self.load_file(&path);
         }
     }
+
+    /// Navigate to a local link, resolving it relative to the current file's directory
+    fn navigate_to_link(&mut self, link: &str) {
+        // Ignore anchor-only links (e.g., "#section") - just prevent browser from opening
+        if link.starts_with('#') {
+            log::debug!("Ignoring anchor-only link: {}", link);
+            return;
+        }
+
+        let Some(current_file) = &self.current_file else {
+            log::warn!("Cannot navigate: no current file");
+            return;
+        };
+
+        let Some(current_dir) = current_file.parent() else {
+            log::warn!("Cannot navigate: current file has no parent directory");
+            return;
+        };
+
+        // Remove anchor part if present (e.g., "file.md#heading" -> "file.md")
+        let path_part = link.split('#').next().unwrap_or(link);
+
+        // Resolve the link relative to the current file's directory
+        let target_path = current_dir.join(path_part);
+
+        // Canonicalize to resolve .. and . components
+        let target_path = match target_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                self.error_message = Some(format!("Cannot navigate to '{}': {}", link, e));
+                log::error!("Failed to canonicalize path {:?}: {}", target_path, e);
+                return;
+            }
+        };
+
+        // Save current file to history before navigating
+        self.history_back.push(current_file.clone());
+        // Clear forward history on new navigation
+        self.history_forward.clear();
+
+        log::info!("Navigating to link: {:?}", target_path);
+        self.load_file(&target_path);
+    }
+
+    /// Navigate back in history
+    fn navigate_back(&mut self) {
+        if let Some(prev_path) = self.history_back.pop() {
+            // Save current file to forward history
+            if let Some(current) = self.current_file.clone() {
+                self.history_forward.push(current);
+            }
+            log::info!("Navigating back to: {:?}", prev_path);
+            // Load without adding to history
+            self.load_file_no_history(&prev_path);
+        }
+    }
+
+    /// Navigate forward in history
+    fn navigate_forward(&mut self) {
+        if let Some(next_path) = self.history_forward.pop() {
+            // Save current file to back history
+            if let Some(current) = self.current_file.clone() {
+                self.history_back.push(current);
+            }
+            log::info!("Navigating forward to: {:?}", next_path);
+            // Load without adding to history
+            self.load_file_no_history(&next_path);
+        }
+    }
+
+    /// Load a file without modifying navigation history
+    fn load_file_no_history(&mut self, path: &PathBuf) {
+        // Store history temporarily
+        let back = std::mem::take(&mut self.history_back);
+        let forward = std::mem::take(&mut self.history_forward);
+
+        self.load_file(path);
+
+        // Restore history
+        self.history_back = back;
+        self.history_forward = forward;
+    }
+
+    /// Check link hooks after rendering and navigate if a link was clicked
+    fn check_link_hooks(&mut self) -> Option<String> {
+        for link in &self.local_links {
+            if let Some(true) = self.cache.get_link_hook(link) {
+                return Some(link.clone());
+            }
+        }
+        None
+    }
+
+    fn can_go_back(&self) -> bool {
+        !self.history_back.is_empty()
+    }
+
+    fn can_go_forward(&self) -> bool {
+        !self.history_forward.is_empty()
+    }
 }
 
 impl eframe::App for MarkdownApp {
@@ -436,6 +610,8 @@ impl eframe::App for MarkdownApp {
         let mut toggle_outline = false;
         let mut quit_app = false;
         let mut zoom_delta: f32 = 0.0;
+        let mut go_back = false;
+        let mut go_forward = false;
 
         ctx.input(|i| {
             // Ctrl+O: Open file
@@ -449,6 +625,14 @@ impl eframe::App for MarkdownApp {
             // Ctrl+W: Toggle watch
             if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
                 toggle_watch = true;
+            }
+            // Alt+Left: Go back in history
+            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
+                go_back = true;
+            }
+            // Alt+Right: Go forward in history
+            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight) {
+                go_forward = true;
             }
             // Ctrl+D: Toggle dark mode
             if i.modifiers.ctrl && i.key_pressed(egui::Key::D) {
@@ -501,6 +685,12 @@ impl eframe::App for MarkdownApp {
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        if go_back {
+            self.navigate_back();
+        }
+        if go_forward {
+            self.navigate_forward();
+        }
 
         // Handle drag and drop
         self.is_dragging = false;
@@ -550,6 +740,20 @@ impl eframe::App for MarkdownApp {
 
                     if ui.add(egui::Button::new("Quit").shortcut_text("Ctrl+Q")).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ui.close();
+                    }
+                });
+
+                ui.menu_button("Navigate", |ui| {
+                    let can_back = self.can_go_back();
+                    if ui.add_enabled(can_back, egui::Button::new("← Back").shortcut_text("Alt+←")).clicked() {
+                        self.navigate_back();
+                        ui.close();
+                    }
+
+                    let can_forward = self.can_go_forward();
+                    if ui.add_enabled(can_forward, egui::Button::new("→ Forward").shortcut_text("Alt+→")).clicked() {
+                        self.navigate_forward();
                         ui.close();
                     }
                 });
@@ -722,6 +926,11 @@ impl eframe::App for MarkdownApp {
         });
         if clear_error {
             self.error_message = None;
+        }
+
+        // Check if any local link was clicked and navigate to it
+        if let Some(clicked_link) = self.check_link_hooks() {
+            self.navigate_to_link(&clicked_link);
         }
 
         // Drag and drop overlay

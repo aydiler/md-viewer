@@ -18,7 +18,7 @@ The release profile is configured for minimal binary size (`opt-level = "z"`, LT
 
 ## Architecture
 
-Single-file Rust desktop application (`src/main.rs`, ~835 lines) for viewing markdown files using egui + egui_commonmark.
+Single-file Rust desktop application (`src/main.rs`, ~1050 lines) for viewing markdown files using egui + egui_commonmark.
 
 ### Core Components
 
@@ -32,12 +32,16 @@ Single-file Rust desktop application (`src/main.rs`, ~835 lines) for viewing mar
   - `outline_headers: Vec<Header>` - parsed headers for outline (excludes first h1)
   - `show_outline: bool` - toggle sidebar visibility
   - `pending_scroll_offset` - scroll target for outline navigation
+  - `history_back` + `history_forward` - navigation history for back/forward
+  - `local_links: Vec<String>` - cached local markdown links for link hook handling
 
 - **PersistedState**: Serializable struct for session persistence (dark_mode, last_file, zoom_level, show_outline). Stored via eframe's storage API with key `"md-viewer-state"`.
 
 - **File Watching**: Uses `notify-debouncer-mini` with 200ms debounce. Events are polled non-blocking via `try_recv()` at start of each `update()` call. Auto-recovers up to 3 times on watcher failure.
 
 - **Header Outline**: `parse_headers()` returns a `ParsedHeaders` struct containing `document_title` (first h1) and `outline_headers` (remaining headers). The first h1 is used as the sidebar title instead of "Outline". Headers are displayed in a resizable left sidebar with level-based indentation via string prefix. Click-to-navigate calculates scroll offset from line number ratio.
+
+- **Link Navigation**: Uses egui_commonmark's link hook mechanism to intercept clicks on local markdown links. `parse_local_links()` extracts all relative markdown file links and anchor-only links from content (skipping code blocks). Links are registered via `cache.add_link_hook()` and checked after each render via `get_link_hook()`. Navigation resolves paths relative to current file's directory and maintains back/forward history. Anchor-only links (`#section`) are intercepted but ignored (prevents browser errors).
 
 - **Global Allocator**: mimalloc for performance
 
@@ -60,6 +64,7 @@ update() → check_file_changes() → reload if needed
          → TopBottomPanel (menu bar + LIVE indicator)
          → SidePanel::left (outline, if show_outline && outline_headers exist)
          → CentralPanel → ScrollArea::show_viewport → CommonMarkViewer
+         → check_link_hooks() → navigate_to_link() if local link clicked
 ```
 
 Uses `show_viewport` for optimized rendering - egui clips content outside the visible area.
@@ -77,6 +82,8 @@ Uses `show_viewport` for optimized rendering - egui clips content outside the vi
 | Ctrl+- | Zoom out |
 | Ctrl+0 | Reset zoom to 100% |
 | Ctrl+Scroll | Zoom in/out with mouse wheel |
+| Alt+← | Navigate back in history |
+| Alt+→ | Navigate forward in history |
 
 ## Target Metrics
 
@@ -87,13 +94,9 @@ Uses `show_viewport` for optimized rendering - egui clips content outside the vi
 
 ## Planned Features
 
-See `docs/IMPLEMENTATION-PLAN.md` for detailed implementation plans for:
-- **Phase D**: Simple link handler with navigation history
 - **Phase A**: Multi-window support via egui viewports
 - **Phase B**: Tab system (custom or egui_dock)
 - **Phase C**: Hybrid tabs + multi-window
-
-Key discovery: egui_commonmark has a link hooks mechanism (`cache.add_link_hook()`) that can intercept link clicks instead of opening in browser.
 
 ## Worktree Workflow
 
