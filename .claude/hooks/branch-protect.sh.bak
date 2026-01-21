@@ -1,0 +1,13 @@
+#!/bin/bash
+# Prevent edits on protected branches (main, master)
+# Used by Claude Code PreToolUse hook
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+  cat << 'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cannot edit files on 'main' branch. Create a feature worktree first:\n\ngit -C ~/markdown-viewer/.bare worktree add ~/markdown-viewer/worktrees/<name> -b feature/<name>"}}
+EOF
+fi
+
+exit 0

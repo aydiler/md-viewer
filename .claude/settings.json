@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/ahmet/markdown-viewer/.claude/hooks/branch-protect.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
