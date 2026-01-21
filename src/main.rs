@@ -829,6 +829,7 @@ impl eframe::App for MarkdownApp {
                 .default_width(200.0)
                 .min_width(120.0)
                 .max_width(400.0)
+                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 }))
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -874,7 +875,9 @@ impl eframe::App for MarkdownApp {
 
         // Main content panel
         let mut clear_error = false;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin { left: 4, right: 8, top: 4, bottom: 4 }))
+            .show(ctx, |ui| {
             // Show error message if any
             if let Some(error) = &self.error_message {
                 let error_text = error.clone();

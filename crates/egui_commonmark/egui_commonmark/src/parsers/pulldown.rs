@@ -587,6 +587,17 @@ impl CommonMarkViewerInternal {
             block.content.push_str(&text);
         } else if let Some(link) = &mut self.link {
             link.text.push(rich_text);
+        } else if self.text_style.heading.is_some() {
+            // Calculate a rect at the left edge for heading placement
+            let available = ui.available_rect_before_wrap();
+            let left_edge = ui.min_rect().left();
+            let heading_rect = egui::Rect::from_min_size(
+                egui::pos2(left_edge, available.top()),
+                egui::vec2(available.width() + (available.left() - left_edge), 0.0),
+            );
+            ui.allocate_ui_at_rect(heading_rect, |ui| {
+                ui.label(rich_text);
+            });
         } else {
             ui.label(rich_text);
         }
@@ -598,9 +609,8 @@ impl CommonMarkViewerInternal {
                 self.line.try_insert_start(ui);
             }
             pulldown_cmark::Tag::Heading { level, .. } => {
-                // Headings should always insert a newline even if it is at the start.
-                // Whether this is okay in all scenarios is a different question.
-                newline(ui);
+                // End current row to ensure heading starts at left edge
+                ui.end_row();
                 // Add extra spacing above headings if configured
                 heading_start_spacing(ui, &options.typography);
                 self.text_style.heading = Some(match level {
