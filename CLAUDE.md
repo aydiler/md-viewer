@@ -22,6 +22,7 @@ This is a **bare repository** setup. The git database lives in `.bare/` and all 
 │           ├── KEYBOARD_SHORTCUTS.md
 │           ├── TARGET_METRICS.md
 │           ├── DEVELOPMENT_PLAN.md
+│           ├── LESSONS.md
 │           └── devlog/
 └── CLAUDE.md -> worktrees/main/CLAUDE.md  # Symlink
 ```
@@ -38,6 +39,7 @@ This is a **bare repository** setup. The git database lives in `.bare/` and all 
 - @docs/ARCHITECTURE.md - Core components, libraries, rendering flow
 - @docs/KEYBOARD_SHORTCUTS.md - All keyboard shortcuts
 - @docs/TARGET_METRICS.md - Performance targets and planned features
+- @docs/LESSONS.md - **Check before debugging** - reusable fixes and gotchas
 
 ## Quick Reference
 
