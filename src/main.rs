@@ -909,6 +909,11 @@ impl eframe::App for MarkdownApp {
                     .show_alt_text_on_hover(true)
                     .syntax_theme_dark("base16-ocean.dark")
                     .syntax_theme_light("base16-ocean.light")
+                    // Typography settings for improved readability (WCAG 2.1 guidelines)
+                    .line_height(1.5) // 1.5× line height per WCAG 2.1 SC 1.4.12
+                    .paragraph_spacing(1.5) // 1.5× font size between paragraphs
+                    .heading_spacing_above(2.0) // 2× font size before headings
+                    .heading_spacing_below(0.5) // 0.5× font size after headings
                     .show(ui, &mut self.cache, &self.content);
             });
 
