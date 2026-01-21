@@ -839,6 +839,7 @@ impl eframe::App for MarkdownApp {
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
                         .show(ui, |ui| {
                             for header in &self.outline_headers {
                                 // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
@@ -890,7 +891,8 @@ impl eframe::App for MarkdownApp {
             // Use show_viewport for optimized rendering - egui will clip content
             // outside the visible area, reducing GPU work for large documents
             let mut scroll_area = egui::ScrollArea::vertical()
-                .auto_shrink([false, false]);
+                .auto_shrink([false, false])
+                .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
 
             // Apply pending scroll offset if set
             if let Some(offset) = self.pending_scroll_offset.take() {
