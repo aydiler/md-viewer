@@ -10,6 +10,7 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use notify::RecommendedWatcher;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const APP_KEY: &str = "md-viewer-state";
@@ -21,6 +22,69 @@ struct PersistedState {
     dark_mode: Option<bool>,
     last_file: Option<PathBuf>,
     zoom_level: Option<f32>,
+    show_outline: Option<bool>,
+}
+
+/// Represents a markdown header for the outline
+#[derive(Clone)]
+struct Header {
+    level: u8,
+    title: String,
+    line_number: usize,
+}
+
+/// Result of parsing markdown headers
+struct ParsedHeaders {
+    /// Document title (first h1, if any)
+    document_title: Option<String>,
+    /// Outline headers (excludes the first h1)
+    outline_headers: Vec<Header>,
+}
+
+/// Parse markdown headers from content, skipping code blocks.
+/// Extracts the first h1 as document title and returns remaining headers for outline.
+fn parse_headers(content: &str) -> ParsedHeaders {
+    let re = Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
+    let mut all_headers = Vec::new();
+    let mut in_code_block = false;
+
+    for (line_number, line) in content.lines().enumerate() {
+        // Toggle code block state on fence lines
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        // Skip lines inside code blocks
+        if in_code_block {
+            continue;
+        }
+
+        // Check for header
+        if let Some(caps) = re.captures(line) {
+            all_headers.push(Header {
+                level: caps[1].len() as u8,
+                title: caps[2].trim().to_string(),
+                line_number,
+            });
+        }
+    }
+
+    // Extract first h1 as document title, keep rest for outline
+    let first_h1_idx = all_headers.iter().position(|h| h.level == 1);
+    let document_title = first_h1_idx.map(|idx| all_headers[idx].title.clone());
+
+    let outline_headers = all_headers
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| Some(*idx) != first_h1_idx)
+        .map(|(_, h)| h)
+        .collect();
+
+    ParsedHeaders {
+        document_title,
+        outline_headers,
+    }
 }
 
 #[global_allocator]
@@ -76,6 +140,12 @@ struct MarkdownApp {
     scroll_offset: f32,
     // Zoom level (1.0 = 100%, range: 0.5 to 3.0)
     zoom_level: f32,
+    // Outline state
+    document_title: Option<String>,
+    outline_headers: Vec<Header>,
+    show_outline: bool,
+    pending_scroll_offset: Option<f32>,
+    last_content_height: f32,
 }
 
 impl MarkdownApp {
@@ -92,6 +162,10 @@ impl MarkdownApp {
         // Use persisted zoom_level, or default to 1.0 (100%)
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
 
+        // Use persisted show_outline, default to true (visible by default)
+        let show_outline = persisted.show_outline.unwrap_or(true);
+
+        let parsed = parse_headers(SAMPLE_MARKDOWN);
         let mut app = Self {
             cache: CommonMarkCache::default(),
             content: SAMPLE_MARKDOWN.to_string(),
@@ -106,6 +180,11 @@ impl MarkdownApp {
             content_lines: SAMPLE_MARKDOWN.lines().count(),
             scroll_offset: 0.0,
             zoom_level,
+            document_title: parsed.document_title,
+            outline_headers: parsed.outline_headers,
+            show_outline,
+            pending_scroll_offset: None,
+            last_content_height: 0.0,
         };
 
         // Determine which file to load: CLI argument takes priority, then persisted last file
@@ -146,6 +225,9 @@ impl MarkdownApp {
                 self.content = content.into_owned();
                 self.current_file = Some(path.clone());
                 self.cache = CommonMarkCache::default();
+                let parsed = parse_headers(&self.content);
+                self.document_title = parsed.document_title;
+                self.outline_headers = parsed.outline_headers;
 
                 if had_invalid_utf8 {
                     self.error_message = Some("Warning: File contains invalid UTF-8 characters (replaced with �)".to_string());
@@ -315,6 +397,7 @@ impl eframe::App for MarkdownApp {
             dark_mode: Some(self.dark_mode),
             last_file: self.current_file.clone(),
             zoom_level: Some(self.zoom_level),
+            show_outline: Some(self.show_outline),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -350,13 +433,18 @@ impl eframe::App for MarkdownApp {
         let mut open_dialog = false;
         let mut toggle_watch = false;
         let mut toggle_dark = false;
+        let mut toggle_outline = false;
         let mut quit_app = false;
         let mut zoom_delta: f32 = 0.0;
 
         ctx.input(|i| {
             // Ctrl+O: Open file
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::O) {
+            if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::O) {
                 open_dialog = true;
+            }
+            // Ctrl+Shift+O: Toggle outline
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
+                toggle_outline = true;
             }
             // Ctrl+W: Toggle watch
             if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
@@ -406,6 +494,9 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_dark {
             self.dark_mode = !self.dark_mode;
+        }
+        if toggle_outline {
+            self.show_outline = !self.show_outline;
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -470,6 +561,12 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    let outline_text = if self.show_outline { "✓ Show Outline" } else { "Show Outline" };
+                    if ui.add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O")).clicked() {
+                        self.show_outline = !self.show_outline;
+                        ui.close();
+                    }
+
                     ui.separator();
 
                     if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
@@ -514,6 +611,62 @@ impl eframe::App for MarkdownApp {
             });
         });
 
+        // Outline sidebar (left side)
+        let mut clicked_header_line: Option<usize> = None;
+        if self.show_outline && !self.outline_headers.is_empty() {
+            // Check if any pointer is down (potential resize in progress)
+            let is_dragging = ctx.input(|i| i.pointer.any_down());
+
+            // Use document title if available, otherwise "Outline"
+            let sidebar_title = self.document_title.as_deref().unwrap_or("Outline");
+
+            egui::SidePanel::left("outline")
+                .resizable(true)
+                .default_width(200.0)
+                .min_width(120.0)
+                .max_width(400.0)
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.set_max_width(ui.available_width());
+                        ui.add_space(6.0);
+                        ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| {
+                            for header in &self.outline_headers {
+                                // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
+                                let indent = (header.level.saturating_sub(2) as usize) * 12;
+                                let prefix = " ".repeat(indent / 4); // Use spaces for indent
+
+                                let display_text = if header.title.len() > 40 {
+                                    format!("{}{}...", prefix, &header.title[..37])
+                                } else {
+                                    format!("{}{}", prefix, &header.title)
+                                };
+
+                                // Always use selectable_label for consistent spacing
+                                // Only handle clicks when not dragging (to avoid accidental clicks during resize)
+                                let response = ui.selectable_label(false, &display_text);
+                                if !is_dragging && response.clicked() {
+                                    clicked_header_line = Some(header.line_number);
+                                }
+                            }
+                        });
+                });
+        }
+
+        // Calculate scroll target if header was clicked
+        if let Some(line_number) = clicked_header_line {
+            if self.content_lines > 0 && self.last_content_height > 0.0 {
+                // Calculate approximate scroll position based on line number ratio
+                let ratio = line_number as f32 / self.content_lines as f32;
+                self.pending_scroll_offset = Some(ratio * self.last_content_height);
+            }
+        }
+
         // Main content panel
         let mut clear_error = false;
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -532,20 +685,29 @@ impl eframe::App for MarkdownApp {
 
             // Use show_viewport for optimized rendering - egui will clip content
             // outside the visible area, reducing GPU work for large documents
-            let scroll_output = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_viewport(ui, |ui, viewport| {
-                    // Track scroll position for potential future optimizations
-                    self.scroll_offset = viewport.min.y;
+            let mut scroll_area = egui::ScrollArea::vertical()
+                .auto_shrink([false, false]);
 
-                    CommonMarkViewer::new()
-                        .max_image_width(Some(800))
-                        .indentation_spaces(2)
-                        .show_alt_text_on_hover(true)
-                        .syntax_theme_dark("base16-ocean.dark")
-                        .syntax_theme_light("base16-ocean.light")
-                        .show(ui, &mut self.cache, &self.content);
-                });
+            // Apply pending scroll offset if set
+            if let Some(offset) = self.pending_scroll_offset.take() {
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+
+            let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
+                // Track scroll position for potential future optimizations
+                self.scroll_offset = viewport.min.y;
+
+                CommonMarkViewer::new()
+                    .max_image_width(Some(800))
+                    .indentation_spaces(2)
+                    .show_alt_text_on_hover(true)
+                    .syntax_theme_dark("base16-ocean.dark")
+                    .syntax_theme_light("base16-ocean.light")
+                    .show(ui, &mut self.cache, &self.content);
+            });
+
+            // Store content height for scroll calculations
+            self.last_content_height = scroll_output.content_size.y;
 
             // For very large documents (10000+ lines), show a performance hint
             if self.content_lines > 10000 && scroll_output.content_size.y > 50000.0 {
