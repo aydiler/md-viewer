@@ -329,13 +329,41 @@ impl<'f> CommonMarkViewer<'f> {
         self
     }
 
-    /// Apply research-backed typography defaults for optimal readability.
+    /// Set line height for code blocks as a multiplier of font size.
     ///
-    /// This sets:
-    /// - Line height: 1.5x (WCAG 2.1 SC 1.4.12)
-    /// - Paragraph spacing: 1.5x font size
-    /// - Heading spacing above: 2.0x font size
-    /// - Heading spacing below: 0.5x font size
+    /// Recommended value: 1.3 (PPIG Conference research)
+    /// Code benefits from tighter line height than prose (1.2-1.4× vs 1.5×)
+    ///
+    /// # Example
+    /// ```
+    /// # use egui_commonmark::CommonMarkViewer;
+    /// CommonMarkViewer::new().code_line_height(1.3); // 130% of font size
+    /// ```
+    pub fn code_line_height(mut self, multiplier: f32) -> Self {
+        self.options.typography.code_line_height = Some(Measurement::Multiplier(multiplier));
+        self
+    }
+
+    /// Set line height for code blocks as absolute pixels.
+    ///
+    /// # Example
+    /// ```
+    /// # use egui_commonmark::CommonMarkViewer;
+    /// CommonMarkViewer::new().code_line_height_px(18.0); // 18 pixels
+    /// ```
+    pub fn code_line_height_px(mut self, pixels: f32) -> Self {
+        self.options.typography.code_line_height = Some(Measurement::Pixels(pixels));
+        self
+    }
+
+    /// Apply evidence-based typography defaults for optimal readability.
+    ///
+    /// Based on peer-reviewed HCI research, WCAG 2.1, and vision science:
+    /// - Line height: 1.5× (WCAG 2.1 SC 1.4.12, Reading University)
+    /// - Code line height: 1.3× (PPIG Conference research)
+    /// - Paragraph spacing: 2.0× font size (WCAG 1.4.12)
+    /// - Heading spacing above: 2.0× font size
+    /// - Heading spacing below: 0.75× font size
     ///
     /// # Example
     /// ```

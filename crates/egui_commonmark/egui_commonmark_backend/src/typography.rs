@@ -30,45 +30,58 @@ impl Default for Measurement {
 /// Typography configuration for markdown rendering.
 ///
 /// Controls line height, paragraph spacing, and heading spacing for improved readability.
-/// Based on WCAG 2.1 SC 1.4.12 guidelines (1.5x line height recommended).
+/// Based on WCAG 2.1 SC 1.4.12 guidelines and peer-reviewed HCI research.
 #[derive(Debug, Clone, Default)]
 pub struct TypographyConfig {
     /// Line height for body text. Applied via egui's TextFormat.line_height.
+    /// Research: 1.5× recommended (WCAG 2.1 SC 1.4.12, Reading University)
     /// Default: None (uses font's built-in line height)
     pub line_height: Option<Measurement>,
 
+    /// Line height for code blocks (tighter than prose).
+    /// Research: 1.2-1.4× recommended for code (PPIG Conference)
+    /// Default: None (uses 1.3× when recommended() is called)
+    pub code_line_height: Option<Measurement>,
+
     /// Extra spacing between paragraphs.
+    /// Research: 2× font size recommended (WCAG 1.4.12)
     /// Default: None (uses default egui spacing)
     pub paragraph_spacing: Option<Measurement>,
 
     /// Extra spacing before headings.
+    /// Research: More space above than below creates visual grouping
     /// Default: None
     pub heading_spacing_above: Option<Measurement>,
 
     /// Extra spacing after headings.
+    /// Research: line-height × 0.5 ≈ space below heading
     /// Default: None
     pub heading_spacing_below: Option<Measurement>,
 }
 
 impl TypographyConfig {
-    /// Create a new typography config with research-backed defaults.
+    /// Create a new typography config with evidence-based defaults.
     ///
-    /// - Line height: 1.5x (WCAG 2.1 SC 1.4.12)
-    /// - Paragraph spacing: 1.5x font size
-    /// - Heading above: 2.0x font size
-    /// - Heading below: 0.5x font size
+    /// Based on peer-reviewed HCI research, WCAG 2.1, and vision science:
+    /// - Line height: 1.5× (WCAG 2.1 SC 1.4.12, Reading University)
+    /// - Code line height: 1.3× (PPIG Conference research)
+    /// - Paragraph spacing: 2.0× font size (WCAG 1.4.12)
+    /// - Heading above: 2.0× font size
+    /// - Heading below: 0.75× font size (line-height × 0.5)
     pub fn recommended() -> Self {
         Self {
             line_height: Some(Measurement::Multiplier(1.5)),
-            paragraph_spacing: Some(Measurement::Multiplier(1.5)),
+            code_line_height: Some(Measurement::Multiplier(1.3)),
+            paragraph_spacing: Some(Measurement::Multiplier(2.0)),
             heading_spacing_above: Some(Measurement::Multiplier(2.0)),
-            heading_spacing_below: Some(Measurement::Multiplier(0.5)),
+            heading_spacing_below: Some(Measurement::Multiplier(0.75)),
         }
     }
 
     /// Check if any typography settings are configured
     pub fn is_configured(&self) -> bool {
         self.line_height.is_some()
+            || self.code_line_height.is_some()
             || self.paragraph_spacing.is_some()
             || self.heading_spacing_above.is_some()
             || self.heading_spacing_below.is_some()
@@ -78,6 +91,12 @@ impl TypographyConfig {
     /// Returns None if line_height is not configured.
     pub fn resolve_line_height(&self, font_size: f32) -> Option<f32> {
         self.line_height.map(|m| m.resolve(font_size))
+    }
+
+    /// Resolve code line height to pixels given a font size.
+    /// Returns None if code_line_height is not configured.
+    pub fn resolve_code_line_height(&self, font_size: f32) -> Option<f32> {
+        self.code_line_height.map(|m| m.resolve(font_size))
     }
 
     /// Resolve paragraph spacing to pixels given a font size.
