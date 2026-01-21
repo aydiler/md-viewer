@@ -143,65 +143,41 @@ impl Style {
             .map_or(14.0, |d| d.size);
 
         if let Some(level) = self.heading {
-            let max_height = ui
-                .style()
-                .text_styles
-                .get(&TextStyle::Heading)
-                .map_or(32.0, |d| d.size);
-            let min_height = base_font_size;
-            let diff = max_height - min_height;
+            // Evidence-based heading scale using Major Third ratio (1.25×)
+            // Research: Nielsen Norman Group "layer-cake" scanning pattern requires distinct hierarchy
+            // H1: 2× base (32px), H2: 1.6× (26px), H3: 1.25× (20px), H4: 1.125× (18px)
+            let (size, is_bold) = match level {
+                0 => (base_font_size * 2.0, true),      // H1: 32px (2×)
+                1 => (base_font_size * 1.6, true),     // H2: 26px (1.6×)
+                2 => (base_font_size * 1.25, true),    // H3: 20px (1.25×)
+                3 => (base_font_size * 1.125, true),   // H4: 18px (1.125×)
+                4 => (base_font_size, false),          // H5: 16px (base, no bold)
+                _ => (base_font_size * 0.875, false),  // H6: 14px (0.875×, no bold)
+            };
 
-            match level {
-                0 => {
-                    rich_text = rich_text.strong().heading();
-                }
-                1 => {
-                    let size = min_height + diff * 0.835;
-                    rich_text = rich_text.strong().size(size);
-                }
-                2 => {
-                    let size = min_height + diff * 0.668;
-                    rich_text = rich_text.strong().size(size);
-                }
-                3 => {
-                    let size = min_height + diff * 0.501;
-                    rich_text = rich_text.strong().size(size);
-                }
-                4 => {
-                    let size = min_height + diff * 0.334;
-                    rich_text = rich_text.size(size);
-                }
-                // We only support 6 levels
-                5.. => {
-                    let size = min_height + diff * 0.167;
-                    rich_text = rich_text.size(size);
-                }
+            rich_text = rich_text.size(size);
+            if is_bold {
+                rich_text = rich_text.strong();
+            }
+            if level == 0 {
+                rich_text = rich_text.heading();
             }
 
-            // Apply heading-specific line height (slightly tighter than body)
+            // Apply heading-specific line height (tighter than body per research)
+            // Headings use 1.2-1.3× line height vs 1.5× for body text
             if let Some(typo) = typography {
                 if let Some(line_height) = typo.line_height {
-                    // Headings use a tighter line height (1.2-1.3x vs 1.5x for body)
                     let heading_line_height = match line_height {
                         crate::typography::Measurement::Multiplier(m) => {
-                            // Scale down the multiplier for headings
+                            // Scale down: 1.5× body → 1.3× heading
                             let heading_multiplier = 1.0 + (m - 1.0) * 0.6;
                             crate::typography::Measurement::Multiplier(heading_multiplier)
                         }
                         crate::typography::Measurement::Pixels(p) => {
-                            // Use a proportionally smaller pixel value for headings
                             crate::typography::Measurement::Pixels(p * 0.8)
                         }
                     };
-                    let font_size = match level {
-                        0 => max_height,
-                        1 => min_height + diff * 0.835,
-                        2 => min_height + diff * 0.668,
-                        3 => min_height + diff * 0.501,
-                        4 => min_height + diff * 0.334,
-                        _ => min_height + diff * 0.167,
-                    };
-                    rich_text = rich_text.line_height(Some(heading_line_height.resolve(font_size)));
+                    rich_text = rich_text.line_height(Some(heading_line_height.resolve(size)));
                 }
             }
         } else {
@@ -323,11 +299,15 @@ impl CodeBlock {
         ui.scope(|ui| {
             Self::pre_syntax_highlighting(cache, options, ui);
 
+            // Calculate code line height from typography config
+            let mono_font_size = ui.text_style_height(&TextStyle::Monospace);
+            let code_line_height = options.typography.resolve_code_line_height(mono_font_size);
+
             let mut layout = |ui: &Ui, string: &dyn TextBuffer, wrap_width: f32| {
                 let mut job = if let Some(lang) = &self.lang {
-                    self.syntax_highlighting(cache, options, lang, ui, string.as_str())
+                    self.syntax_highlighting(cache, options, lang, ui, string.as_str(), code_line_height)
                 } else {
-                    plain_highlighting(ui, string.as_str())
+                    plain_highlighting(ui, string.as_str(), code_line_height)
                 };
 
                 job.wrap.max_width = wrap_width;
@@ -356,8 +336,9 @@ impl CodeBlock {
         extension: &str,
         ui: &Ui,
         text: &str,
+        code_line_height: Option<f32>,
     ) -> egui::text::LayoutJob {
-        simple_highlighting(ui, text, extension)
+        simple_highlighting(ui, text, extension, code_line_height)
     }
 }
 
@@ -389,6 +370,7 @@ impl CodeBlock {
         extension: &str,
         ui: &Ui,
         text: &str,
+        code_line_height: Option<f32>,
     ) -> egui::text::LayoutJob {
         if let Some(syntax) = cache.ps.find_syntax_by_extension(extension) {
             let mut job = egui::text::LayoutJob::default();
@@ -398,44 +380,53 @@ impl CodeBlock {
                 let ranges = h.highlight_line(line, &cache.ps).unwrap();
                 for v in ranges {
                     let front = v.0.foreground;
-                    job.append(
-                        v.1,
-                        0.0,
-                        egui::TextFormat::simple(
-                            TextStyle::Monospace.resolve(ui.style()),
-                            syntect_color_to_egui(front),
-                        ),
+                    let mut format = egui::TextFormat::simple(
+                        TextStyle::Monospace.resolve(ui.style()),
+                        syntect_color_to_egui(front),
                     );
+                    // Apply code line height if configured
+                    if let Some(line_height) = code_line_height {
+                        format.line_height = Some(line_height);
+                    }
+                    job.append(v.1, 0.0, format);
                 }
             }
 
             job
         } else {
-            simple_highlighting(ui, text, extension)
+            simple_highlighting(ui, text, extension, code_line_height)
         }
     }
 }
 
-fn simple_highlighting(ui: &Ui, text: &str, extension: &str) -> egui::text::LayoutJob {
-    egui_extras::syntax_highlighting::highlight(
+fn simple_highlighting(ui: &Ui, text: &str, extension: &str, code_line_height: Option<f32>) -> egui::text::LayoutJob {
+    let mut job = egui_extras::syntax_highlighting::highlight(
         ui.ctx(),
         ui.style(),
         &egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style()),
         text,
         extension,
-    )
+    );
+    // Apply code line height to all sections if configured
+    if let Some(line_height) = code_line_height {
+        for section in &mut job.sections {
+            section.format.line_height = Some(line_height);
+        }
+    }
+    job
 }
 
-fn plain_highlighting(ui: &Ui, text: &str) -> egui::text::LayoutJob {
+fn plain_highlighting(ui: &Ui, text: &str, code_line_height: Option<f32>) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    job.append(
-        text,
-        0.0,
-        egui::TextFormat::simple(
-            TextStyle::Monospace.resolve(ui.style()),
-            ui.style().visuals.text_color(),
-        ),
+    let mut format = egui::TextFormat::simple(
+        TextStyle::Monospace.resolve(ui.style()),
+        ui.style().visuals.text_color(),
     );
+    // Apply code line height if configured
+    if let Some(line_height) = code_line_height {
+        format.line_height = Some(line_height);
+    }
+    job.append(text, 0.0, format);
     job
 }
 

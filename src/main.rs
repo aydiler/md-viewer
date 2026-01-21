@@ -587,14 +587,37 @@ impl eframe::App for MarkdownApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
-        // Apply theme and style settings
-        ctx.set_visuals(if self.dark_mode {
-            egui::Visuals::dark()
+        // Apply evidence-based theme settings
+        // Research: Off-white backgrounds (#F8F8F8) and dark gray text (#333333) for light mode
+        // Material Design: #121212 background and 87% white (#E0E0E0) for dark mode
+        // Avoids pure black on white (21:1 contrast causes halation for 47% with astigmatism)
+        let visuals = if self.dark_mode {
+            let mut v = egui::Visuals::dark();
+            // Material Design dark mode: #121212 background, #E0E0E0 text (87% white)
+            v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+            v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+            v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E); // Code blocks
+            v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
+            v
         } else {
-            egui::Visuals::light()
-        });
+            let mut v = egui::Visuals::light();
+            // Evidence-based light mode: #F8F8F8 background, #333333 text (~12:1 contrast)
+            v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
+            v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
+            v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0); // Code blocks
+            v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
+            v
+        };
+        ctx.set_visuals(visuals);
         ctx.style_mut(|style| {
             style.url_in_tooltip = true;
+            // Evidence-based font sizing: 16px minimum recommended (Rello et al., WCAG)
+            // Heading max at 32px (2× base) per Major Third scale
+            use egui::{FontId, TextStyle};
+            style.text_styles.insert(TextStyle::Body, FontId::proportional(16.0));
+            style.text_styles.insert(TextStyle::Heading, FontId::proportional(32.0));
+            style.text_styles.insert(TextStyle::Small, FontId::proportional(13.0));
+            style.text_styles.insert(TextStyle::Monospace, FontId::monospace(14.0));
         });
 
         // Apply zoom level
@@ -908,15 +931,17 @@ impl eframe::App for MarkdownApp {
 
                 CommonMarkViewer::new()
                     .max_image_width(Some(800))
+                    .default_width(Some(600)) // ~55-75 CPL at 16px (Dyson & Haselgrove 2001)
                     .indentation_spaces(2)
                     .show_alt_text_on_hover(true)
                     .syntax_theme_dark("base16-ocean.dark")
                     .syntax_theme_light("base16-ocean.light")
-                    // Typography settings for improved readability (WCAG 2.1 guidelines)
+                    // Evidence-based typography (WCAG 2.1, peer-reviewed HCI research)
                     .line_height(1.5) // 1.5× line height per WCAG 2.1 SC 1.4.12
-                    .paragraph_spacing(1.5) // 1.5× font size between paragraphs
+                    .code_line_height(1.3) // 1.3× for code (tighter, PPIG research)
+                    .paragraph_spacing(2.0) // 2× font size per WCAG 1.4.12
                     .heading_spacing_above(2.0) // 2× font size before headings
-                    .heading_spacing_below(0.5) // 0.5× font size after headings
+                    .heading_spacing_below(0.75) // 0.75× (line-height × 0.5) after headings
                     .show(ui, &mut self.cache, &self.content);
             });
 
