@@ -20,6 +20,7 @@ const MAX_WATCHER_RETRIES: u32 = 3;
 struct PersistedState {
     dark_mode: Option<bool>,
     last_file: Option<PathBuf>,
+    zoom_level: Option<f32>,
 }
 
 #[global_allocator]
@@ -73,6 +74,8 @@ struct MarkdownApp {
     // Performance tracking
     content_lines: usize,
     scroll_offset: f32,
+    // Zoom level (1.0 = 100%, range: 0.5 to 3.0)
+    zoom_level: f32,
 }
 
 impl MarkdownApp {
@@ -85,6 +88,9 @@ impl MarkdownApp {
 
         // Use persisted dark_mode, or fall back to system default
         let dark_mode = persisted.dark_mode.unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
+
+        // Use persisted zoom_level, or default to 1.0 (100%)
+        let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
 
         let mut app = Self {
             cache: CommonMarkCache::default(),
@@ -99,6 +105,7 @@ impl MarkdownApp {
             watcher_retry_count: 0,
             content_lines: SAMPLE_MARKDOWN.lines().count(),
             scroll_offset: 0.0,
+            zoom_level,
         };
 
         // Determine which file to load: CLI argument takes priority, then persisted last file
@@ -307,6 +314,7 @@ impl eframe::App for MarkdownApp {
         let state = PersistedState {
             dark_mode: Some(self.dark_mode),
             last_file: self.current_file.clone(),
+            zoom_level: Some(self.zoom_level),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -332,6 +340,9 @@ impl eframe::App for MarkdownApp {
             style.url_in_tooltip = true;
         });
 
+        // Apply zoom level
+        ctx.set_zoom_factor(self.zoom_level);
+
         // Update window title
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
 
@@ -340,6 +351,7 @@ impl eframe::App for MarkdownApp {
         let mut toggle_watch = false;
         let mut toggle_dark = false;
         let mut quit_app = false;
+        let mut zoom_delta: f32 = 0.0;
 
         ctx.input(|i| {
             // Ctrl+O: Open file
@@ -358,7 +370,28 @@ impl eframe::App for MarkdownApp {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
                 quit_app = true;
             }
+            // Ctrl+Plus or Ctrl+=: Zoom in
+            if i.modifiers.ctrl && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+                zoom_delta = 0.1;
+            }
+            // Ctrl+Minus: Zoom out
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
+                zoom_delta = -0.1;
+            }
+            // Ctrl+0: Reset zoom
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::Num0) {
+                zoom_delta = 1.0 - self.zoom_level; // Reset to 1.0
+            }
+            // Ctrl + scroll wheel for zoom
+            if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
+                zoom_delta = if i.raw_scroll_delta.y > 0.0 { 0.1 } else { -0.1 };
+            }
         });
+
+        // Apply zoom changes
+        if zoom_delta != 0.0 {
+            self.zoom_level = (self.zoom_level + zoom_delta).clamp(0.5, 3.0);
+        }
 
         if open_dialog {
             self.open_file_dialog();
@@ -436,10 +469,35 @@ impl eframe::App for MarkdownApp {
                         self.dark_mode = !self.dark_mode;
                         ui.close();
                     }
+
+                    ui.separator();
+
+                    if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
+                        self.zoom_level = (self.zoom_level + 0.1).min(3.0);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-")).clicked() {
+                        self.zoom_level = (self.zoom_level - 0.1).max(0.5);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0")).clicked() {
+                        self.zoom_level = 1.0;
+                        ui.close();
+                    }
                 });
 
                 // Show current file path on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Show zoom level if not at 100%
+                    if (self.zoom_level - 1.0).abs() > 0.01 {
+                        ui.label(
+                            egui::RichText::new(format!("{}%", (self.zoom_level * 100.0).round() as i32))
+                                .small()
+                                .color(ui.visuals().weak_text_color())
+                        );
+                        ui.separator();
+                    }
+
                     if self.watcher.is_some() {
                         ui.label(egui::RichText::new("● LIVE").color(egui::Color32::from_rgb(100, 200, 100)));
                         ui.separator();

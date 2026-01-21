@@ -15,9 +15,23 @@ A lightweight markdown viewer built with Rust, egui, and egui_commonmark.
 - Syntax highlighting for 200+ languages
 - Live file reload
 - Dark/Light theme
+- Zoom support (50% - 300%)
 - Native file dialogs
 - Drag and drop support
 - Cross-platform (Linux X11/Wayland)
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+O | Open file |
+| Ctrl+W | Toggle live reload |
+| Ctrl+D | Toggle dark/light mode |
+| Ctrl+Q | Quit |
+| Ctrl++ / Ctrl+= | Zoom in |
+| Ctrl+- | Zoom out |
+| Ctrl+0 | Reset zoom to 100% |
+| Ctrl+Scroll | Zoom with mouse wheel |
 
 ## Building
 
@@ -27,6 +41,9 @@ cargo build
 
 # Release build (optimized)
 cargo build --release
+
+# Build and install to ~/.local/bin
+make install
 ```
 
 ## Usage
