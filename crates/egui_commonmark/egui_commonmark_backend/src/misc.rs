@@ -96,18 +96,14 @@ impl CommonMarkOptions<'_> {
     }
 
     pub fn max_width(&self, ui: &Ui) -> f32 {
-        let max_image_width = self.max_image_width.unwrap_or(0) as f32;
         let available_width = ui.available_width();
 
-        let max_width = max_image_width.max(available_width);
+        // Use default_width as the preferred width, but never exceed available_width
+        // This ensures text wraps properly when the window is narrower than default_width
         if let Some(default_width) = self.default_width {
-            if default_width as f32 > max_width {
-                default_width as f32
-            } else {
-                max_width
-            }
+            (default_width as f32).min(available_width)
         } else {
-            max_width
+            available_width
         }
     }
 }
