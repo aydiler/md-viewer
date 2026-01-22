@@ -1149,6 +1149,7 @@ impl MarkdownApp {
                     }
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .id_salt("outline")
                         .show(ui, |ui| {
                             let mut toggle_index: Option<usize> = None;
                             // Only reserve space for fold indicators if any header has children
@@ -1301,7 +1302,11 @@ impl MarkdownApp {
             tab.last_content_height = scroll_output.content_size.y;
 
             // Manual scroll handling when wheel is used (works during selection)
-            if raw_scroll.abs() > 0.0 {
+            // Only apply if pointer is over the content area
+            let pointer_over_content = ui.ctx().input(|i| {
+                i.pointer.hover_pos().is_some_and(|pos| content_rect.contains(pos))
+            });
+            if raw_scroll.abs() > 0.0 && pointer_over_content {
                 let current_offset = scroll_output.state.offset.y;
                 let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
                 let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
@@ -1400,6 +1405,7 @@ impl MarkdownApp {
                 // File tree inside ScrollArea
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .id_salt("file_explorer")
                     .show(ui, |ui| {
                         // Collect open tab paths for highlighting
                         let open_paths: HashSet<PathBuf> = self.tabs.iter()
