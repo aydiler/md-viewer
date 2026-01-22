@@ -15,7 +15,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "mcp")]
-use egui_mcp_bridge::McpBridge;
+use egui_mcp_bridge::{McpBridge, McpResponseExt};
 
 const APP_KEY: &str = "md-viewer-state";
 const MAX_WATCHER_RETRIES: u32 = 3;
@@ -1379,19 +1379,32 @@ impl MarkdownApp {
                         if ui.small_button("↻").on_hover_text("Refresh").clicked() {
                             self.file_explorer.refresh();
                         }
-                        // Icon-only buttons need explicit registration since they
-                        // don't generate meaningful AccessKit labels
-                        let collapse_btn = ui.small_button("⊟").on_hover_text("Collapse all");
+                        // Icon-only buttons use managed responses to ensure MCP registration
                         #[cfg(feature = "mcp")]
-                        self.mcp_bridge.register_widget("Collapse All", "button", &collapse_btn, None);
-                        if collapse_btn.clicked() {
-                            self.file_explorer.collapse_all();
+                        {
+                            if ui.small_button("⊟").on_hover_text("Collapse all")
+                                .managed_as("collapse all button")
+                                .register_button(&self.mcp_bridge, "Collapse All")
+                                .clicked()
+                            {
+                                self.file_explorer.collapse_all();
+                            }
+                            if ui.small_button("⊞").on_hover_text("Expand all")
+                                .managed_as("expand all button")
+                                .register_button(&self.mcp_bridge, "Expand All")
+                                .clicked()
+                            {
+                                self.file_explorer.expand_all();
+                            }
                         }
-                        let expand_btn = ui.small_button("⊞").on_hover_text("Expand all");
-                        #[cfg(feature = "mcp")]
-                        self.mcp_bridge.register_widget("Expand All", "button", &expand_btn, None);
-                        if expand_btn.clicked() {
-                            self.file_explorer.expand_all();
+                        #[cfg(not(feature = "mcp"))]
+                        {
+                            if ui.small_button("⊟").on_hover_text("Collapse all").clicked() {
+                                self.file_explorer.collapse_all();
+                            }
+                            if ui.small_button("⊞").on_hover_text("Expand all").clicked() {
+                                self.file_explorer.expand_all();
+                            }
                         }
                     });
                 });
