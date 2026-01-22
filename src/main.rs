@@ -1520,6 +1520,8 @@ A lightweight markdown viewer built with **egui** and **egui_commonmark**.
 
 ## Keyboard Shortcuts
 
+### Tab Management
+
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+T | New tab (open file) |
@@ -1527,6 +1529,11 @@ A lightweight markdown viewer built with **egui** and **egui_commonmark**.
 | Ctrl+Tab | Next tab |
 | Ctrl+Shift+Tab | Previous tab |
 | Ctrl+1-9 | Switch to tab 1-9 |
+
+### Navigation
+
+| Shortcut | Action |
+|----------|--------|
 | Ctrl+Click | Open link in new tab |
 | Alt+← / Alt+→ | Navigate back/forward |
 
