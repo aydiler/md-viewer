@@ -1184,9 +1184,9 @@ impl MarkdownApp {
 
         egui::SidePanel::left("file_explorer")
             .resizable(true)
-            .default_width(220.0)
+            .default_width(200.0)
             .min_width(150.0)
-            .max_width(400.0)
+            .max_width(300.0)
             .frame(
                 egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                     left: 8,
@@ -1259,15 +1259,28 @@ impl MarkdownApp {
                     // File icon
                     ui.label("📄");
 
+                    // Truncate long filenames
+                    let max_len = 25;
+                    let display_name = if name.len() > max_len {
+                        format!("{}...", &name[..max_len])
+                    } else {
+                        name.clone()
+                    };
+
                     // Highlight if file is open in a tab
                     let is_open = open_paths.contains(path);
                     let text = if is_open {
-                        egui::RichText::new(name).strong()
+                        egui::RichText::new(&display_name).strong()
                     } else {
-                        egui::RichText::new(name)
+                        egui::RichText::new(&display_name)
                     };
 
-                    if ui.selectable_label(is_open, text).clicked() {
+                    let response = ui.selectable_label(is_open, text);
+                    // Show full name on hover if truncated
+                    if name.len() > max_len {
+                        response.clone().on_hover_text(name);
+                    }
+                    if response.clicked() {
                         file_to_open = Some(path.clone());
                     }
                 });
@@ -1288,8 +1301,18 @@ impl MarkdownApp {
                     let folder_icon = if is_expanded { "📂" } else { "📁" };
                     ui.label(folder_icon);
 
-                    // Folder name
-                    ui.label(name);
+                    // Truncate long folder names
+                    let max_len = 22;
+                    let display_name = if name.len() > max_len {
+                        format!("{}...", &name[..max_len])
+                    } else {
+                        name.clone()
+                    };
+                    let response = ui.label(&display_name);
+                    // Show full name on hover if truncated
+                    if name.len() > max_len {
+                        response.on_hover_text(name);
+                    }
                 });
 
                 // Render children if expanded
