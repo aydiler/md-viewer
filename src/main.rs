@@ -15,7 +15,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "mcp")]
-use egui_mcp_bridge::{McpBridge, McpResponseExt};
+use egui_mcp_bridge::{McpBridge, McpUiExt};
 
 const APP_KEY: &str = "md-viewer-state";
 const MAX_WATCHER_RETRIES: u32 = 3;
@@ -1116,7 +1116,7 @@ impl MarkdownApp {
                             // Collect Expand All button for MCP
                             #[cfg(feature = "mcp")]
                             widget_data.push((
-                                "Expand All".to_string(),
+                                "Outline: Expand All".to_string(),
                                 "button",
                                 expand_btn.rect,
                                 None,
@@ -1131,7 +1131,7 @@ impl MarkdownApp {
                             // Collect Collapse All button for MCP
                             #[cfg(feature = "mcp")]
                             widget_data.push((
-                                "Collapse All".to_string(),
+                                "Outline: Collapse All".to_string(),
                                 "button",
                                 collapse_btn.rect,
                                 None,
@@ -1363,55 +1363,41 @@ impl MarkdownApp {
                 }),
             )
             .show(ctx, |ui| {
-                // Header with folder name and refresh button
+                // Header with folder name - OUTSIDE ScrollArea
+                if let Some(root) = &self.file_explorer.root {
+                    let folder_name = root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| root.display().to_string());
+                    ui.strong(&folder_name);
+                } else {
+                    ui.strong("No folder");
+                }
+
+                // Expand/collapse/refresh buttons - OUTSIDE ScrollArea
                 ui.horizontal(|ui| {
-                    if let Some(root) = &self.file_explorer.root {
-                        let folder_name = root
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| root.display().to_string());
-                        ui.strong(&folder_name);
-                    } else {
-                        ui.strong("No folder");
+                    let expand_btn = ui.small_button("⊞").on_hover_text("Expand all directories");
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget("Explorer: Expand All", "button", &expand_btn, None);
+                    if expand_btn.clicked() {
+                        self.file_explorer.expand_all();
                     }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("↻").on_hover_text("Refresh").clicked() {
-                            self.file_explorer.refresh();
-                        }
-                        // Icon-only buttons use managed responses to ensure MCP registration
-                        #[cfg(feature = "mcp")]
-                        {
-                            if ui.small_button("⊟").on_hover_text("Collapse all")
-                                .managed_as("collapse all button")
-                                .register_button(&self.mcp_bridge, "Collapse All")
-                                .clicked()
-                            {
-                                self.file_explorer.collapse_all();
-                            }
-                            if ui.small_button("⊞").on_hover_text("Expand all")
-                                .managed_as("expand all button")
-                                .register_button(&self.mcp_bridge, "Expand All")
-                                .clicked()
-                            {
-                                self.file_explorer.expand_all();
-                            }
-                        }
-                        #[cfg(not(feature = "mcp"))]
-                        {
-                            if ui.small_button("⊟").on_hover_text("Collapse all").clicked() {
-                                self.file_explorer.collapse_all();
-                            }
-                            if ui.small_button("⊞").on_hover_text("Expand all").clicked() {
-                                self.file_explorer.expand_all();
-                            }
-                        }
-                    });
+                    let collapse_btn = ui.small_button("⊟").on_hover_text("Collapse all directories");
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget("Explorer: Collapse All", "button", &collapse_btn, None);
+                    if collapse_btn.clicked() {
+                        self.file_explorer.collapse_all();
+                    }
+
+                    if ui.small_button("↻").on_hover_text("Refresh").clicked() {
+                        self.file_explorer.refresh();
+                    }
                 });
 
                 ui.separator();
 
-                // File tree
+                // File tree inside ScrollArea
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1469,16 +1455,15 @@ impl MarkdownApp {
                         egui::RichText::new(&display_name)
                     };
 
-                    let response = ui.selectable_label(is_open, text);
-
-                    // Register file entry with MCP bridge
                     #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget(
-                        &format!("File: {}", name),
-                        "file",
-                        &response,
-                        Some(if is_open { "open" } else { "" }),
+                    let response = ui.mcp_selectable_label_with_value(
+                        format!("File: {}", name),
+                        is_open,
+                        text,
+                        if is_open { "open" } else { "" },
                     );
+                    #[cfg(not(feature = "mcp"))]
+                    let response = ui.selectable_label(is_open, text);
 
                     // Show full name on hover if truncated
                     if name.len() > max_len {
@@ -1497,16 +1482,12 @@ impl MarkdownApp {
 
                     // Expand/collapse indicator
                     let indicator = if is_expanded { "v" } else { ">" };
-                    let expand_btn = ui.small_button(indicator);
+                    let state_value = if is_expanded { "expanded" } else { "collapsed" };
 
-                    // Register expand button with MCP bridge
                     #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget(
-                        &format!("Toggle: {}", name),
-                        "button",
-                        &expand_btn,
-                        Some(if is_expanded { "expanded" } else { "collapsed" }),
-                    );
+                    let expand_btn = ui.mcp_small_button(format!("Toggle: {}", name), indicator);
+                    #[cfg(not(feature = "mcp"))]
+                    let expand_btn = ui.small_button(indicator);
 
                     if expand_btn.clicked() {
                         self.file_explorer.toggle_expanded(path);
@@ -1523,16 +1504,11 @@ impl MarkdownApp {
                     } else {
                         name.clone()
                     };
-                    let response = ui.label(&display_name);
 
-                    // Register directory label with MCP bridge (informational, not clickable)
                     #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget(
-                        &format!("Directory: {}", name),
-                        "label",
-                        &response,
-                        Some(if is_expanded { "expanded" } else { "collapsed" }),
-                    );
+                    let response = ui.mcp_label(format!("Directory: {}", name), &display_name, Some(state_value));
+                    #[cfg(not(feature = "mcp"))]
+                    let response = ui.label(&display_name);
 
                     // Show full name on hover if truncated
                     if name.len() > max_len {
@@ -1582,6 +1558,7 @@ impl eframe::App for MarkdownApp {
         {
             ctx.enable_accesskit();
             self.mcp_bridge.begin_frame();
+            self.mcp_bridge.store_in_context(ctx); // Enable McpUiExt methods
             ctx.request_repaint(); // Keep processing MCP commands
         }
 
@@ -1634,7 +1611,8 @@ impl eframe::App for MarkdownApp {
             style.scroll_animation.points_per_second = 1500.0; // Faster scroll (default: 1000)
         });
 
-        ctx.set_zoom_factor(self.zoom_level);
+        // TEMP: Disable zoom for MCP testing debug
+        // ctx.set_zoom_factor(self.zoom_level);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
 
         // Handle keyboard shortcuts
