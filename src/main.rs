@@ -862,7 +862,6 @@ impl MarkdownApp {
         // Outline sidebar
         if self.show_outline && !tab.outline_headers.is_empty() {
             let is_dragging = ui.ctx().input(|i| i.pointer.any_down());
-            let sidebar_title = tab.document_title.as_deref().unwrap_or("Outline");
 
             egui::SidePanel::right("outline")
                 .resizable(true)
@@ -873,21 +872,11 @@ impl MarkdownApp {
                     egui::Frame::side_top_panel(&ui.ctx().style()).inner_margin(egui::Margin {
                         left: 8,
                         right: 0,
-                        top: 0,
+                        top: 8,
                         bottom: 0,
                     }),
                 )
                 .show_inside(ui, |ui| {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.set_max_width(ui.available_width());
-                        ui.add_space(6.0);
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(sidebar_title).heading())
-                                .truncate(),
-                        );
-                    });
-                    ui.separator();
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
