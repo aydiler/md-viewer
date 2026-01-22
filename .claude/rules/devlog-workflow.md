@@ -22,9 +22,18 @@ docs/devlog/
 
 ## When to Create
 
-1. **At feature start**: Create from template, fill Summary and Features checklist
+1. **At worktree creation**: Copy TEMPLATE.md immediately (see worktree-workflow.md)
 2. **During implementation**: Document discoveries as you learn them
 3. **At completion**: Update status, add architecture details, note future improvements
+
+## What Requires a Devlog
+
+Create a devlog for ANY work that:
+- Adds new structs, fields, or functions
+- Changes user-visible behavior
+- Introduces new API usage patterns
+
+**"Phase A/B/C" designations don't exempt documentation. Infrastructure is a feature.**
 
 ## Key Sections to Always Include
 
