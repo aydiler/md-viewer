@@ -51,6 +51,8 @@ struct Tab {
     cache: CommonMarkCache,
     document_title: Option<String>,
     outline_headers: Vec<Header>,
+    /// Set of header indices that are collapsed in the outline
+    collapsed_headers: HashSet<usize>,
     scroll_offset: f32,
     pending_scroll_offset: Option<f32>,
     last_content_height: f32,
@@ -79,6 +81,7 @@ impl Tab {
             cache,
             document_title: parsed.document_title,
             outline_headers: parsed.outline_headers,
+            collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             last_content_height: 0.0,
@@ -107,6 +110,7 @@ impl Tab {
             cache,
             document_title: parsed.document_title,
             outline_headers: parsed.outline_headers,
+            collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             last_content_height: 0.0,
@@ -138,6 +142,7 @@ impl Tab {
             let parsed = parse_headers(&self.content);
             self.document_title = parsed.document_title;
             self.outline_headers = parsed.outline_headers;
+            self.collapsed_headers.clear();
 
             self.local_links = parse_local_links(&self.content);
             for link in &self.local_links {
@@ -164,6 +169,7 @@ impl Tab {
             let parsed = parse_headers(&self.content);
             self.document_title = parsed.document_title;
             self.outline_headers = parsed.outline_headers;
+            self.collapsed_headers.clear();
 
             self.local_links = parse_local_links(&self.content);
             for link in &self.local_links {
@@ -325,6 +331,55 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         document_title,
         outline_headers,
     }
+}
+
+/// Check if header at `index` should be hidden because an ancestor is collapsed
+fn header_is_hidden(headers: &[Header], index: usize, collapsed: &HashSet<usize>) -> bool {
+    if index == 0 || index >= headers.len() {
+        return false;
+    }
+    let mut search_level = headers[index].level;
+    // Walk backwards to find ancestors
+    for i in (0..index).rev() {
+        let h = &headers[i];
+        // Only consider headers with lower level than what we're searching for
+        if h.level < search_level {
+            // Found an ancestor
+            if collapsed.contains(&i) {
+                return true;
+            }
+            // This ancestor is not collapsed, but check its ancestors too
+            // Update search_level to only look for even lower level headers
+            search_level = h.level;
+        }
+        // Headers at same or higher level are siblings/cousins, skip them
+    }
+    false
+}
+
+/// Check if a header has any children (headers with higher level immediately following)
+fn header_has_children(headers: &[Header], index: usize) -> bool {
+    if index >= headers.len() {
+        return false;
+    }
+    let current_level = headers[index].level;
+    // Look at the next header
+    if let Some(next) = headers.get(index + 1) {
+        // A child has a higher level number (e.g., h3 is child of h2)
+        next.level > current_level
+    } else {
+        false
+    }
+}
+
+/// Check if any header in the list has children
+fn any_header_has_children(headers: &[Header]) -> bool {
+    for i in 0..headers.len() {
+        if header_has_children(headers, i) {
+            return true;
+        }
+    }
+    false
 }
 
 #[global_allocator]
@@ -836,17 +891,73 @@ impl MarkdownApp {
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
-                            for header in &tab.outline_headers {
+                            let mut toggle_index: Option<usize> = None;
+                            // Only reserve space for fold indicators if any header has children
+                            let show_fold_indicators = any_header_has_children(&tab.outline_headers);
+                            for (idx, header) in tab.outline_headers.iter().enumerate() {
+                                // Skip headers hidden by collapsed ancestors
+                                if header_is_hidden(&tab.outline_headers, idx, &tab.collapsed_headers) {
+                                    continue;
+                                }
+
+                                let has_children = header_has_children(&tab.outline_headers, idx);
+                                let is_collapsed = tab.collapsed_headers.contains(&idx);
+
+                                // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
                                 let indent = (header.level.saturating_sub(2) as usize) * 12;
-                                let prefix = " ".repeat(indent / 4);
-                                let display_text = if header.title.len() > 40 {
-                                    format!("{}{}...", prefix, &header.title[..37])
+
+                                ui.horizontal(|ui| {
+                                    // Add base indent
+                                    if indent > 0 {
+                                        ui.add_space(indent as f32);
+                                    }
+
+                                    // Fold indicator (fixed width area for alignment)
+                                    // Only allocate space if any header has children
+                                    if show_fold_indicators {
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            egui::vec2(20.0, 20.0),
+                                            egui::Sense::click()
+                                        );
+                                        if has_children {
+                                            let indicator = if is_collapsed { "+" } else { "-" };
+                                            let text_color = if response.hovered() {
+                                                ui.visuals().strong_text_color()
+                                            } else {
+                                                ui.visuals().text_color()
+                                            };
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                indicator,
+                                                egui::FontId::monospace(16.0),
+                                                text_color,
+                                            );
+                                            if !is_dragging && response.clicked() {
+                                                toggle_index = Some(idx);
+                                            }
+                                        }
+                                    }
+
+                                    // Header title
+                                    let display_text = if header.title.len() > 35 {
+                                        format!("{}...", &header.title[..32])
+                                    } else {
+                                        header.title.clone()
+                                    };
+
+                                    let response = ui.selectable_label(false, &display_text);
+                                    if !is_dragging && response.clicked() {
+                                        clicked_header_title = Some(header.title.clone());
+                                    }
+                                });
+                            }
+                            // Apply toggle after iteration to avoid borrow issues
+                            if let Some(idx) = toggle_index {
+                                if tab.collapsed_headers.contains(&idx) {
+                                    tab.collapsed_headers.remove(&idx);
                                 } else {
-                                    format!("{}{}", prefix, &header.title)
-                                };
-                                let response = ui.selectable_label(false, &display_text);
-                                if !is_dragging && response.clicked() {
-                                    clicked_header_title = Some(header.title.clone());
+                                    tab.collapsed_headers.insert(idx);
                                 }
                             }
                         });
