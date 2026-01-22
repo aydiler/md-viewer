@@ -23,6 +23,7 @@ struct PersistedState {
     last_file: Option<PathBuf>,
     zoom_level: Option<f32>,
     show_outline: Option<bool>,
+    show_minimap: Option<bool>,
 }
 
 /// Represents a markdown header for the outline
@@ -31,6 +32,25 @@ struct Header {
     level: u8,
     title: String,
     line_number: usize,
+}
+
+/// Content block type for minimap coloring
+#[derive(Clone, Copy, PartialEq)]
+enum BlockType {
+    Header(u8),    // level 1-6
+    CodeBlock,
+    ListItem,
+    Blockquote,
+    Text,
+    Blank,
+}
+
+/// A block of content for minimap rendering
+#[derive(Clone)]
+struct MinimapBlock {
+    block_type: BlockType,
+    start_line: usize,
+    line_count: usize,
 }
 
 /// Result of parsing markdown headers
@@ -232,6 +252,105 @@ fn is_local_markdown_link(destination: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Parse markdown content into blocks for minimap rendering.
+/// Groups consecutive lines of the same type for efficient rendering.
+fn parse_minimap_blocks(content: &str) -> Vec<MinimapBlock> {
+    let header_re = Regex::new(r"^(#{1,6})\s+").unwrap();
+    let mut blocks = Vec::new();
+    let mut in_code_block = false;
+    let mut current_type: Option<BlockType> = None;
+    let mut current_start = 0;
+    let mut current_count = 0;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+
+        // Detect code block boundaries
+        if trimmed.starts_with("```") {
+            // Finish current block before code fence
+            if let Some(bt) = current_type.take() {
+                if current_count > 0 {
+                    blocks.push(MinimapBlock {
+                        block_type: bt,
+                        start_line: current_start,
+                        line_count: current_count,
+                    });
+                }
+            }
+
+            if in_code_block {
+                // End of code block - this line is part of code
+                in_code_block = false;
+                current_type = None;
+                current_count = 0;
+            } else {
+                // Start of code block
+                in_code_block = true;
+                current_type = Some(BlockType::CodeBlock);
+                current_start = line_num;
+                current_count = 1;
+            }
+            continue;
+        }
+
+        // Determine line type
+        let line_type = if in_code_block {
+            BlockType::CodeBlock
+        } else if line.is_empty() {
+            BlockType::Blank
+        } else if let Some(caps) = header_re.captures(line) {
+            BlockType::Header(caps[1].len() as u8)
+        } else if trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+            || trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                && trimmed.contains(". ")
+        {
+            BlockType::ListItem
+        } else if trimmed.starts_with('>') {
+            BlockType::Blockquote
+        } else {
+            BlockType::Text
+        };
+
+        // Accumulate same-type lines or start new block
+        match current_type {
+            Some(bt) if std::mem::discriminant(&bt) == std::mem::discriminant(&line_type) => {
+                current_count += 1;
+            }
+            _ => {
+                // Finish previous block
+                if let Some(bt) = current_type.take() {
+                    if current_count > 0 {
+                        blocks.push(MinimapBlock {
+                            block_type: bt,
+                            start_line: current_start,
+                            line_count: current_count,
+                        });
+                    }
+                }
+                // Start new block
+                current_type = Some(line_type);
+                current_start = line_num;
+                current_count = 1;
+            }
+        }
+    }
+
+    // Finish last block
+    if let Some(bt) = current_type {
+        if current_count > 0 {
+            blocks.push(MinimapBlock {
+                block_type: bt,
+                start_line: current_start,
+                line_count: current_count,
+            });
+        }
+    }
+
+    blocks
+}
+
 /// Parse markdown headers from content, skipping code blocks.
 /// Extracts the first h1 as document title and returns remaining headers for outline.
 fn parse_headers(content: &str) -> ParsedHeaders {
@@ -337,11 +456,16 @@ struct MarkdownApp {
     show_outline: bool,
     pending_scroll_offset: Option<f32>,
     last_content_height: f32,
+    last_viewport_height: f32,
     // Navigation history for link following
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
     // Cached local links for the current document
     local_links: Vec<String>,
+    // Minimap state
+    show_minimap: bool,
+    minimap_blocks: Vec<MinimapBlock>,
+    minimap_pending_scroll: Option<f32>,
     // Child windows for multi-window support
     child_windows: Vec<ChildWindow>,
     next_child_id: u64,
@@ -364,8 +488,12 @@ impl MarkdownApp {
         // Use persisted show_outline, default to true (visible by default)
         let show_outline = persisted.show_outline.unwrap_or(true);
 
+        // Use persisted show_minimap, default to true (visible by default)
+        let show_minimap = persisted.show_minimap.unwrap_or(true);
+
         let parsed = parse_headers(SAMPLE_MARKDOWN);
         let local_links = parse_local_links(SAMPLE_MARKDOWN);
+        let minimap_blocks = parse_minimap_blocks(SAMPLE_MARKDOWN);
         let mut app = Self {
             cache: CommonMarkCache::default(),
             content: SAMPLE_MARKDOWN.to_string(),
@@ -385,9 +513,13 @@ impl MarkdownApp {
             show_outline,
             pending_scroll_offset: None,
             last_content_height: 0.0,
+            last_viewport_height: 0.0,
             history_back: Vec::new(),
             history_forward: Vec::new(),
             local_links,
+            show_minimap,
+            minimap_blocks,
+            minimap_pending_scroll: None,
             child_windows: Vec::new(),
             next_child_id: 0,
         };
@@ -439,6 +571,9 @@ impl MarkdownApp {
                 for link in &self.local_links {
                     self.cache.add_link_hook(link);
                 }
+
+                // Parse minimap blocks for document overview
+                self.minimap_blocks = parse_minimap_blocks(&self.content);
 
                 if had_invalid_utf8 {
                     self.error_message = Some("Warning: File contains invalid UTF-8 characters (replaced with �)".to_string());
@@ -701,6 +836,44 @@ impl MarkdownApp {
         !self.history_forward.is_empty()
     }
 
+    /// Get the color for a minimap block based on its type and theme
+    /// Colors are muted and subtle - headers stand out as navigation landmarks
+    fn block_color(block_type: BlockType, dark_mode: bool) -> egui::Color32 {
+        if dark_mode {
+            match block_type {
+                // Headers: amber/orange tones - primary landmarks
+                BlockType::Header(1) => egui::Color32::from_rgb(0xF5, 0xA6, 0x23), // Bright amber
+                BlockType::Header(2) => egui::Color32::from_rgb(0xD9, 0x8C, 0x2E), // Medium amber
+                BlockType::Header(_) => egui::Color32::from_rgb(0xA8, 0x83, 0x4A), // Muted amber
+                // Code: blue-tinted gray - distinct but not distracting
+                BlockType::CodeBlock => egui::Color32::from_rgb(0x4A, 0x55, 0x68), // Slate blue-gray
+                // Lists: subtle cool gray
+                BlockType::ListItem => egui::Color32::from_rgb(0x64, 0x6E, 0x7A), // Cool gray
+                // Blockquotes: muted teal
+                BlockType::Blockquote => egui::Color32::from_rgb(0x5A, 0x7A, 0x7A), // Muted teal
+                // Text: very subtle, almost background
+                BlockType::Text => egui::Color32::from_rgb(0x45, 0x48, 0x4D), // Dark gray
+                BlockType::Blank => egui::Color32::TRANSPARENT,
+            }
+        } else {
+            match block_type {
+                // Headers: amber/orange tones - primary landmarks
+                BlockType::Header(1) => egui::Color32::from_rgb(0xD9, 0x73, 0x06), // Bright amber
+                BlockType::Header(2) => egui::Color32::from_rgb(0xB4, 0x6A, 0x1C), // Medium amber
+                BlockType::Header(_) => egui::Color32::from_rgb(0x92, 0x72, 0x3A), // Muted amber
+                // Code: blue-tinted gray
+                BlockType::CodeBlock => egui::Color32::from_rgb(0x64, 0x74, 0x8B), // Slate blue-gray
+                // Lists: subtle warm gray
+                BlockType::ListItem => egui::Color32::from_rgb(0x9C, 0xA3, 0xAF), // Warm gray
+                // Blockquotes: muted sage
+                BlockType::Blockquote => egui::Color32::from_rgb(0x7C, 0x9A, 0x8E), // Sage green
+                // Text: subtle light gray
+                BlockType::Text => egui::Color32::from_rgb(0xC8, 0xCC, 0xD0), // Light gray
+                BlockType::Blank => egui::Color32::TRANSPARENT,
+            }
+        }
+    }
+
     /// Resolve a link relative to the current file
     fn resolve_link(&self, link: &str) -> Option<PathBuf> {
         if link.starts_with('#') {
@@ -752,6 +925,7 @@ impl eframe::App for MarkdownApp {
             last_file: self.current_file.clone(),
             zoom_level: Some(self.zoom_level),
             show_outline: Some(self.show_outline),
+            show_minimap: Some(self.show_minimap),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -811,6 +985,7 @@ impl eframe::App for MarkdownApp {
         let mut toggle_watch = false;
         let mut toggle_dark = false;
         let mut toggle_outline = false;
+        let mut toggle_minimap = false;
         let mut quit_app = false;
         let mut zoom_delta: f32 = 0.0;
         let mut go_back = false;
@@ -824,6 +999,10 @@ impl eframe::App for MarkdownApp {
             // Ctrl+Shift+O: Toggle outline
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
                 toggle_outline = true;
+            }
+            // Ctrl+M: Toggle minimap
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::M) {
+                toggle_minimap = true;
             }
             // Ctrl+W: Toggle watch
             if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
@@ -884,6 +1063,9 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_outline {
             self.show_outline = !self.show_outline;
+        }
+        if toggle_minimap {
+            self.show_minimap = !self.show_minimap;
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -971,6 +1153,12 @@ impl eframe::App for MarkdownApp {
                     let outline_text = if self.show_outline { "✓ Show Outline" } else { "Show Outline" };
                     if ui.add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O")).clicked() {
                         self.show_outline = !self.show_outline;
+                        ui.close();
+                    }
+
+                    let minimap_text = if self.show_minimap { "✓ Show Minimap" } else { "Show Minimap" };
+                    if ui.add(egui::Button::new(minimap_text).shortcut_text("Ctrl+M")).clicked() {
+                        self.show_minimap = !self.show_minimap;
                         ui.close();
                     }
 
@@ -1076,6 +1264,113 @@ impl eframe::App for MarkdownApp {
             }
         }
 
+        // Minimap sidebar (right side)
+        if self.show_minimap && self.content_lines > 0 {
+            let content_height = self.last_content_height;
+            let scroll_offset = self.scroll_offset;
+            let viewport_height = self.last_viewport_height;
+            let content_lines = self.content_lines;
+            let dark_mode = self.dark_mode;
+
+            egui::SidePanel::right("minimap")
+                .resizable(false)
+                .exact_width(80.0)
+                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::same(2)))
+                .show(ctx, |ui| {
+                    let available_height = ui.available_height();
+
+                    // Allocate painter for the minimap
+                    let (response, painter) = ui.allocate_painter(
+                        egui::vec2(76.0, available_height),
+                        egui::Sense::click_and_drag(),
+                    );
+
+                    let minimap_rect = response.rect;
+
+                    // Calculate scale: how many pixels per line
+                    let scale = if content_height > 0.0 {
+                        minimap_rect.height() / content_height
+                    } else {
+                        1.0
+                    };
+
+                    // Draw content blocks as colored rectangles
+                    for block in &self.minimap_blocks {
+                        let color = Self::block_color(block.block_type, dark_mode);
+
+                        // Calculate position based on line number ratio
+                        let y_ratio = block.start_line as f32 / content_lines as f32;
+                        let height_ratio = block.line_count as f32 / content_lines as f32;
+
+                        let block_y = minimap_rect.top() + y_ratio * minimap_rect.height();
+                        let block_height = (height_ratio * minimap_rect.height()).max(2.0);
+
+                        // Vary width based on block type for visual interest
+                        let (x_offset, width) = match block.block_type {
+                            BlockType::Header(_) => (2.0, 72.0),
+                            BlockType::CodeBlock => (8.0, 60.0),
+                            BlockType::ListItem => (12.0, 56.0),
+                            BlockType::Blockquote => (6.0, 64.0),
+                            BlockType::Text => (4.0, 68.0),
+                            BlockType::Blank => continue, // Skip blank lines
+                        };
+
+                        let block_rect = egui::Rect::from_min_size(
+                            egui::pos2(minimap_rect.left() + x_offset, block_y),
+                            egui::vec2(width, block_height),
+                        );
+                        painter.rect_filled(block_rect, 1.0, color);
+                    }
+
+                    // Draw viewport indicator (semi-transparent rectangle showing visible area)
+                    if content_height > 0.0 && viewport_height > 0.0 {
+                        // Calculate viewport position and size in minimap coordinates
+                        let viewport_y = minimap_rect.top() + scroll_offset * scale;
+                        let viewport_h = (viewport_height * scale).min(minimap_rect.height());
+
+                        let viewport_rect = egui::Rect::from_min_size(
+                            egui::pos2(minimap_rect.left(), viewport_y),
+                            egui::vec2(minimap_rect.width(), viewport_h),
+                        );
+
+                        // Draw viewport indicator
+                        let indicator_color = if dark_mode {
+                            egui::Color32::from_white_alpha(30)
+                        } else {
+                            egui::Color32::from_black_alpha(20)
+                        };
+                        painter.rect_filled(viewport_rect, 0.0, indicator_color);
+
+                        // Draw border
+                        let border_color = if dark_mode {
+                            egui::Color32::from_white_alpha(60)
+                        } else {
+                            egui::Color32::from_black_alpha(40)
+                        };
+                        painter.rect_stroke(viewport_rect, 0.0, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Outside);
+                    }
+
+                    // Handle click-to-navigate
+                    if response.clicked() || response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let local_y = pos.y - minimap_rect.top();
+                            let ratio = local_y / minimap_rect.height();
+
+                            // Calculate target scroll position (center viewport on click)
+                            let target_scroll = (ratio * content_height - viewport_height / 2.0)
+                                .clamp(0.0, (content_height - viewport_height).max(0.0));
+
+                            self.minimap_pending_scroll = Some(target_scroll);
+                        }
+                    }
+                });
+        }
+
+        // Apply minimap scroll if set
+        if let Some(offset) = self.minimap_pending_scroll.take() {
+            self.pending_scroll_offset = Some(offset);
+        }
+
         // Main content panel
         let mut clear_error = false;
         egui::CentralPanel::default()
@@ -1106,8 +1401,9 @@ impl eframe::App for MarkdownApp {
             }
 
             let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
-                // Track scroll position for potential future optimizations
+                // Track scroll position and viewport height for minimap sync
                 self.scroll_offset = viewport.min.y;
+                self.last_viewport_height = viewport.height();
 
                 CommonMarkViewer::new()
                     .max_image_width(Some(800))
