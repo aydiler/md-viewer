@@ -857,8 +857,8 @@ impl MarkdownApp {
         if let Some(title) = clicked_header_title {
             // Look up actual rendered position from cache
             if let Some(y_pos) = tab.cache.get_header_position(&title) {
-                // Subtract small offset so header appears slightly below top edge
-                tab.pending_scroll_offset = Some((y_pos - 25.0).max(0.0));
+                // Subtract offset so header appears slightly below top edge
+                tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
             }
         }
 
