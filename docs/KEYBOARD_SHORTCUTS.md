@@ -6,6 +6,7 @@
 | Ctrl+W | Toggle file watching |
 | Ctrl+D | Toggle dark/light mode |
 | Ctrl+Shift+O | Toggle outline sidebar |
+| Ctrl+M | Toggle minimap |
 | Ctrl+Q | Quit application |
 | Ctrl++ / Ctrl+= | Zoom in |
 | Ctrl+- | Zoom out |

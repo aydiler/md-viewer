@@ -60,6 +60,28 @@ struct MarkdownApp {
 
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/typography.rs`
 
+### egui 0.33 Painter API changes
+**Context:** Implementing minimap with custom drawing
+**Changes:**
+- `screen_rect()` deprecated - use `available_rect()` or `content_rect()`
+- `rect_stroke()` now requires 4th argument: `StrokeKind` (Inside, Outside, Middle)
+```rust
+painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
+```
+**Files:** `src/main.rs`
+
+### allocate_painter for custom drawing
+**Context:** Drawing minimap blocks
+**Pattern:** Use `ui.allocate_painter(size, sense)` to get painter and response:
+```rust
+let (response, painter) = ui.allocate_painter(
+    egui::vec2(width, height),
+    egui::Sense::click_and_drag(),
+);
+painter.rect_filled(rect, rounding, color);
+```
+**Files:** `src/main.rs`
+
 ---
 
 ## notify / File Watching
