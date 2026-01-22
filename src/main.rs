@@ -9,8 +9,8 @@ use std::time::Duration;
 use clap::Parser;
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use notify::RecommendedWatcher;
+use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -21,10 +21,10 @@ const MAX_WATCHER_RETRIES: u32 = 3;
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedState {
     dark_mode: Option<bool>,
-    last_file: Option<PathBuf>,
     zoom_level: Option<f32>,
     show_outline: Option<bool>,
-    show_minimap: Option<bool>,
+    open_tabs: Option<Vec<PathBuf>>,
+    active_tab: Option<usize>,
 }
 
 /// Represents a markdown header for the outline
@@ -35,25 +35,6 @@ struct Header {
     line_number: usize,
 }
 
-/// Content block type for minimap coloring
-#[derive(Clone, Copy, PartialEq)]
-enum BlockType {
-    Header(u8),    // level 1-6
-    CodeBlock,
-    ListItem,
-    Blockquote,
-    Text,
-    Blank,
-}
-
-/// A block of content for minimap rendering
-#[derive(Clone)]
-struct MinimapBlock {
-    block_type: BlockType,
-    start_line: usize,
-    line_count: usize,
-}
-
 /// Result of parsing markdown headers
 struct ParsedHeaders {
     /// Document title (first h1, if any)
@@ -62,28 +43,25 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
-/// A child window displaying a markdown file
-struct ChildWindow {
-    id: egui::ViewportId,
+/// Per-tab state for a document
+struct Tab {
+    id: egui::Id,
     path: PathBuf,
     content: String,
     cache: CommonMarkCache,
-    open: bool,
     document_title: Option<String>,
     outline_headers: Vec<Header>,
-    /// Set of header indices that are collapsed in the outline
-    collapsed_headers: HashSet<usize>,
     scroll_offset: f32,
-    last_content_height: f32,
     pending_scroll_offset: Option<f32>,
+    last_content_height: f32,
     content_lines: usize,
     local_links: Vec<String>,
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
 }
 
-impl ChildWindow {
-    fn new(id: egui::ViewportId, path: PathBuf) -> Self {
+impl Tab {
+    fn new(path: PathBuf) -> Self {
         let content = fs::read_to_string(&path).unwrap_or_default();
         let parsed = parse_headers(&content);
         let local_links = parse_local_links(&content);
@@ -95,17 +73,15 @@ impl ChildWindow {
         }
 
         Self {
-            id,
+            id: egui::Id::new(&path),
             path,
             content,
             cache,
-            open: true,
             document_title: parsed.document_title,
             outline_headers: parsed.outline_headers,
-            collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
-            last_content_height: 0.0,
             pending_scroll_offset: None,
+            last_content_height: 0.0,
             content_lines,
             local_links,
             history_back: Vec::new(),
@@ -113,11 +89,61 @@ impl ChildWindow {
         }
     }
 
-    fn window_title(&self) -> String {
-        let filename = self.path.file_name()
+    fn from_sample() -> Self {
+        let content = SAMPLE_MARKDOWN.to_string();
+        let parsed = parse_headers(&content);
+        let local_links = parse_local_links(&content);
+        let content_lines = content.lines().count();
+
+        let mut cache = CommonMarkCache::default();
+        for link in &local_links {
+            cache.add_link_hook(link);
+        }
+
+        Self {
+            id: egui::Id::new("sample"),
+            path: PathBuf::from("Welcome"),
+            content,
+            cache,
+            document_title: parsed.document_title,
+            outline_headers: parsed.outline_headers,
+            scroll_offset: 0.0,
+            pending_scroll_offset: None,
+            last_content_height: 0.0,
+            content_lines,
+            local_links,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+        }
+    }
+
+    fn title(&self) -> String {
+        self.path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
-        format!("{} - Markdown Viewer", filename)
+            .unwrap_or_else(|| "Unknown".to_string())
+    }
+
+    fn reload(&mut self) {
+        if !self.path.exists() {
+            return;
+        }
+
+        if let Ok(bytes) = fs::read(&self.path) {
+            let content = String::from_utf8_lossy(&bytes);
+            self.content_lines = content.lines().count();
+            self.content = content.into_owned();
+            self.cache = CommonMarkCache::default();
+
+            let parsed = parse_headers(&self.content);
+            self.document_title = parsed.document_title;
+            self.outline_headers = parsed.outline_headers;
+
+            self.local_links = parse_local_links(&self.content);
+            for link in &self.local_links {
+                self.cache.add_link_hook(link);
+            }
+        }
     }
 
     fn load_file(&mut self, path: &PathBuf) {
@@ -130,12 +156,14 @@ impl ChildWindow {
             self.content_lines = content.lines().count();
             self.content = content.into_owned();
             self.path = path.clone();
+            self.id = egui::Id::new(path);
             self.cache = CommonMarkCache::default();
+            self.scroll_offset = 0.0;
+            self.pending_scroll_offset = None;
 
             let parsed = parse_headers(&self.content);
             self.document_title = parsed.document_title;
             self.outline_headers = parsed.outline_headers;
-            self.collapsed_headers.clear();
 
             self.local_links = parse_local_links(&self.content);
             for link in &self.local_links {
@@ -166,7 +194,7 @@ impl ChildWindow {
         self.load_file(&target_path);
     }
 
-    fn check_link_hooks(&mut self) -> Option<String> {
+    fn check_link_hooks(&self) -> Option<String> {
         for link in &self.local_links {
             if let Some(true) = self.cache.get_link_hook(link) {
                 return Some(link.clone());
@@ -196,32 +224,37 @@ impl ChildWindow {
             self.load_file(&next_path);
         }
     }
+
+    fn resolve_link(&self, link: &str) -> Option<PathBuf> {
+        if link.starts_with('#') {
+            return None;
+        }
+
+        let current_dir = self.path.parent()?;
+        let path_part = link.split('#').next().unwrap_or(link);
+        let target_path = current_dir.join(path_part);
+        target_path.canonicalize().ok()
+    }
 }
 
 /// Parse local markdown file links and anchor links from content, skipping code blocks.
-/// Returns a list of link destinations that should be handled internally (not opened in browser).
 fn parse_local_links(content: &str) -> Vec<String> {
-    // Match markdown links: [text](destination)
     let link_re = Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
     let mut links = Vec::new();
     let mut in_code_block = false;
 
     for line in content.lines() {
-        // Toggle code block state on fence lines
         if line.trim_start().starts_with("```") {
             in_code_block = !in_code_block;
             continue;
         }
 
-        // Skip lines inside code blocks
         if in_code_block {
             continue;
         }
 
-        // Find all links in the line
         for cap in link_re.captures_iter(line) {
             let destination = &cap[2];
-            // Check if it's a local file link or anchor-only link
             if is_local_markdown_link(destination) || destination.starts_with('#') {
                 links.push(destination.to_string());
             }
@@ -233,21 +266,17 @@ fn parse_local_links(content: &str) -> Vec<String> {
 
 /// Check if a link destination points to a local markdown file
 fn is_local_markdown_link(destination: &str) -> bool {
-    // Skip external links (http, https, mailto, etc.)
     if destination.starts_with("http://")
         || destination.starts_with("https://")
         || destination.starts_with("mailto:")
         || destination.starts_with("tel:")
         || destination.starts_with("ftp://")
-        || destination.starts_with('#')  // Skip anchor-only links
+        || destination.starts_with('#')
     {
         return false;
     }
 
-    // Remove anchor part if present (e.g., "file.md#heading" -> "file.md")
     let path_part = destination.split('#').next().unwrap_or(destination);
-
-    // Check if it ends with a markdown extension
     let path = std::path::Path::new(path_part);
     path.extension()
         .map(|ext| {
@@ -257,125 +286,22 @@ fn is_local_markdown_link(destination: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Parse markdown content into blocks for minimap rendering.
-/// Groups consecutive lines of the same type for efficient rendering.
-fn parse_minimap_blocks(content: &str) -> Vec<MinimapBlock> {
-    let header_re = Regex::new(r"^(#{1,6})\s+").unwrap();
-    let mut blocks = Vec::new();
-    let mut in_code_block = false;
-    let mut current_type: Option<BlockType> = None;
-    let mut current_start = 0;
-    let mut current_count = 0;
-
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim_start();
-
-        // Detect code block boundaries
-        if trimmed.starts_with("```") {
-            // Finish current block before code fence
-            if let Some(bt) = current_type.take() {
-                if current_count > 0 {
-                    blocks.push(MinimapBlock {
-                        block_type: bt,
-                        start_line: current_start,
-                        line_count: current_count,
-                    });
-                }
-            }
-
-            if in_code_block {
-                // End of code block - this line is part of code
-                in_code_block = false;
-                current_type = None;
-                current_count = 0;
-            } else {
-                // Start of code block
-                in_code_block = true;
-                current_type = Some(BlockType::CodeBlock);
-                current_start = line_num;
-                current_count = 1;
-            }
-            continue;
-        }
-
-        // Determine line type
-        let line_type = if in_code_block {
-            BlockType::CodeBlock
-        } else if line.is_empty() {
-            BlockType::Blank
-        } else if let Some(caps) = header_re.captures(line) {
-            BlockType::Header(caps[1].len() as u8)
-        } else if trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ")
-            || trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                && trimmed.contains(". ")
-        {
-            BlockType::ListItem
-        } else if trimmed.starts_with('>') {
-            BlockType::Blockquote
-        } else {
-            BlockType::Text
-        };
-
-        // Accumulate same-type lines or start new block
-        match current_type {
-            Some(bt) if std::mem::discriminant(&bt) == std::mem::discriminant(&line_type) => {
-                current_count += 1;
-            }
-            _ => {
-                // Finish previous block
-                if let Some(bt) = current_type.take() {
-                    if current_count > 0 {
-                        blocks.push(MinimapBlock {
-                            block_type: bt,
-                            start_line: current_start,
-                            line_count: current_count,
-                        });
-                    }
-                }
-                // Start new block
-                current_type = Some(line_type);
-                current_start = line_num;
-                current_count = 1;
-            }
-        }
-    }
-
-    // Finish last block
-    if let Some(bt) = current_type {
-        if current_count > 0 {
-            blocks.push(MinimapBlock {
-                block_type: bt,
-                start_line: current_start,
-                line_count: current_count,
-            });
-        }
-    }
-
-    blocks
-}
-
 /// Parse markdown headers from content, skipping code blocks.
-/// Extracts the first h1 as document title and returns remaining headers for outline.
 fn parse_headers(content: &str) -> ParsedHeaders {
     let re = Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
     let mut all_headers = Vec::new();
     let mut in_code_block = false;
 
     for (line_number, line) in content.lines().enumerate() {
-        // Toggle code block state on fence lines
         if line.trim_start().starts_with("```") {
             in_code_block = !in_code_block;
             continue;
         }
 
-        // Skip lines inside code blocks
         if in_code_block {
             continue;
         }
 
-        // Check for header
         if let Some(caps) = re.captures(line) {
             all_headers.push(Header {
                 level: caps[1].len() as u8,
@@ -385,7 +311,6 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         }
     }
 
-    // Extract first h1 as document title, keep rest for outline
     let first_h1_idx = all_headers.iter().position(|h| h.level == 1);
     let document_title = first_h1_idx.map(|idx| all_headers[idx].title.clone());
 
@@ -400,53 +325,6 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         document_title,
         outline_headers,
     }
-}
-
-/// Check if any header in the list has children
-fn any_header_has_children(headers: &[Header]) -> bool {
-    for i in 0..headers.len() {
-        if header_has_children(headers, i) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if header at `index` has children (headers with higher level following it)
-fn header_has_children(headers: &[Header], index: usize) -> bool {
-    if index >= headers.len() {
-        return false;
-    }
-    let current_level = headers[index].level;
-    // Check the next header - if it has a higher level (e.g., h3 under h2), this header has children
-    if let Some(next) = headers.get(index + 1) {
-        return next.level > current_level;
-    }
-    false
-}
-
-/// Check if header at `index` should be hidden because an ancestor is collapsed
-fn header_is_hidden(headers: &[Header], index: usize, collapsed: &HashSet<usize>) -> bool {
-    if index == 0 || index >= headers.len() {
-        return false;
-    }
-    let mut search_level = headers[index].level;
-    // Walk backwards to find ancestors
-    for i in (0..index).rev() {
-        let h = &headers[i];
-        // Only consider headers with lower level than what we're searching for
-        if h.level < search_level {
-            // Found an ancestor
-            if collapsed.contains(&i) {
-                return true;
-            }
-            // This ancestor is not collapsed, but check its ancestors too
-            // Update search_level to only look for even lower level headers
-            search_level = h.level;
-        }
-        // Headers at same or higher level are siblings/cousins, skip them
-    }
-    false
 }
 
 #[global_allocator]
@@ -486,43 +364,23 @@ fn main() -> eframe::Result<()> {
 }
 
 struct MarkdownApp {
-    cache: CommonMarkCache,
-    content: String,
-    current_file: Option<PathBuf>,
+    tabs: Vec<Tab>,
+    active_tab: usize,
     dark_mode: bool,
+    zoom_level: f32,
+    show_outline: bool,
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
     // File watcher state
     watcher: Option<Debouncer<RecommendedWatcher>>,
-    watcher_rx: Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
+    watcher_rx:
+        Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
     watcher_retry_count: u32,
-    // Performance tracking
-    content_lines: usize,
-    scroll_offset: f32,
-    // Zoom level (1.0 = 100%, range: 0.5 to 3.0)
-    zoom_level: f32,
-    // Outline state
-    document_title: Option<String>,
-    outline_headers: Vec<Header>,
-    /// Set of header indices that are collapsed in the outline
-    collapsed_headers: HashSet<usize>,
-    show_outline: bool,
-    pending_scroll_offset: Option<f32>,
-    last_content_height: f32,
-    last_viewport_height: f32,
-    // Navigation history for link following
-    history_back: Vec<PathBuf>,
-    history_forward: Vec<PathBuf>,
-    // Cached local links for the current document
-    local_links: Vec<String>,
-    // Minimap state
-    show_minimap: bool,
-    minimap_blocks: Vec<MinimapBlock>,
-    minimap_pending_scroll: Option<f32>,
-    // Child windows for multi-window support
-    child_windows: Vec<ChildWindow>,
-    next_child_id: u64,
+    // Set of paths being watched
+    watched_paths: HashSet<PathBuf>,
+    // Tab being hovered for close button
+    hovered_tab: Option<usize>,
 }
 
 impl MarkdownApp {
@@ -533,130 +391,77 @@ impl MarkdownApp {
             .and_then(|s| eframe::get_value(s, APP_KEY))
             .unwrap_or_default();
 
-        // Use persisted dark_mode, or fall back to system default
-        let dark_mode = persisted.dark_mode.unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
-
-        // Use persisted zoom_level, or default to 1.0 (100%)
+        let dark_mode = persisted
+            .dark_mode
+            .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
-
-        // Use persisted show_outline, default to true (visible by default)
         let show_outline = persisted.show_outline.unwrap_or(true);
 
-        // Use persisted show_minimap, default to true (visible by default)
-        let show_minimap = persisted.show_minimap.unwrap_or(true);
+        // Determine initial tabs
+        let initial_tabs: Vec<Tab> = if let Some(path) = file {
+            // CLI argument takes priority
+            vec![Tab::new(path)]
+        } else if let Some(paths) = persisted.open_tabs {
+            // Restore previous session tabs
+            paths
+                .into_iter()
+                .filter(|p| p.exists())
+                .map(Tab::new)
+                .collect()
+        } else {
+            // Show sample content
+            vec![Tab::from_sample()]
+        };
 
-        let parsed = parse_headers(SAMPLE_MARKDOWN);
-        let local_links = parse_local_links(SAMPLE_MARKDOWN);
-        let minimap_blocks = parse_minimap_blocks(SAMPLE_MARKDOWN);
+        let tabs = if initial_tabs.is_empty() {
+            vec![Tab::from_sample()]
+        } else {
+            initial_tabs
+        };
+
+        let active_tab = persisted
+            .active_tab
+            .unwrap_or(0)
+            .min(tabs.len().saturating_sub(1));
+
         let mut app = Self {
-            cache: CommonMarkCache::default(),
-            content: SAMPLE_MARKDOWN.to_string(),
-            current_file: None,
+            tabs,
+            active_tab,
             dark_mode,
+            zoom_level,
+            show_outline,
             watch_enabled: watch,
             error_message: None,
             is_dragging: false,
             watcher: None,
             watcher_rx: None,
             watcher_retry_count: 0,
-            content_lines: SAMPLE_MARKDOWN.lines().count(),
-            scroll_offset: 0.0,
-            zoom_level,
-            document_title: parsed.document_title,
-            outline_headers: parsed.outline_headers,
-            collapsed_headers: HashSet::new(),
-            show_outline,
-            pending_scroll_offset: None,
-            last_content_height: 0.0,
-            last_viewport_height: 0.0,
-            history_back: Vec::new(),
-            history_forward: Vec::new(),
-            local_links,
-            show_minimap,
-            minimap_blocks,
-            minimap_pending_scroll: None,
-            child_windows: Vec::new(),
-            next_child_id: 0,
+            watched_paths: HashSet::new(),
+            hovered_tab: None,
         };
 
-        // Determine which file to load: CLI argument takes priority, then persisted last file
-        let file_to_load = file.or(persisted.last_file);
-
-        if let Some(path) = file_to_load {
-            app.load_file(&path);
-            if watch {
-                app.start_watching();
-            }
+        if watch {
+            app.start_watching();
         }
 
         app
     }
 
-    fn load_file(&mut self, path: &PathBuf) {
-        // Remember if we were watching
-        let was_watching = self.watcher.is_some();
-
-        // Stop current watcher before loading new file
-        self.stop_watching();
-
-        // First check if file exists
-        if !path.exists() {
-            self.error_message = Some(format!("File not found: {}", path.display()));
-            log::error!("File not found: {:?}", path);
-            return;
+    fn window_title(&self) -> String {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            format!("{} - Markdown Viewer", tab.title())
+        } else {
+            "Markdown Viewer".to_string()
         }
+    }
 
-        // Read file as bytes to handle invalid UTF-8 gracefully
-        match fs::read(path) {
-            Ok(bytes) => {
-                // Convert to string with lossy UTF-8 conversion
-                let content = String::from_utf8_lossy(&bytes);
-                let had_invalid_utf8 = content.contains('\u{FFFD}');
-
-                self.content_lines = content.lines().count();
-                self.content = content.into_owned();
-                self.current_file = Some(path.clone());
-                self.cache = CommonMarkCache::default();
-                let parsed = parse_headers(&self.content);
-                self.document_title = parsed.document_title;
-                self.outline_headers = parsed.outline_headers;
-                self.collapsed_headers.clear();
-
-                // Parse and register local links for link hook handling
-                self.local_links = parse_local_links(&self.content);
-                for link in &self.local_links {
-                    self.cache.add_link_hook(link);
-                }
-
-                // Parse minimap blocks for document overview
-                self.minimap_blocks = parse_minimap_blocks(&self.content);
-
-                if had_invalid_utf8 {
-                    self.error_message = Some("Warning: File contains invalid UTF-8 characters (replaced with �)".to_string());
-                    log::warn!("File {:?} contains invalid UTF-8", path);
-                } else {
-                    self.error_message = None;
-                }
-
-                // Restart watching if it was enabled
-                if was_watching || self.watch_enabled {
-                    self.start_watching();
-                }
-            }
-            Err(e) => {
-                let error_msg = match e.kind() {
-                    std::io::ErrorKind::PermissionDenied => {
-                        format!("Permission denied: {}", path.display())
-                    }
-                    std::io::ErrorKind::NotFound => {
-                        format!("File not found: {}", path.display())
-                    }
-                    _ => format!("Failed to load file: {}", e),
-                };
-                self.error_message = Some(error_msg.clone());
-                log::error!("Failed to load file {:?}: {}", path, e);
-            }
-        }
+    fn is_markdown_file(path: &std::path::Path) -> bool {
+        path.extension()
+            .map(|ext| {
+                let ext = ext.to_string_lossy().to_lowercase();
+                ext == "md" || ext == "markdown" || ext == "txt"
+            })
+            .unwrap_or(false)
     }
 
     fn open_file_dialog(&mut self) {
@@ -666,55 +471,113 @@ impl MarkdownApp {
             .add_filter("All Files", &["*"])
             .pick_file()
         {
-            self.load_file(&path);
+            self.open_in_new_tab(path);
         }
     }
 
-    fn window_title(&self) -> String {
-        match &self.current_file {
-            Some(path) => {
-                let filename = path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-                format!("{} - Markdown Viewer", filename)
-            }
-            None => "Markdown Viewer".to_string(),
+    fn open_in_new_tab(&mut self, path: PathBuf) {
+        // Check if already open
+        if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
+            self.active_tab = idx;
+            return;
+        }
+
+        // Add new tab
+        let tab = Tab::new(path);
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+
+        // Update watcher if enabled
+        if self.watch_enabled {
+            self.update_watched_paths();
         }
     }
 
-    fn is_markdown_file(path: &PathBuf) -> bool {
-        path.extension()
-            .map(|ext| {
-                let ext = ext.to_string_lossy().to_lowercase();
-                ext == "md" || ext == "markdown" || ext == "txt"
-            })
-            .unwrap_or(false)
+    fn close_tab(&mut self, idx: usize) {
+        if self.tabs.len() <= 1 {
+            // Don't close the last tab
+            return;
+        }
+
+        self.tabs.remove(idx);
+
+        // Adjust active tab index
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if self.active_tab > idx {
+            self.active_tab -= 1;
+        }
+
+        // Update watcher
+        if self.watch_enabled {
+            self.update_watched_paths();
+        }
+    }
+
+    fn close_active_tab(&mut self) {
+        self.close_tab(self.active_tab);
+    }
+
+    fn next_tab(&mut self) {
+        if self.tabs.len() > 1 {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+    }
+
+    fn prev_tab(&mut self) {
+        if self.tabs.len() > 1 {
+            self.active_tab = if self.active_tab == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active_tab - 1
+            };
+        }
+    }
+
+    fn focus_tab(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            self.active_tab = idx;
+        }
+    }
+
+    fn get_open_tab_paths(&self) -> Vec<PathBuf> {
+        self.tabs
+            .iter()
+            .filter(|t| t.path.exists())
+            .map(|t| t.path.clone())
+            .collect()
     }
 
     fn start_watching(&mut self) {
-        // Stop any existing watcher first
         self.stop_watching();
 
-        let Some(file_path) = &self.current_file else {
-            log::warn!("Cannot start watching: no file loaded");
+        let paths = self.get_open_tab_paths();
+        if paths.is_empty() {
             return;
-        };
+        }
 
         let (tx, rx) = mpsc::channel();
 
         match new_debouncer(Duration::from_millis(200), tx) {
             Ok(mut debouncer) => {
-                if let Err(e) = debouncer.watcher().watch(file_path, notify::RecursiveMode::NonRecursive) {
-                    log::error!("Failed to watch file {:?}: {}", file_path, e);
-                    self.error_message = Some(format!("Failed to watch file: {}", e));
-                    return;
+                for path in &paths {
+                    if let Err(e) = debouncer
+                        .watcher()
+                        .watch(path, notify::RecursiveMode::NonRecursive)
+                    {
+                        log::error!("Failed to watch file {:?}: {}", path, e);
+                    } else {
+                        self.watched_paths.insert(path.clone());
+                    }
                 }
 
-                log::info!("Started watching file: {:?}", file_path);
-                self.watcher = Some(debouncer);
-                self.watcher_rx = Some(rx);
-                self.watch_enabled = true;
-                self.watcher_retry_count = 0;
+                if !self.watched_paths.is_empty() {
+                    log::info!("Started watching {} files", self.watched_paths.len());
+                    self.watcher = Some(debouncer);
+                    self.watcher_rx = Some(rx);
+                    self.watch_enabled = true;
+                    self.watcher_retry_count = 0;
+                }
             }
             Err(e) => {
                 log::error!("Failed to create file watcher: {}", e);
@@ -725,252 +588,322 @@ impl MarkdownApp {
 
     fn stop_watching(&mut self) {
         if self.watcher.is_some() {
-            log::info!("Stopped watching file");
+            log::info!("Stopped watching files");
         }
         self.watcher = None;
         self.watcher_rx = None;
+        self.watched_paths.clear();
     }
 
-    fn check_file_changes(&mut self) -> bool {
+    fn update_watched_paths(&mut self) {
+        if !self.watch_enabled {
+            return;
+        }
+
+        let current_paths: HashSet<PathBuf> = self.get_open_tab_paths().into_iter().collect();
+
+        // Add new paths
+        if let Some(debouncer) = &mut self.watcher {
+            for path in current_paths.difference(&self.watched_paths) {
+                if let Err(e) = debouncer
+                    .watcher()
+                    .watch(path, notify::RecursiveMode::NonRecursive)
+                {
+                    log::error!("Failed to watch file {:?}: {}", path, e);
+                }
+            }
+
+            // Remove old paths
+            for path in self.watched_paths.difference(&current_paths) {
+                let _ = debouncer.watcher().unwatch(path);
+            }
+        }
+
+        self.watched_paths = current_paths;
+    }
+
+    fn check_file_changes(&mut self) -> Vec<PathBuf> {
         let Some(rx) = &self.watcher_rx else {
-            // If watching was enabled but watcher is gone, try to recover
-            if self.watch_enabled && self.current_file.is_some() && self.watcher_retry_count < MAX_WATCHER_RETRIES {
-                log::info!("Attempting to recover file watcher (attempt {})", self.watcher_retry_count + 1);
+            if self.watch_enabled
+                && !self.watched_paths.is_empty()
+                && self.watcher_retry_count < MAX_WATCHER_RETRIES
+            {
+                log::info!(
+                    "Attempting to recover file watcher (attempt {})",
+                    self.watcher_retry_count + 1
+                );
                 self.watcher_retry_count += 1;
                 self.start_watching();
             }
-            return false;
+            return Vec::new();
         };
 
-        let mut needs_reload = false;
+        let mut changed_paths = Vec::new();
 
-        // Non-blocking check for file change events
         while let Ok(result) = rx.try_recv() {
             match result {
                 Ok(events) => {
-                    // Reset retry count on successful event
                     self.watcher_retry_count = 0;
                     for event in events {
                         if event.kind == DebouncedEventKind::Any {
                             log::debug!("File change detected: {:?}", event.path);
-                            needs_reload = true;
+                            changed_paths.push(event.path);
                         }
                     }
                 }
                 Err(e) => {
                     log::error!("File watcher error: {}", e);
-                    // Stop current watcher
                     self.watcher = None;
                     self.watcher_rx = None;
 
-                    // Attempt recovery if under retry limit
                     if self.watcher_retry_count < MAX_WATCHER_RETRIES {
                         self.watcher_retry_count += 1;
-                        log::info!("Attempting watcher recovery (attempt {})", self.watcher_retry_count);
+                        log::info!(
+                            "Attempting watcher recovery (attempt {})",
+                            self.watcher_retry_count
+                        );
                         self.start_watching();
-                        if self.watcher.is_some() {
-                            self.error_message = Some("File watcher recovered after error".to_string());
-                        } else {
-                            self.error_message = Some(format!("File watcher error (retry {}): {}", self.watcher_retry_count, e));
-                        }
                     } else {
-                        self.error_message = Some(format!("File watcher failed after {} retries: {}", MAX_WATCHER_RETRIES, e));
+                        self.error_message = Some(format!(
+                            "File watcher failed after {} retries: {}",
+                            MAX_WATCHER_RETRIES, e
+                        ));
                         self.watch_enabled = false;
                     }
-                    return false;
+                    return Vec::new();
                 }
             }
         }
 
-        needs_reload
+        changed_paths
     }
 
-    fn reload_current_file(&mut self) {
-        if let Some(path) = self.current_file.clone() {
-            log::info!("Reloading file: {:?}", path);
-            self.load_file(&path);
-        }
-    }
-
-    /// Navigate to a local link, resolving it relative to the current file's directory
-    fn navigate_to_link(&mut self, link: &str) {
-        // Ignore anchor-only links (e.g., "#section") - just prevent browser from opening
-        if link.starts_with('#') {
-            log::debug!("Ignoring anchor-only link: {}", link);
-            return;
-        }
-
-        let Some(current_file) = &self.current_file else {
-            log::warn!("Cannot navigate: no current file");
-            return;
-        };
-
-        let Some(current_dir) = current_file.parent() else {
-            log::warn!("Cannot navigate: current file has no parent directory");
-            return;
-        };
-
-        // Remove anchor part if present (e.g., "file.md#heading" -> "file.md")
-        let path_part = link.split('#').next().unwrap_or(link);
-
-        // Resolve the link relative to the current file's directory
-        let target_path = current_dir.join(path_part);
-
-        // Canonicalize to resolve .. and . components
-        let target_path = match target_path.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                self.error_message = Some(format!("Cannot navigate to '{}': {}", link, e));
-                log::error!("Failed to canonicalize path {:?}: {}", target_path, e);
-                return;
-            }
-        };
-
-        // Save current file to history before navigating
-        self.history_back.push(current_file.clone());
-        // Clear forward history on new navigation
-        self.history_forward.clear();
-
-        log::info!("Navigating to link: {:?}", target_path);
-        self.load_file(&target_path);
-    }
-
-    /// Navigate back in history
-    fn navigate_back(&mut self) {
-        if let Some(prev_path) = self.history_back.pop() {
-            // Save current file to forward history
-            if let Some(current) = self.current_file.clone() {
-                self.history_forward.push(current);
-            }
-            log::info!("Navigating back to: {:?}", prev_path);
-            // Load without adding to history
-            self.load_file_no_history(&prev_path);
-        }
-    }
-
-    /// Navigate forward in history
-    fn navigate_forward(&mut self) {
-        if let Some(next_path) = self.history_forward.pop() {
-            // Save current file to back history
-            if let Some(current) = self.current_file.clone() {
-                self.history_back.push(current);
-            }
-            log::info!("Navigating forward to: {:?}", next_path);
-            // Load without adding to history
-            self.load_file_no_history(&next_path);
-        }
-    }
-
-    /// Load a file without modifying navigation history
-    fn load_file_no_history(&mut self, path: &PathBuf) {
-        // Store history temporarily
-        let back = std::mem::take(&mut self.history_back);
-        let forward = std::mem::take(&mut self.history_forward);
-
-        self.load_file(path);
-
-        // Restore history
-        self.history_back = back;
-        self.history_forward = forward;
-    }
-
-    /// Check link hooks after rendering and navigate if a link was clicked
-    fn check_link_hooks(&mut self) -> Option<String> {
-        for link in &self.local_links {
-            if let Some(true) = self.cache.get_link_hook(link) {
-                return Some(link.clone());
-            }
-        }
-        None
-    }
-
-    fn can_go_back(&self) -> bool {
-        !self.history_back.is_empty()
-    }
-
-    fn can_go_forward(&self) -> bool {
-        !self.history_forward.is_empty()
-    }
-
-    /// Get the color for a minimap block based on its type and theme
-    /// Colors are muted and subtle - headers stand out as navigation landmarks
-    fn block_color(block_type: BlockType, dark_mode: bool) -> egui::Color32 {
-        if dark_mode {
-            match block_type {
-                // Headers: amber/orange tones - primary landmarks
-                BlockType::Header(1) => egui::Color32::from_rgb(0xF5, 0xA6, 0x23), // Bright amber
-                BlockType::Header(2) => egui::Color32::from_rgb(0xD9, 0x8C, 0x2E), // Medium amber
-                BlockType::Header(_) => egui::Color32::from_rgb(0xA8, 0x83, 0x4A), // Muted amber
-                // Code: blue-tinted gray - distinct but not distracting
-                BlockType::CodeBlock => egui::Color32::from_rgb(0x4A, 0x55, 0x68), // Slate blue-gray
-                // Lists: subtle cool gray
-                BlockType::ListItem => egui::Color32::from_rgb(0x64, 0x6E, 0x7A), // Cool gray
-                // Blockquotes: muted teal
-                BlockType::Blockquote => egui::Color32::from_rgb(0x5A, 0x7A, 0x7A), // Muted teal
-                // Text: very subtle, almost background
-                BlockType::Text => egui::Color32::from_rgb(0x45, 0x48, 0x4D), // Dark gray
-                BlockType::Blank => egui::Color32::TRANSPARENT,
-            }
-        } else {
-            match block_type {
-                // Headers: amber/orange tones - primary landmarks
-                BlockType::Header(1) => egui::Color32::from_rgb(0xD9, 0x73, 0x06), // Bright amber
-                BlockType::Header(2) => egui::Color32::from_rgb(0xB4, 0x6A, 0x1C), // Medium amber
-                BlockType::Header(_) => egui::Color32::from_rgb(0x92, 0x72, 0x3A), // Muted amber
-                // Code: blue-tinted gray
-                BlockType::CodeBlock => egui::Color32::from_rgb(0x64, 0x74, 0x8B), // Slate blue-gray
-                // Lists: subtle warm gray
-                BlockType::ListItem => egui::Color32::from_rgb(0x9C, 0xA3, 0xAF), // Warm gray
-                // Blockquotes: muted sage
-                BlockType::Blockquote => egui::Color32::from_rgb(0x7C, 0x9A, 0x8E), // Sage green
-                // Text: subtle light gray
-                BlockType::Text => egui::Color32::from_rgb(0xC8, 0xCC, 0xD0), // Light gray
-                BlockType::Blank => egui::Color32::TRANSPARENT,
+    fn reload_changed_tabs(&mut self, changed_paths: Vec<PathBuf>) {
+        for path in changed_paths {
+            for tab in &mut self.tabs {
+                if tab.path == path {
+                    log::info!("Reloading tab: {:?}", path);
+                    tab.reload();
+                }
             }
         }
     }
 
-    /// Resolve a link relative to the current file
-    fn resolve_link(&self, link: &str) -> Option<PathBuf> {
-        if link.starts_with('#') {
+    /// Render the custom tab bar
+    fn render_tab_bar(&mut self, ui: &mut egui::Ui) -> Option<usize> {
+        let mut tab_to_close: Option<usize> = None;
+        let mut new_active: Option<usize> = None;
+        let mut close_others: Option<usize> = None;
+
+        // Collect tab info first to avoid borrow issues
+        let tab_info: Vec<(String, bool)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(idx, tab)| (tab.title(), idx == self.active_tab))
+            .collect();
+
+        let tab_count = tab_info.len();
+        let hovered_tab = self.hovered_tab;
+
+        ui.horizontal(|ui| {
+            // Scrollable tab area
+            egui::ScrollArea::horizontal()
+                .max_width(ui.available_width() - 30.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (idx, (title, is_active)) in tab_info.iter().enumerate() {
+                            let is_hovered = hovered_tab == Some(idx);
+
+                            // Tab frame
+                            let tab_response = ui.horizontal(|ui| {
+                                // Tab button
+                                let text = egui::RichText::new(title);
+                                let text = if *is_active { text.strong() } else { text };
+
+                                let response = ui.selectable_label(*is_active, text);
+
+                                if response.clicked() {
+                                    new_active = Some(idx);
+                                }
+
+                                // Middle-click to close
+                                if response.middle_clicked() {
+                                    tab_to_close = Some(idx);
+                                }
+
+                                // Close button (show on hover or active)
+                                if *is_active || is_hovered {
+                                    let close_btn = ui.small_button("×");
+                                    if close_btn.clicked() {
+                                        tab_to_close = Some(idx);
+                                    }
+                                }
+
+                                // Context menu
+                                response.context_menu(|ui| {
+                                    if ui.button("Close").clicked() {
+                                        tab_to_close = Some(idx);
+                                        ui.close();
+                                    }
+                                    if tab_count > 1 {
+                                        if ui.button("Close Others").clicked() {
+                                            close_others = Some(idx);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+
+                                response
+                            });
+
+                            // Track hover state
+                            if tab_response.response.hovered() {
+                                self.hovered_tab = Some(idx);
+                            }
+
+                            ui.separator();
+                        }
+                    });
+                });
+
+            // New tab button
+            if ui.button("+").on_hover_text("New Tab (Ctrl+T)").clicked() {
+                self.open_file_dialog();
+            }
+        });
+
+        // Apply new active tab
+        if let Some(idx) = new_active {
+            self.active_tab = idx;
+        }
+
+        // Handle close others
+        if let Some(keep_idx) = close_others {
+            let kept = self.tabs.remove(keep_idx);
+            self.tabs.clear();
+            self.tabs.push(kept);
+            self.active_tab = 0;
+            if self.watch_enabled {
+                self.update_watched_paths();
+            }
+            return None; // Don't close any tab, we already handled it
+        }
+
+        tab_to_close
+    }
+
+    /// Render the active tab's content
+    fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
+        let mut open_in_new_tab: Option<PathBuf> = None;
+
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return None;
-        }
-
-        let current_file = self.current_file.as_ref()?;
-        let current_dir = current_file.parent()?;
-        let path_part = link.split('#').next().unwrap_or(link);
-        let target_path = current_dir.join(path_part);
-        target_path.canonicalize().ok()
-    }
-
-    /// Open a link in a new window
-    fn open_in_new_window(&mut self, link: &str) {
-        let Some(target_path) = self.resolve_link(link) else {
-            log::warn!("Could not resolve link for new window: {}", link);
-            return;
         };
 
-        // Skip if same as main window
-        if self.current_file.as_ref() == Some(&target_path) {
-            log::debug!("Link is same as main window, not opening new window");
-            return;
+        // Handle outline header click
+        let mut clicked_header_line: Option<usize> = None;
+
+        // Outline sidebar
+        if self.show_outline && !tab.outline_headers.is_empty() {
+            let is_dragging = ui.ctx().input(|i| i.pointer.any_down());
+            let sidebar_title = tab.document_title.as_deref().unwrap_or("Outline");
+
+            egui::SidePanel::right("outline")
+                .resizable(true)
+                .default_width(200.0)
+                .min_width(120.0)
+                .max_width(400.0)
+                .frame(
+                    egui::Frame::side_top_panel(&ui.ctx().style()).inner_margin(egui::Margin {
+                        left: 8,
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                    }),
+                )
+                .show_inside(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.set_max_width(ui.available_width());
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(sidebar_title).heading())
+                                .truncate(),
+                        );
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| {
+                            for header in &tab.outline_headers {
+                                let indent = (header.level.saturating_sub(2) as usize) * 12;
+                                let prefix = " ".repeat(indent / 4);
+                                let display_text = if header.title.len() > 40 {
+                                    format!("{}{}...", prefix, &header.title[..37])
+                                } else {
+                                    format!("{}{}", prefix, &header.title)
+                                };
+                                let response = ui.selectable_label(false, &display_text);
+                                if !is_dragging && response.clicked() {
+                                    clicked_header_line = Some(header.line_number);
+                                }
+                            }
+                        });
+                });
         }
 
-        // Check if already open in a child window - reactivate if so
-        for window in &mut self.child_windows {
-            if window.path == target_path {
-                log::debug!("File already open in child window, reactivating");
-                window.open = true;
-                return;
+        // Calculate scroll target if header was clicked
+        if let Some(line_number) = clicked_header_line {
+            if tab.content_lines > 0 && tab.last_content_height > 0.0 {
+                let ratio = line_number as f32 / tab.content_lines as f32;
+                tab.pending_scroll_offset = Some(ratio * tab.last_content_height);
             }
         }
 
-        // Create new child window
-        let id = egui::ViewportId::from_hash_of(format!("child_{}", self.next_child_id));
-        self.next_child_id += 1;
+        // Main content area
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
 
-        log::info!("Opening new window for: {:?}", target_path);
-        self.child_windows.push(ChildWindow::new(id, target_path));
+            if let Some(offset) = tab.pending_scroll_offset.take() {
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+
+            let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
+                tab.scroll_offset = viewport.min.y;
+
+                CommonMarkViewer::new()
+                    .max_image_width(Some(800))
+                    .default_width(Some(600))
+                    .indentation_spaces(2)
+                    .show_alt_text_on_hover(true)
+                    .syntax_theme_dark("base16-ocean.dark")
+                    .syntax_theme_light("base16-ocean.light")
+                    .line_height(1.5)
+                    .code_line_height(1.3)
+                    .paragraph_spacing(2.0)
+                    .heading_spacing_above(2.0)
+                    .heading_spacing_below(0.75)
+                    .show(ui, &mut tab.cache, &tab.content);
+            });
+
+            tab.last_content_height = scroll_output.content_size.y;
+        });
+
+        // Check for clicked links
+        if let Some(clicked_link) = tab.check_link_hooks() {
+            if ctrl_held {
+                // Open in new tab
+                if let Some(target_path) = tab.resolve_link(&clicked_link) {
+                    open_in_new_tab = Some(target_path);
+                }
+            } else {
+                // Navigate in current tab
+                tab.navigate_to_link(&clicked_link);
+            }
+        }
+
+        open_in_new_tab
     }
 }
 
@@ -978,18 +911,19 @@ impl eframe::App for MarkdownApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let state = PersistedState {
             dark_mode: Some(self.dark_mode),
-            last_file: self.current_file.clone(),
             zoom_level: Some(self.zoom_level),
             show_outline: Some(self.show_outline),
-            show_minimap: Some(self.show_minimap),
+            open_tabs: Some(self.get_open_tab_paths()),
+            active_tab: Some(self.active_tab),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for file changes and reload if needed
-        if self.check_file_changes() {
-            self.reload_current_file();
+        // Check for file changes and reload affected tabs
+        let changed_paths = self.check_file_changes();
+        if !changed_paths.is_empty() {
+            self.reload_changed_tabs(changed_paths);
         }
 
         // Request periodic repaints when watching is enabled
@@ -997,43 +931,41 @@ impl eframe::App for MarkdownApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
-        // Apply evidence-based theme settings
-        // Research: Off-white backgrounds (#F8F8F8) and dark gray text (#333333) for light mode
-        // Material Design: #121212 background and 87% white (#E0E0E0) for dark mode
-        // Avoids pure black on white (21:1 contrast causes halation for 47% with astigmatism)
+        // Apply theme settings
         let visuals = if self.dark_mode {
             let mut v = egui::Visuals::dark();
-            // Material Design dark mode: #121212 background, #E0E0E0 text (87% white)
             v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
             v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
-            v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E); // Code blocks
+            v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E);
             v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
             v
         } else {
             let mut v = egui::Visuals::light();
-            // Evidence-based light mode: #F8F8F8 background, #333333 text (~12:1 contrast)
             v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
             v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-            v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0); // Code blocks
+            v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
             v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
             v
         };
         ctx.set_visuals(visuals);
         ctx.style_mut(|style| {
             style.url_in_tooltip = true;
-            // Evidence-based font sizing: 16px minimum recommended (Rello et al., WCAG)
-            // Heading max at 32px (2× base) per Major Third scale
             use egui::{FontId, TextStyle};
-            style.text_styles.insert(TextStyle::Body, FontId::proportional(16.0));
-            style.text_styles.insert(TextStyle::Heading, FontId::proportional(32.0));
-            style.text_styles.insert(TextStyle::Small, FontId::proportional(13.0));
-            style.text_styles.insert(TextStyle::Monospace, FontId::monospace(14.0));
+            style
+                .text_styles
+                .insert(TextStyle::Body, FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(TextStyle::Heading, FontId::proportional(32.0));
+            style
+                .text_styles
+                .insert(TextStyle::Small, FontId::proportional(13.0));
+            style
+                .text_styles
+                .insert(TextStyle::Monospace, FontId::monospace(14.0));
         });
 
-        // Apply zoom level
         ctx.set_zoom_factor(self.zoom_level);
-
-        // Update window title
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
 
         // Handle keyboard shortcuts
@@ -1041,11 +973,15 @@ impl eframe::App for MarkdownApp {
         let mut toggle_watch = false;
         let mut toggle_dark = false;
         let mut toggle_outline = false;
-        let mut toggle_minimap = false;
         let mut quit_app = false;
         let mut zoom_delta: f32 = 0.0;
         let mut go_back = false;
         let mut go_forward = false;
+        let mut close_tab = false;
+        let mut new_tab = false;
+        let mut next_tab = false;
+        let mut prev_tab = false;
+        let mut focus_tab: Option<usize> = None;
 
         ctx.input(|i| {
             // Ctrl+O: Open file
@@ -1056,13 +992,40 @@ impl eframe::App for MarkdownApp {
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
                 toggle_outline = true;
             }
-            // Ctrl+M: Toggle minimap
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::M) {
-                toggle_minimap = true;
-            }
-            // Ctrl+W: Toggle watch
+            // Ctrl+W: Close current tab
             if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
-                toggle_watch = true;
+                close_tab = true;
+            }
+            // Ctrl+T: New tab (open file dialog)
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::T) {
+                new_tab = true;
+            }
+            // Ctrl+Tab: Next tab
+            if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Tab) {
+                next_tab = true;
+            }
+            // Ctrl+Shift+Tab: Previous tab
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Tab) {
+                prev_tab = true;
+            }
+            // Ctrl+1-9: Focus tab by index
+            for (idx, key) in [
+                egui::Key::Num1,
+                egui::Key::Num2,
+                egui::Key::Num3,
+                egui::Key::Num4,
+                egui::Key::Num5,
+                egui::Key::Num6,
+                egui::Key::Num7,
+                egui::Key::Num8,
+                egui::Key::Num9,
+            ]
+            .iter()
+            .enumerate()
+            {
+                if i.modifiers.ctrl && i.key_pressed(*key) {
+                    focus_tab = Some(idx);
+                }
             }
             // Alt+Left: Go back in history
             if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
@@ -1081,7 +1044,9 @@ impl eframe::App for MarkdownApp {
                 quit_app = true;
             }
             // Ctrl+Plus or Ctrl+=: Zoom in
-            if i.modifiers.ctrl && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+            if i.modifiers.ctrl
+                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+            {
                 zoom_delta = 0.1;
             }
             // Ctrl+Minus: Zoom out
@@ -1090,11 +1055,19 @@ impl eframe::App for MarkdownApp {
             }
             // Ctrl+0: Reset zoom
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Num0) {
-                zoom_delta = 1.0 - self.zoom_level; // Reset to 1.0
+                zoom_delta = 1.0 - self.zoom_level;
             }
             // Ctrl + scroll wheel for zoom
             if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
-                zoom_delta = if i.raw_scroll_delta.y > 0.0 { 0.1 } else { -0.1 };
+                zoom_delta = if i.raw_scroll_delta.y > 0.0 {
+                    0.1
+                } else {
+                    -0.1
+                };
+            }
+            // F5: Toggle file watching
+            if i.key_pressed(egui::Key::F5) {
+                toggle_watch = true;
             }
         });
 
@@ -1103,14 +1076,15 @@ impl eframe::App for MarkdownApp {
             self.zoom_level = (self.zoom_level + zoom_delta).clamp(0.5, 3.0);
         }
 
-        if open_dialog {
+        if open_dialog || new_tab {
             self.open_file_dialog();
         }
-        if toggle_watch && self.current_file.is_some() {
+        if toggle_watch {
             if self.watcher.is_some() {
                 self.stop_watching();
                 self.watch_enabled = false;
             } else {
+                self.watch_enabled = true;
                 self.start_watching();
             }
         }
@@ -1120,17 +1094,30 @@ impl eframe::App for MarkdownApp {
         if toggle_outline {
             self.show_outline = !self.show_outline;
         }
-        if toggle_minimap {
-            self.show_minimap = !self.show_minimap;
-        }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        if close_tab {
+            self.close_active_tab();
+        }
+        if next_tab {
+            self.next_tab();
+        }
+        if prev_tab {
+            self.prev_tab();
+        }
+        if let Some(idx) = focus_tab {
+            self.focus_tab(idx);
+        }
         if go_back {
-            self.navigate_back();
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.navigate_back();
+            }
         }
         if go_forward {
-            self.navigate_forward();
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.navigate_forward();
+            }
         }
 
         // Handle drag and drop
@@ -1143,35 +1130,56 @@ impl eframe::App for MarkdownApp {
             for file in &i.raw.dropped_files {
                 if let Some(path) = &file.path {
                     if Self::is_markdown_file(path) {
-                        self.load_file(path);
+                        self.open_in_new_tab(path.clone());
                     } else {
-                        self.error_message = Some(format!(
-                            "Unsupported file type. Please drop a markdown file (.md, .markdown, .txt)"
-                        ));
+                        self.error_message = Some(
+                            "Unsupported file type. Please drop a markdown file (.md, .markdown, .txt)".to_string(),
+                        );
                     }
                 }
             }
         });
 
+        // Get ctrl state for link handling
+        let ctrl_held = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+
         // Menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.add(egui::Button::new("Open...").shortcut_text("Ctrl+O")).clicked() {
+                    if ui
+                        .add(egui::Button::new("New Tab...").shortcut_text("Ctrl+T"))
+                        .clicked()
+                    {
                         self.open_file_dialog();
+                        ui.close();
+                    }
+
+                    if ui
+                        .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
+                        .clicked()
+                    {
+                        self.close_active_tab();
                         ui.close();
                     }
 
                     ui.separator();
 
                     let is_watching = self.watcher.is_some();
-                    let watch_text = if is_watching { "✓ Watch File" } else { "Watch File" };
-                    let watch_enabled = self.current_file.is_some();
-                    if ui.add_enabled(watch_enabled, egui::Button::new(watch_text).shortcut_text("Ctrl+W")).clicked() {
+                    let watch_text = if is_watching {
+                        "✓ Watch Files"
+                    } else {
+                        "Watch Files"
+                    };
+                    if ui
+                        .add(egui::Button::new(watch_text).shortcut_text("F5"))
+                        .clicked()
+                    {
                         if is_watching {
                             self.stop_watching();
                             self.watch_enabled = false;
                         } else {
+                            self.watch_enabled = true;
                             self.start_watching();
                         }
                         ui.close();
@@ -1179,639 +1187,185 @@ impl eframe::App for MarkdownApp {
 
                     ui.separator();
 
-                    if ui.add(egui::Button::new("Quit").shortcut_text("Ctrl+Q")).clicked() {
+                    if ui
+                        .add(egui::Button::new("Quit").shortcut_text("Ctrl+Q"))
+                        .clicked()
+                    {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         ui.close();
                     }
                 });
 
                 ui.menu_button("Navigate", |ui| {
-                    let can_back = self.can_go_back();
-                    if ui.add_enabled(can_back, egui::Button::new("← Back").shortcut_text("Alt+←")).clicked() {
-                        self.navigate_back();
+                    let can_back = self
+                        .tabs
+                        .get(self.active_tab)
+                        .map(|t| t.can_go_back())
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(can_back, egui::Button::new("← Back").shortcut_text("Alt+←"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.navigate_back();
+                        }
                         ui.close();
                     }
 
-                    let can_forward = self.can_go_forward();
-                    if ui.add_enabled(can_forward, egui::Button::new("→ Forward").shortcut_text("Alt+→")).clicked() {
-                        self.navigate_forward();
+                    let can_forward = self
+                        .tabs
+                        .get(self.active_tab)
+                        .map(|t| t.can_go_forward())
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(
+                            can_forward,
+                            egui::Button::new("→ Forward").shortcut_text("Alt+→"),
+                        )
+                        .clicked()
+                    {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.navigate_forward();
+                        }
                         ui.close();
                     }
                 });
 
                 ui.menu_button("View", |ui| {
-                    let theme_text = if self.dark_mode { "☀ Light Mode" } else { "🌙 Dark Mode" };
-                    if ui.add(egui::Button::new(theme_text).shortcut_text("Ctrl+D")).clicked() {
+                    let theme_text = if self.dark_mode {
+                        "☀ Light Mode"
+                    } else {
+                        "🌙 Dark Mode"
+                    };
+                    if ui
+                        .add(egui::Button::new(theme_text).shortcut_text("Ctrl+D"))
+                        .clicked()
+                    {
                         self.dark_mode = !self.dark_mode;
                         ui.close();
                     }
 
-                    let outline_text = if self.show_outline { "✓ Show Outline" } else { "Show Outline" };
-                    if ui.add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O")).clicked() {
+                    let outline_text = if self.show_outline {
+                        "✓ Show Outline"
+                    } else {
+                        "Show Outline"
+                    };
+                    if ui
+                        .add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O"))
+                        .clicked()
+                    {
                         self.show_outline = !self.show_outline;
-                        ui.close();
-                    }
-
-                    let minimap_text = if self.show_minimap { "✓ Show Minimap" } else { "Show Minimap" };
-                    if ui.add(egui::Button::new(minimap_text).shortcut_text("Ctrl+M")).clicked() {
-                        self.show_minimap = !self.show_minimap;
                         ui.close();
                     }
 
                     ui.separator();
 
-                    if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
+                    if ui
+                        .add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"))
+                        .clicked()
+                    {
                         self.zoom_level = (self.zoom_level + 0.1).min(3.0);
                         ui.close();
                     }
-                    if ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-")).clicked() {
+                    if ui
+                        .add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"))
+                        .clicked()
+                    {
                         self.zoom_level = (self.zoom_level - 0.1).max(0.5);
                         ui.close();
                     }
-                    if ui.add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0")).clicked() {
+                    if ui
+                        .add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"))
+                        .clicked()
+                    {
                         self.zoom_level = 1.0;
                         ui.close();
                     }
                 });
 
-                // Show current file path on the right
+                // Show status on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Show zoom level if not at 100%
                     if (self.zoom_level - 1.0).abs() > 0.01 {
                         ui.label(
-                            egui::RichText::new(format!("{}%", (self.zoom_level * 100.0).round() as i32))
-                                .small()
-                                .color(ui.visuals().weak_text_color())
+                            egui::RichText::new(format!(
+                                "{}%",
+                                (self.zoom_level * 100.0).round() as i32
+                            ))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
                         );
                         ui.separator();
                     }
 
                     if self.watcher.is_some() {
-                        ui.label(egui::RichText::new("● LIVE").color(egui::Color32::from_rgb(100, 200, 100)));
+                        ui.label(
+                            egui::RichText::new("● LIVE")
+                                .color(egui::Color32::from_rgb(100, 200, 100)),
+                        );
                         ui.separator();
                     }
 
-                    if let Some(path) = &self.current_file {
-                        ui.label(
-                            egui::RichText::new(path.display().to_string())
-                                .small()
-                                .color(ui.visuals().weak_text_color())
-                        );
+                    // Show current file path from active tab
+                    if let Some(tab) = self.tabs.get(self.active_tab) {
+                        if tab.path.exists() {
+                            ui.label(
+                                egui::RichText::new(tab.path.display().to_string())
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
                     }
                 });
             });
         });
 
-        // Outline sidebar (right side)
-        let mut clicked_header_line: Option<usize> = None;
-        if self.show_outline && !self.outline_headers.is_empty() {
-            // Check if any pointer is down (potential resize in progress)
-            let is_dragging = ctx.input(|i| i.pointer.any_down());
-
-            egui::SidePanel::right("outline")
-                .resizable(true)
-                .default_width(200.0)
-                .min_width(120.0)
-                .max_width(400.0)
-                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
-                .show(ctx, |ui| {
-                    // Collapse/Expand All buttons
-                    if any_header_has_children(&self.outline_headers) {
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Collapse All").clicked() {
-                                for idx in 0..self.outline_headers.len() {
-                                    if header_has_children(&self.outline_headers, idx) {
-                                        self.collapsed_headers.insert(idx);
-                                    }
-                                }
-                            }
-                            if ui.small_button("Expand All").clicked() {
-                                self.collapsed_headers.clear();
-                            }
-                        });
-                        ui.separator();
-                    }
-                    egui::ScrollArea::vertical()
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
-                        .show(ui, |ui| {
-                            let mut toggle_index: Option<usize> = None;
-                            // Only reserve space for fold indicators if any header has children
-                            let show_fold_indicators = any_header_has_children(&self.outline_headers);
-                            for (idx, header) in self.outline_headers.iter().enumerate() {
-                                // Skip headers hidden by collapsed ancestors
-                                if header_is_hidden(&self.outline_headers, idx, &self.collapsed_headers) {
-                                    continue;
-                                }
-
-                                let has_children = header_has_children(&self.outline_headers, idx);
-                                let is_collapsed = self.collapsed_headers.contains(&idx);
-
-                                // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
-                                let indent = (header.level.saturating_sub(2) as usize) * 12;
-
-                                ui.horizontal(|ui| {
-                                    // Add base indent
-                                    if indent > 0 {
-                                        ui.add_space(indent as f32);
-                                    }
-
-                                    // Fold indicator (fixed width area for alignment)
-                                    // Only allocate space if any header has children
-                                    if show_fold_indicators {
-                                        let (rect, response) = ui.allocate_exact_size(
-                                            egui::vec2(20.0, 20.0),
-                                            egui::Sense::click()
-                                        );
-                                        if has_children {
-                                            let indicator = if is_collapsed { "+" } else { "-" };
-                                            let text_color = if response.hovered() {
-                                                ui.visuals().strong_text_color()
-                                            } else {
-                                                ui.visuals().text_color()
-                                            };
-                                            ui.painter().text(
-                                                rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                indicator,
-                                                egui::FontId::monospace(16.0),
-                                                text_color,
-                                            );
-                                            if !is_dragging && response.clicked() {
-                                                toggle_index = Some(idx);
-                                            }
-                                        }
-                                    }
-
-                                    // Header title
-                                    let display_text = if header.title.len() > 35 {
-                                        format!("{}...", &header.title[..32])
-                                    } else {
-                                        header.title.clone()
-                                    };
-
-                                    let response = ui.selectable_label(false, &display_text);
-                                    if !is_dragging && response.clicked() {
-                                        clicked_header_line = Some(header.line_number);
-                                    }
-                                });
-                            }
-                            // Apply toggle after iteration to avoid borrow issues
-                            if let Some(idx) = toggle_index {
-                                if self.collapsed_headers.contains(&idx) {
-                                    self.collapsed_headers.remove(&idx);
-                                } else {
-                                    self.collapsed_headers.insert(idx);
-                                }
-                                ui.add_space(4.0);
-                            }
-                        });
-                });
-        }
-
-        // Calculate scroll target if header was clicked
-        if let Some(line_number) = clicked_header_line {
-            if self.content_lines > 0 && self.last_content_height > 0.0 {
-                // Calculate approximate scroll position based on line number ratio
-                let ratio = line_number as f32 / self.content_lines as f32;
-                self.pending_scroll_offset = Some(ratio * self.last_content_height);
-            }
-        }
-
-        // Minimap sidebar (right side)
-        if self.show_minimap && self.content_lines > 0 {
-            let content_height = self.last_content_height;
-            let scroll_offset = self.scroll_offset;
-            let viewport_height = self.last_viewport_height;
-            let content_lines = self.content_lines;
-            let dark_mode = self.dark_mode;
-
-            egui::SidePanel::right("minimap")
-                .resizable(false)
-                .exact_width(80.0)
-                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::same(2)))
-                .show(ctx, |ui| {
-                    let available_height = ui.available_height();
-
-                    // Allocate painter for the minimap
-                    let (response, painter) = ui.allocate_painter(
-                        egui::vec2(76.0, available_height),
-                        egui::Sense::click_and_drag(),
-                    );
-
-                    let minimap_rect = response.rect;
-
-                    // Calculate scale: how many pixels per line
-                    let scale = if content_height > 0.0 {
-                        minimap_rect.height() / content_height
-                    } else {
-                        1.0
-                    };
-
-                    // Draw content blocks as colored rectangles
-                    for block in &self.minimap_blocks {
-                        let color = Self::block_color(block.block_type, dark_mode);
-
-                        // Calculate position based on line number ratio
-                        let y_ratio = block.start_line as f32 / content_lines as f32;
-                        let height_ratio = block.line_count as f32 / content_lines as f32;
-
-                        let block_y = minimap_rect.top() + y_ratio * minimap_rect.height();
-                        let block_height = (height_ratio * minimap_rect.height()).max(2.0);
-
-                        // Vary width based on block type for visual interest
-                        let (x_offset, width) = match block.block_type {
-                            BlockType::Header(_) => (2.0, 72.0),
-                            BlockType::CodeBlock => (8.0, 60.0),
-                            BlockType::ListItem => (12.0, 56.0),
-                            BlockType::Blockquote => (6.0, 64.0),
-                            BlockType::Text => (4.0, 68.0),
-                            BlockType::Blank => continue, // Skip blank lines
-                        };
-
-                        let block_rect = egui::Rect::from_min_size(
-                            egui::pos2(minimap_rect.left() + x_offset, block_y),
-                            egui::vec2(width, block_height),
-                        );
-                        painter.rect_filled(block_rect, 1.0, color);
-                    }
-
-                    // Draw viewport indicator (semi-transparent rectangle showing visible area)
-                    if content_height > 0.0 && viewport_height > 0.0 {
-                        // Calculate viewport position and size in minimap coordinates
-                        let viewport_y = minimap_rect.top() + scroll_offset * scale;
-                        let viewport_h = (viewport_height * scale).min(minimap_rect.height());
-
-                        let viewport_rect = egui::Rect::from_min_size(
-                            egui::pos2(minimap_rect.left(), viewport_y),
-                            egui::vec2(minimap_rect.width(), viewport_h),
-                        );
-
-                        // Draw viewport indicator
-                        let indicator_color = if dark_mode {
-                            egui::Color32::from_white_alpha(30)
-                        } else {
-                            egui::Color32::from_black_alpha(20)
-                        };
-                        painter.rect_filled(viewport_rect, 0.0, indicator_color);
-
-                        // Draw border
-                        let border_color = if dark_mode {
-                            egui::Color32::from_white_alpha(60)
-                        } else {
-                            egui::Color32::from_black_alpha(40)
-                        };
-                        painter.rect_stroke(viewport_rect, 0.0, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Outside);
-                    }
-
-                    // Handle click-to-navigate
-                    if response.clicked() || response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let local_y = pos.y - minimap_rect.top();
-                            let ratio = local_y / minimap_rect.height();
-
-                            // Calculate target scroll position (center viewport on click)
-                            let target_scroll = (ratio * content_height - viewport_height / 2.0)
-                                .clamp(0.0, (content_height - viewport_height).max(0.0));
-
-                            self.minimap_pending_scroll = Some(target_scroll);
-                        }
-                    }
-                });
-        }
-
-        // Apply minimap scroll if set
-        if let Some(offset) = self.minimap_pending_scroll.take() {
-            self.pending_scroll_offset = Some(offset);
-        }
-
-        // Main content panel
+        // Show error message if any
         let mut clear_error = false;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin { left: 4, right: 8, top: 4, bottom: 4 }))
-            .show(ctx, |ui| {
-            // Show error message if any
-            if let Some(error) = &self.error_message {
-                let error_text = error.clone();
+        if let Some(error) = &self.error_message {
+            egui::TopBottomPanel::top("error_bar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("⚠").color(egui::Color32::from_rgb(255, 200, 100)));
-                    ui.label(egui::RichText::new(&error_text).color(egui::Color32::from_rgb(255, 200, 100)));
+                    ui.label(
+                        egui::RichText::new("⚠")
+                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                    );
+                    ui.label(
+                        egui::RichText::new(error)
+                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                    );
                     if ui.small_button("✕").clicked() {
                         clear_error = true;
                     }
                 });
-                ui.separator();
-            }
-
-            // Use show_viewport for optimized rendering - egui will clip content
-            // outside the visible area, reducing GPU work for large documents
-            let mut scroll_area = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
-
-            // Apply pending scroll offset if set
-            if let Some(offset) = self.pending_scroll_offset.take() {
-                scroll_area = scroll_area.vertical_scroll_offset(offset);
-            }
-
-            let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
-                // Track scroll position and viewport height for minimap sync
-                self.scroll_offset = viewport.min.y;
-                self.last_viewport_height = viewport.height();
-
-                CommonMarkViewer::new()
-                    .max_image_width(Some(800))
-                    .default_width(Some(600)) // ~55-75 CPL at 16px (Dyson & Haselgrove 2001)
-                    .indentation_spaces(2)
-                    .show_alt_text_on_hover(true)
-                    .syntax_theme_dark("base16-ocean.dark")
-                    .syntax_theme_light("base16-ocean.light")
-                    // Evidence-based typography (WCAG 2.1, peer-reviewed HCI research)
-                    .line_height(1.5) // 1.5× line height per WCAG 2.1 SC 1.4.12
-                    .code_line_height(1.3) // 1.3× for code (tighter, PPIG research)
-                    .paragraph_spacing(2.0) // 2× font size per WCAG 1.4.12
-                    .heading_spacing_above(2.0) // 2× font size before headings
-                    .heading_spacing_below(0.75) // 0.75× (line-height × 0.5) after headings
-                    .show(ui, &mut self.cache, &self.content);
             });
-
-            // Store content height for scroll calculations
-            self.last_content_height = scroll_output.content_size.y;
-
-            // For very large documents (10000+ lines), show a performance hint
-            if self.content_lines > 10000 && scroll_output.content_size.y > 50000.0 {
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{} lines", self.content_lines))
-                            .small()
-                            .color(ui.visuals().weak_text_color())
-                    );
-                });
-            }
-        });
+        }
         if clear_error {
             self.error_message = None;
         }
 
-        // Check if any local link was clicked and navigate to it
-        if let Some(clicked_link) = self.check_link_hooks() {
-            let ctrl_held = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
-            if ctrl_held {
-                self.open_in_new_window(&clicked_link);
-            } else {
-                self.navigate_to_link(&clicked_link);
-            }
+        // Tab bar
+        let mut tab_to_close: Option<usize> = None;
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            tab_to_close = self.render_tab_bar(ui);
+        });
+
+        // Close tab if requested
+        if let Some(idx) = tab_to_close {
+            self.close_tab(idx);
         }
 
-        // Render child windows using immediate viewports
-        let dark_mode = self.dark_mode;
-        let zoom_level = self.zoom_level;
-        let show_outline = self.show_outline;
+        // Main content area
+        let mut open_in_new_tab: Option<PathBuf> = None;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO))
+            .show(ctx, |ui| {
+                open_in_new_tab = self.render_tab_content(ui, ctrl_held);
+            });
 
-        for child in &mut self.child_windows {
-            if !child.open {
-                continue;
-            }
-
-            let viewport_builder = egui::ViewportBuilder::default()
-                .with_inner_size([900.0, 700.0])
-                .with_min_inner_size([400.0, 300.0])
-                .with_title(child.window_title());
-
-            ctx.show_viewport_immediate(
-                child.id,
-                viewport_builder,
-                |ctx, _class| {
-                    // Apply theme settings (shared with main window)
-                    let visuals = if dark_mode {
-                        let mut v = egui::Visuals::dark();
-                        v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
-                        v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
-                        v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E);
-                        v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
-                        v
-                    } else {
-                        let mut v = egui::Visuals::light();
-                        v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-                        v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-                        v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
-                        v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
-                        v
-                    };
-                    ctx.set_visuals(visuals);
-                    ctx.style_mut(|style| {
-                        style.url_in_tooltip = true;
-                        use egui::{FontId, TextStyle};
-                        style.text_styles.insert(TextStyle::Body, FontId::proportional(16.0));
-                        style.text_styles.insert(TextStyle::Heading, FontId::proportional(32.0));
-                        style.text_styles.insert(TextStyle::Small, FontId::proportional(13.0));
-                        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(14.0));
-                    });
-                    ctx.set_zoom_factor(zoom_level);
-
-                    // Check for close request
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        child.open = false;
-                    }
-
-                    // Handle keyboard shortcuts for this window
-                    let mut go_back = false;
-                    let mut go_forward = false;
-                    ctx.input(|i| {
-                        if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
-                            go_back = true;
-                        }
-                        if i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight) {
-                            go_forward = true;
-                        }
-                    });
-                    if go_back {
-                        child.navigate_back();
-                    }
-                    if go_forward {
-                        child.navigate_forward();
-                    }
-
-                    // Menu bar with navigation
-                    egui::TopBottomPanel::top("child_menu_bar").show(ctx, |ui| {
-                        egui::MenuBar::new().ui(ui, |ui| {
-                            // Navigation buttons
-                            let can_back = child.can_go_back();
-                            if ui.add_enabled(can_back, egui::Button::new("←")).on_hover_text("Back (Alt+←)").clicked() {
-                                child.navigate_back();
-                            }
-
-                            let can_forward = child.can_go_forward();
-                            if ui.add_enabled(can_forward, egui::Button::new("→")).on_hover_text("Forward (Alt+→)").clicked() {
-                                child.navigate_forward();
-                            }
-
-                            ui.separator();
-
-                            // Show file path
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(
-                                    egui::RichText::new(child.path.display().to_string())
-                                        .small()
-                                        .color(ui.visuals().weak_text_color())
-                                );
-                            });
-                        });
-                    });
-
-                    // Outline sidebar (right side, if enabled)
-                    let mut clicked_header_line: Option<usize> = None;
-                    if show_outline && !child.outline_headers.is_empty() {
-                        let is_dragging = ctx.input(|i| i.pointer.any_down());
-
-                        egui::SidePanel::right("child_outline")
-                            .resizable(true)
-                            .default_width(200.0)
-                            .min_width(120.0)
-                            .max_width(400.0)
-                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
-                            .show(ctx, |ui| {
-                                // Collapse/Expand All buttons
-                                if any_header_has_children(&child.outline_headers) {
-                                    ui.horizontal(|ui| {
-                                        if ui.small_button("Collapse All").clicked() {
-                                            for idx in 0..child.outline_headers.len() {
-                                                if header_has_children(&child.outline_headers, idx) {
-                                                    child.collapsed_headers.insert(idx);
-                                                }
-                                            }
-                                        }
-                                        if ui.small_button("Expand All").clicked() {
-                                            child.collapsed_headers.clear();
-                                        }
-                                    });
-                                    ui.separator();
-                                }
-                                egui::ScrollArea::vertical()
-                                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                                    .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
-                                    .show(ui, |ui| {
-                                        let mut toggle_index: Option<usize> = None;
-                                        // Only reserve space for fold indicators if any header has children
-                                        let show_fold_indicators = any_header_has_children(&child.outline_headers);
-                                        for (idx, header) in child.outline_headers.iter().enumerate() {
-                                            // Skip headers hidden by collapsed ancestors
-                                            if header_is_hidden(&child.outline_headers, idx, &child.collapsed_headers) {
-                                                continue;
-                                            }
-
-                                            let has_children = header_has_children(&child.outline_headers, idx);
-                                            let is_collapsed = child.collapsed_headers.contains(&idx);
-
-                                            let indent = (header.level.saturating_sub(2) as usize) * 12;
-
-                                            ui.horizontal(|ui| {
-                                                if indent > 0 {
-                                                    ui.add_space(indent as f32);
-                                                }
-
-                                                // Fold indicator (fixed width area for alignment)
-                                                // Only allocate space if any header has children
-                                                if show_fold_indicators {
-                                                    let (rect, response) = ui.allocate_exact_size(
-                                                        egui::vec2(20.0, 20.0),
-                                                        egui::Sense::click()
-                                                    );
-                                                    if has_children {
-                                                        let indicator = if is_collapsed { "+" } else { "-" };
-                                                        let text_color = if response.hovered() {
-                                                            ui.visuals().strong_text_color()
-                                                        } else {
-                                                            ui.visuals().text_color()
-                                                        };
-                                                        ui.painter().text(
-                                                            rect.center(),
-                                                            egui::Align2::CENTER_CENTER,
-                                                            indicator,
-                                                            egui::FontId::monospace(16.0),
-                                                            text_color,
-                                                        );
-                                                        if !is_dragging && response.clicked() {
-                                                            toggle_index = Some(idx);
-                                                        }
-                                                    }
-                                                }
-
-                                                let display_text = if header.title.len() > 35 {
-                                                    format!("{}...", &header.title[..32])
-                                                } else {
-                                                    header.title.clone()
-                                                };
-
-                                                let response = ui.selectable_label(false, &display_text);
-                                                if !is_dragging && response.clicked() {
-                                                    clicked_header_line = Some(header.line_number);
-                                                }
-                                            });
-                                        }
-                                        if let Some(idx) = toggle_index {
-                                            if child.collapsed_headers.contains(&idx) {
-                                                child.collapsed_headers.remove(&idx);
-                                            } else {
-                                                child.collapsed_headers.insert(idx);
-                                            }
-                                            ui.add_space(4.0);
-                                        }
-                                    });
-                            });
-                    }
-
-                    // Calculate scroll target if header was clicked
-                    if let Some(line_number) = clicked_header_line {
-                        if child.content_lines > 0 && child.last_content_height > 0.0 {
-                            let ratio = line_number as f32 / child.content_lines as f32;
-                            child.pending_scroll_offset = Some(ratio * child.last_content_height);
-                        }
-                    }
-
-                    // Main content panel
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin { left: 4, right: 8, top: 4, bottom: 4 }))
-                        .show(ctx, |ui| {
-                            let mut scroll_area = egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
-
-                            if let Some(offset) = child.pending_scroll_offset.take() {
-                                scroll_area = scroll_area.vertical_scroll_offset(offset);
-                            }
-
-                            let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
-                                child.scroll_offset = viewport.min.y;
-
-                                CommonMarkViewer::new()
-                                    .max_image_width(Some(800))
-                                    .default_width(Some(600))
-                                    .indentation_spaces(2)
-                                    .show_alt_text_on_hover(true)
-                                    .syntax_theme_dark("base16-ocean.dark")
-                                    .syntax_theme_light("base16-ocean.light")
-                                    .line_height(1.5)
-                                    .code_line_height(1.3)
-                                    .paragraph_spacing(2.0)
-                                    .heading_spacing_above(2.0)
-                                    .heading_spacing_below(0.75)
-                                    .show(ui, &mut child.cache, &child.content);
-                            });
-
-                            child.last_content_height = scroll_output.content_size.y;
-                        });
-
-                    // Check if any local link was clicked (in-place navigation only)
-                    if let Some(clicked_link) = child.check_link_hooks() {
-                        child.navigate_to_link(&clicked_link);
-                    }
-                },
-            );
+        // Open link in new tab if requested
+        if let Some(path) = open_in_new_tab {
+            self.open_in_new_tab(path);
         }
-
-        // Clean up closed child windows
-        self.child_windows.retain(|w| w.open);
 
         // Drag and drop overlay
         if self.is_dragging {
@@ -1847,6 +1401,19 @@ A lightweight markdown viewer built with **egui** and **egui_commonmark**.
 - Fast rendering at 60 FPS
 - Syntax highlighting for code blocks
 - GitHub Flavored Markdown support
+- **Tab-based interface** - open multiple documents
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+T | New tab (open file) |
+| Ctrl+W | Close current tab |
+| Ctrl+Tab | Next tab |
+| Ctrl+Shift+Tab | Previous tab |
+| Ctrl+1-9 | Switch to tab 1-9 |
+| Ctrl+Click | Open link in new tab |
+| Alt+← / Alt+→ | Navigate back/forward |
 
 ## Tables
 
@@ -1861,9 +1428,10 @@ A lightweight markdown viewer built with **egui** and **egui_commonmark**.
 
 - [x] Project setup
 - [x] Core rendering
-- [ ] File loading
-- [ ] Live reload
-- [ ] Theme toggle
+- [x] File loading
+- [x] Live reload
+- [x] Theme toggle
+- [x] Custom tab system (no egui_dock)
 
 ## Text Formatting
 
@@ -1886,11 +1454,6 @@ def greet(name: str) -> str:
     return f"Hello, {name}!"
 ```
 
-```javascript
-const sum = (a, b) => a + b;
-console.log(sum(2, 3));
-```
-
 ## Alerts
 
 > [!NOTE]
@@ -1901,18 +1464,6 @@ console.log(sum(2, 3));
 
 > [!IMPORTANT]
 > This is important information you should know.
-
-> [!WARNING]
-> This is a warning about potential issues.
-
-> [!CAUTION]
-> This is a caution about dangerous actions.
-
-## Blockquotes
-
-> This is a regular blockquote.
->
-> It can span multiple paragraphs.
 
 ## Links
 

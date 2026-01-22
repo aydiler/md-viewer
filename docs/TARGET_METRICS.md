@@ -5,8 +5,8 @@
 - Render: 60 FPS with viewport-based lazy rendering
 - Platform: Linux X11 and Wayland
 
-## Planned Features
+## Feature Progress
 
-- **Phase A**: Multi-window support via egui viewports
-- **Phase B**: Tab system (custom or egui_dock)
-- **Phase C**: Hybrid tabs + multi-window
+- **Phase A**: Multi-window support via egui viewports - COMPLETED (now replaced by tabs)
+- **Phase B**: Tab system (egui_dock) - COMPLETED
+- **Phase C**: Hybrid tabs + multi-window - Future

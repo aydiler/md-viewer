@@ -1,42 +1,43 @@
 # Architecture
 
-Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing markdown files using egui + egui_commonmark.
+Single-file Rust desktop application (`src/main.rs`, ~1100 lines) for viewing markdown files using egui + egui_commonmark with a custom tab system.
 
 ## Core Components
 
 - **MarkdownApp**: Main struct implementing `eframe::App`. Holds:
-  - `CommonMarkCache` - **must persist across frames** (never recreate per-frame, only reset on file load)
-  - `content: String` - current markdown text
-  - `current_file: Option<PathBuf>` - loaded file path
+  - `tabs: Vec<Tab>` - list of open tabs
+  - `active_tab: usize` - index of the currently active tab
+  - `dark_mode: bool` - global theme setting
+  - `zoom_level: f32` - global zoom (0.5 to 3.0)
+  - `show_outline: bool` - toggle outline sidebar visibility
+  - `watch_enabled: bool` - file watching state
   - `watcher` + `watcher_rx` - file watching via mpsc channel
-  - `scroll_offset` + `content_lines` - viewport tracking for performance
-  - `document_title: Option<String>` - first h1 header used as sidebar title
-  - `outline_headers: Vec<Header>` - parsed headers for outline (excludes first h1)
-  - `show_outline: bool` - toggle sidebar visibility
-  - `pending_scroll_offset` - scroll target for outline navigation
-  - `history_back` + `history_forward` - navigation history for back/forward
-  - `local_links: Vec<String>` - cached local markdown links for link hook handling
-  - `show_minimap: bool` - toggle minimap visibility
-  - `minimap_blocks: Vec<MinimapBlock>` - cached content blocks for minimap rendering
-  - `minimap_pending_scroll: Option<f32>` - scroll target from minimap click
-  - `child_windows: Vec<ChildWindow>` - multi-window support for opening links in new windows
-  - `next_child_id: u64` - counter for generating unique viewport IDs
+  - `watched_paths: HashSet<PathBuf>` - unified watcher for all open tabs
+  - `hovered_tab: Option<usize>` - for showing close button on hover
 
-- **ChildWindow**: Struct for child windows opened via Ctrl+Click on links. Each has:
-  - Its own `CommonMarkCache`, content, scroll state, outline, and navigation history
-  - Shared settings from main window: `dark_mode`, `zoom_level`, `show_outline`
-  - No file watching (simplicity for Phase A)
-  - Links navigate in-place (no Ctrl+Click to spawn sub-children)
+- **Tab**: Per-tab state for a document. Each tab has:
+  - `id: egui::Id` - unique identifier
+  - `path: PathBuf` - file path
+  - `content: String` - markdown text
+  - `cache: CommonMarkCache` - **must persist across frames** (never recreate per-frame, only reset on file load)
+  - `document_title: Option<String>` - first h1 used as sidebar title
+  - `outline_headers: Vec<Header>` - parsed headers for outline
+  - `scroll_offset`, `pending_scroll_offset`, `last_content_height` - scroll state
+  - `local_links: Vec<String>` - cached local markdown links
+  - `history_back`, `history_forward: Vec<PathBuf>` - per-tab navigation history
 
-- **PersistedState**: Serializable struct for session persistence (dark_mode, last_file, zoom_level, show_outline, show_minimap). Stored via eframe's storage API with key `"md-viewer-state"`.
+- **PersistedState**: Serializable struct for session persistence:
+  - `dark_mode: Option<bool>`
+  - `zoom_level: Option<f32>`
+  - `show_outline: Option<bool>`
+  - `open_tabs: Option<Vec<PathBuf>>` - restore tabs on startup
+  - `active_tab: Option<usize>` - restore active tab position
 
-- **File Watching**: Uses `notify-debouncer-mini` with 200ms debounce. Events are polled non-blocking via `try_recv()` at start of each `update()` call. Auto-recovers up to 3 times on watcher failure.
+- **File Watching**: Uses `notify-debouncer-mini` with 200ms debounce. Watches all open tab paths. On change, reloads matching tabs. Auto-recovers up to 3 times on watcher failure.
 
-- **Header Outline**: `parse_headers()` returns a `ParsedHeaders` struct containing `document_title` (first h1) and `outline_headers` (remaining headers). The first h1 is used as the sidebar title instead of "Outline". Headers are displayed in a resizable left sidebar with level-based indentation via string prefix. Click-to-navigate calculates scroll offset from line number ratio.
+- **Header Outline**: `parse_headers()` returns a `ParsedHeaders` struct containing `document_title` (first h1) and `outline_headers` (remaining headers). Rendered as a resizable left sidebar.
 
-- **Link Navigation**: Uses egui_commonmark's link hook mechanism to intercept clicks on local markdown links. `parse_local_links()` extracts all relative markdown file links and anchor-only links from content (skipping code blocks). Links are registered via `cache.add_link_hook()` and checked after each render via `get_link_hook()`. Navigation resolves paths relative to current file's directory and maintains back/forward history. Anchor-only links (`#section`) are intercepted but ignored (prevents browser errors).
-
-- **Minimap**: VS Code-style document overview in a right sidebar. Uses colored blocks (not scaled text) to represent content types. `parse_minimap_blocks()` analyzes markdown to identify block types (headers, code blocks, lists, blockquotes, text). Rendered using `egui::Painter` API with `allocate_painter()` for efficient drawing. Includes a viewport indicator showing current scroll position. Click/drag on minimap navigates to that position in the document.
+- **Link Navigation**: Uses egui_commonmark's link hook mechanism. Ctrl+Click opens links in new tabs, regular click navigates within the current tab.
 
 - **Global Allocator**: mimalloc for performance
 
@@ -46,7 +47,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 |-------|---------|
 | eframe/egui 0.33 | GUI framework (glow backend for Wayland) |
 | egui_commonmark 0.22 | Markdown rendering with syntax highlighting |
-| notify 6.1 + notify-debouncer-mini 0.4 | File watching (notify-debouncer-mini 0.4 requires notify 6.x) |
+| notify 6.1 + notify-debouncer-mini 0.4 | File watching |
 | rfd | Native file dialogs |
 | clap | CLI argument parsing |
 | regex | Header parsing for outline |
@@ -54,25 +55,29 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 ## Rendering Flow
 
 ```
-update() → check_file_changes() → reload if needed
+update() → check_file_changes() → reload affected tabs
          → request_repaint_after(100ms) if watching
-         → TopBottomPanel (menu bar + LIVE indicator)
-         → SidePanel::left (outline, if show_outline && outline_headers exist)
-         → SidePanel::right (minimap, if show_minimap && content_lines > 0)
-         → CentralPanel → ScrollArea::show_viewport → CommonMarkViewer
-         → check_link_hooks() → Ctrl+Click opens new window OR navigate in-place
-         → show_viewport_immediate() for each child window
-         → cleanup closed child windows
+         → Apply theme, zoom settings
+         → TopBottomPanel (menu bar + LIVE indicator + file path)
+         → TopBottomPanel (error bar, if any)
+         → TopBottomPanel (tab bar) → render_tab_bar()
+         → CentralPanel → render_tab_content()
+           → SidePanel::left (outline, if show_outline && headers exist)
+           → ScrollArea::show_viewport → CommonMarkViewer
+           → check_link_hooks() → handle navigation
+         → Drag-and-drop overlay
 ```
 
 Uses `show_viewport` for optimized rendering - egui clips content outside the visible area.
 
-## Multi-Window Support
+## Custom Tab System
 
-Child windows are rendered using egui's `show_viewport_immediate()` API, which allows:
-- Direct state modification within the callback
-- Separate OS windows with their own title bars
-- Shared theme/zoom settings from the main window
-- Independent navigation history per window
-
-Ctrl+Click on a link in the main window opens it in a new window. If the file is already open in a child window, the existing window is reactivated instead of creating a duplicate.
+The tab system uses a simple `Vec<Tab>` with an `active_tab` index:
+- Tab bar rendered using `ui.selectable_label()` in a horizontal scroll area
+- Close button (×) shown on hover or for active tab
+- Context menu with "Close" and "Close Others" options
+- Middle-click to close tabs
+- Ctrl+Click on links opens in a new tab
+- Regular click navigates within the current tab
+- Each tab maintains independent navigation history (Alt+Left/Right)
+- Session restore opens previously open tabs and restores active tab
