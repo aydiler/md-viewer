@@ -1282,6 +1282,21 @@ impl eframe::App for MarkdownApp {
                         ui.set_max_width(ui.available_width());
                         ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
                     });
+                    // Collapse/Expand All buttons
+                    if any_header_has_children(&self.outline_headers) {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Collapse All").clicked() {
+                                for idx in 0..self.outline_headers.len() {
+                                    if header_has_children(&self.outline_headers, idx) {
+                                        self.collapsed_headers.insert(idx);
+                                    }
+                                }
+                            }
+                            if ui.small_button("Expand All").clicked() {
+                                self.collapsed_headers.clear();
+                            }
+                        });
+                    }
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -1668,6 +1683,21 @@ impl eframe::App for MarkdownApp {
                                     ui.set_max_width(ui.available_width());
                                     ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
                                 });
+                                // Collapse/Expand All buttons
+                                if any_header_has_children(&child.outline_headers) {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Collapse All").clicked() {
+                                            for idx in 0..child.outline_headers.len() {
+                                                if header_has_children(&child.outline_headers, idx) {
+                                                    child.collapsed_headers.insert(idx);
+                                                }
+                                            }
+                                        }
+                                        if ui.small_button("Expand All").clicked() {
+                                            child.collapsed_headers.clear();
+                                        }
+                                    });
+                                }
                                 ui.separator();
                                 egui::ScrollArea::vertical()
                                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
