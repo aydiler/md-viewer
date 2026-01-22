@@ -455,6 +455,12 @@ pub struct CommonMarkCache {
 
     scroll: HashMap<egui::Id, ScrollableCache>,
     pub(self) has_installed_loaders: bool,
+
+    /// Stores the y-position of each header (by normalized title) for scroll navigation.
+    /// Populated during rendering, cleared on content change.
+    header_positions: HashMap<String, f32>,
+    /// Current scroll offset, set before rendering to calculate content-relative positions.
+    current_scroll_offset: f32,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -468,6 +474,8 @@ impl Default for CommonMarkCache {
             link_hooks: HashMap::new(),
             scroll: Default::default(),
             has_installed_loaders: false,
+            header_positions: HashMap::new(),
+            current_scroll_offset: 0.0,
         }
     }
 }
@@ -592,6 +600,37 @@ impl CommonMarkCache {
             .get(options.curr_theme(ui))
             // Since we have called load_defaults, the default theme *should* always be available..
             .unwrap_or_else(|| &self.ts.themes[default_theme(ui)])
+    }
+
+    /// Set the current scroll offset before rendering.
+    /// This is used to calculate content-relative header positions.
+    pub fn set_scroll_offset(&mut self, offset: f32) {
+        self.current_scroll_offset = offset;
+    }
+
+    /// Record the y-position of a header for scroll navigation.
+    /// Converts viewport-relative position to content-relative using scroll offset.
+    /// Only records if not already recorded (first render captures correct position).
+    pub fn record_header_position(&mut self, title: &str, viewport_y: f32) {
+        let key = title.trim().to_lowercase();
+        // Only record on first encounter to avoid position jumping
+        if !self.header_positions.contains_key(&key) {
+            let content_y = self.current_scroll_offset + viewport_y;
+            self.header_positions.insert(key, content_y);
+        }
+    }
+
+    /// Get the y-position of a header by its title (content-relative).
+    /// Returns None if the header hasn't been rendered yet.
+    pub fn get_header_position(&self, title: &str) -> Option<f32> {
+        let key = title.trim().to_lowercase();
+        self.header_positions.get(&key).copied()
+    }
+
+    /// Clear all recorded header positions.
+    /// Should be called when content changes.
+    pub fn clear_header_positions(&mut self) {
+        self.header_positions.clear();
     }
 }
 

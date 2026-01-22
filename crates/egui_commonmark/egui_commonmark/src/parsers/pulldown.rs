@@ -86,6 +86,10 @@ pub struct CommonMarkViewerInternal {
     is_table: bool,
     is_blockquote: bool,
     checkbox_events: Vec<CheckboxClickEvent>,
+
+    /// Track current heading for position recording
+    current_heading_y: Option<f32>,
+    current_heading_text: String,
 }
 
 pub(crate) struct CheckboxClickEvent {
@@ -109,6 +113,8 @@ impl CommonMarkViewerInternal {
             is_table: false,
             is_blockquote: false,
             checkbox_events: Vec::new(),
+            current_heading_y: None,
+            current_heading_text: String::new(),
         }
     }
 }
@@ -588,6 +594,8 @@ impl CommonMarkViewerInternal {
         } else if let Some(link) = &mut self.link {
             link.text.push(rich_text);
         } else if self.text_style.heading.is_some() {
+            // Accumulate heading text for position tracking
+            self.current_heading_text.push_str(&text);
             // Calculate a rect at the left edge for heading placement
             let available = ui.available_rect_before_wrap();
             let left_edge = ui.min_rect().left();
@@ -611,6 +619,9 @@ impl CommonMarkViewerInternal {
             pulldown_cmark::Tag::Heading { level, .. } => {
                 // End current row to ensure heading starts at left edge
                 ui.end_row();
+                // Record position BEFORE spacing for scroll navigation
+                self.current_heading_y = Some(ui.cursor().top());
+                self.current_heading_text.clear();
                 // Add extra spacing above headings if configured
                 heading_start_spacing(ui, &options.typography);
                 self.text_style.heading = Some(match level {
@@ -737,6 +748,13 @@ impl CommonMarkViewerInternal {
                 paragraph_end_spacing(ui, &options.typography);
             }
             pulldown_cmark::TagEnd::Heading { .. } => {
+                // Record header position for scroll navigation
+                if let Some(y) = self.current_heading_y.take() {
+                    if !self.current_heading_text.is_empty() {
+                        cache.record_header_position(&self.current_heading_text, y);
+                    }
+                }
+                self.current_heading_text.clear();
                 // Add extra spacing below headings if configured
                 heading_end_spacing(ui, &options.typography);
                 self.line.try_insert_end(ui);

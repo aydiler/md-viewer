@@ -50,6 +50,19 @@ if default_width as f32 > max_width { default_width as f32 }
 ```
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs`
 
+### Line ratio scroll calculation is inaccurate
+**Context:** Clicking outline headers scrolled to wrong position
+**Problem:** Using `line_number / content_lines * content_height` assumes linear relationship between line count and rendered height, but markdown has variable heights (headers, code blocks, spacing).
+**Fix:** Track actual header positions during rendering by adding position tracking to `CommonMarkCache`:
+```rust
+// In CommonMarkCache - track positions
+cache.set_scroll_offset(viewport.min.y);  // Before render
+cache.record_header_position(title, y);   // During render
+let pos = cache.get_header_position(title); // For scroll
+```
+**Key insight:** `ui.cursor().top()` inside `show_viewport` is viewport-relative, not content-relative. Add `viewport.min.y` to convert.
+**Files:** `crates/egui_commonmark/`, `src/main.rs`
+
 ---
 
 ## egui
