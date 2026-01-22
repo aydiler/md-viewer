@@ -58,10 +58,15 @@ This provides approximate scrolling that gets the header into view, after which 
 
 ## Testing Notes
 
-**Test case:** `/home/ahmet/discord-phone-bridge/worktrees/saas-phase1/docs/LESSONS.md`
+**Test case:** `/home/ahmet/discord-phone-bridge/worktrees/main/docs/LESSONS.md`
 - File with headers spread across ~95 lines
 - Previously: Clicking outline headers did nothing (they were below viewport)
-- After fix: Clicking scrolls to approximate position, then exact position on second click
+- After fix: Clicking scrolls to approximate position using line number estimation
+
+**Verified with egui MCP:**
+1. Scrolled to top (clicked "Lessons Learned")
+2. Clicked "Add your lessons below as you discover them" in outline (unrendered header at bottom)
+3. ✅ Scrolled directly to the header using fallback estimation
 
 **Edge cases handled:**
 - Empty content (`content_lines = 0`): Fallback skipped, no crash
