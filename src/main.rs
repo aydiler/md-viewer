@@ -1165,8 +1165,8 @@ impl MarkdownApp {
             return;
         }
 
-        // Handle outline header click
-        let mut clicked_header_title: Option<String> = None;
+        // Handle outline header click (store index to access both title and line_number)
+        let mut clicked_header_index: Option<usize> = None;
 
         // Collect widget data for MCP registration (name, widget_type, rect, value)
         #[cfg(feature = "mcp")]
@@ -1292,37 +1292,37 @@ impl MarkdownApp {
                                 }
 
                                 // Header title
-                                let display_text = if header.title.len() > 35 {
-                                    format!("{}...", &header.title[..32])
-                                } else {
-                                    header.title.clone()
-                                };
+                                    let display_text = if header.title.len() > 35 {
+                                        format!("{}...", &header.title[..32])
+                                    } else {
+                                        header.title.clone()
+                                    };
 
-                                let response = ui.selectable_label(false, &display_text);
+                                    let response = ui.selectable_label(false, &display_text);
 
-                                // Collect header for MCP
-                                #[cfg(feature = "mcp")]
-                                widget_data.push((
-                                    format!("Header: {}", header.title),
-                                    "header",
-                                    response.rect,
-                                    Some(format!("h{}", header.level)),
-                                ));
+                                    // Collect header for MCP
+                                    #[cfg(feature = "mcp")]
+                                    widget_data.push((
+                                        format!("Header: {}", header.title),
+                                        "header",
+                                        response.rect,
+                                        Some(format!("h{}", header.level)),
+                                    ));
 
-                                if !is_dragging && response.clicked() {
-                                    clicked_header_title = Some(header.title.clone());
-                                }
-                            });
-                        }
-                        // Apply toggle after iteration to avoid borrow issues
-                        if let Some(idx) = toggle_index {
-                            if tab.collapsed_headers.contains(&idx) {
-                                tab.collapsed_headers.remove(&idx);
-                            } else {
-                                tab.collapsed_headers.insert(idx);
+                                    if !is_dragging && response.clicked() {
+                                        clicked_header_index = Some(idx);
+                                    }
+                                });
                             }
-                        }
-                    });
+                            // Apply toggle after iteration to avoid borrow issues
+                            if let Some(idx) = toggle_index {
+                                if tab.collapsed_headers.contains(&idx) {
+                                    tab.collapsed_headers.remove(&idx);
+                                } else {
+                                    tab.collapsed_headers.insert(idx);
+                                }
+                            }
+                        });
             });
 
         // Register all collected widgets with MCP bridge
@@ -1337,11 +1337,19 @@ impl MarkdownApp {
         }
 
         // Calculate scroll target if header was clicked
-        if let Some(title) = clicked_header_title {
-            // Look up actual rendered position from cache
-            if let Some(y_pos) = tab.cache.get_header_position(&title) {
-                // Subtract offset so header appears slightly below top edge
-                tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
+        if let Some(idx) = clicked_header_index {
+            if let Some(header) = tab.outline_headers.get(idx) {
+                // Try to get actual rendered position from cache first
+                if let Some(y_pos) = tab.cache.get_header_position(&header.title) {
+                    // Use exact position if available (header has been rendered)
+                    tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
+                } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
+                    // Fallback: estimate position based on line number ratio
+                    // This works for headers that haven't been rendered yet
+                    let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
+                        * tab.last_content_height;
+                    tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
+                }
             }
         }
     }
