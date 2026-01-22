@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -50,6 +51,8 @@ struct ChildWindow {
     open: bool,
     document_title: Option<String>,
     outline_headers: Vec<Header>,
+    /// Set of header indices that are collapsed in the outline
+    collapsed_headers: HashSet<usize>,
     scroll_offset: f32,
     last_content_height: f32,
     pending_scroll_offset: Option<f32>,
@@ -79,6 +82,7 @@ impl ChildWindow {
             open: true,
             document_title: parsed.document_title,
             outline_headers: parsed.outline_headers,
+            collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
             last_content_height: 0.0,
             pending_scroll_offset: None,
@@ -111,6 +115,7 @@ impl ChildWindow {
             let parsed = parse_headers(&self.content);
             self.document_title = parsed.document_title;
             self.outline_headers = parsed.outline_headers;
+            self.collapsed_headers.clear();
 
             self.local_links = parse_local_links(&self.content);
             for link in &self.local_links {
@@ -278,6 +283,43 @@ fn parse_headers(content: &str) -> ParsedHeaders {
     }
 }
 
+/// Check if header at `index` has children (headers with higher level following it)
+fn header_has_children(headers: &[Header], index: usize) -> bool {
+    if index >= headers.len() {
+        return false;
+    }
+    let current_level = headers[index].level;
+    // Check the next header - if it has a higher level (e.g., h3 under h2), this header has children
+    if let Some(next) = headers.get(index + 1) {
+        return next.level > current_level;
+    }
+    false
+}
+
+/// Check if header at `index` should be hidden because an ancestor is collapsed
+fn header_is_hidden(headers: &[Header], index: usize, collapsed: &HashSet<usize>) -> bool {
+    if index == 0 || index >= headers.len() {
+        return false;
+    }
+    let mut search_level = headers[index].level;
+    // Walk backwards to find ancestors
+    for i in (0..index).rev() {
+        let h = &headers[i];
+        // Only consider headers with lower level than what we're searching for
+        if h.level < search_level {
+            // Found an ancestor
+            if collapsed.contains(&i) {
+                return true;
+            }
+            // This ancestor is not collapsed, but check its ancestors too
+            // Update search_level to only look for even lower level headers
+            search_level = h.level;
+        }
+        // Headers at same or higher level are siblings/cousins, skip them
+    }
+    false
+}
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -334,6 +376,8 @@ struct MarkdownApp {
     // Outline state
     document_title: Option<String>,
     outline_headers: Vec<Header>,
+    /// Set of header indices that are collapsed in the outline
+    collapsed_headers: HashSet<usize>,
     show_outline: bool,
     pending_scroll_offset: Option<f32>,
     last_content_height: f32,
@@ -382,6 +426,7 @@ impl MarkdownApp {
             zoom_level,
             document_title: parsed.document_title,
             outline_headers: parsed.outline_headers,
+            collapsed_headers: HashSet::new(),
             show_outline,
             pending_scroll_offset: None,
             last_content_height: 0.0,
@@ -433,6 +478,7 @@ impl MarkdownApp {
                 let parsed = parse_headers(&self.content);
                 self.document_title = parsed.document_title;
                 self.outline_headers = parsed.outline_headers;
+                self.collapsed_headers.clear();
 
                 // Parse and register local links for link hook handling
                 self.local_links = parse_local_links(&self.content);
@@ -1045,22 +1091,62 @@ impl eframe::App for MarkdownApp {
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
                         .show(ui, |ui| {
-                            for header in &self.outline_headers {
+                            let mut toggle_index: Option<usize> = None;
+                            for (idx, header) in self.outline_headers.iter().enumerate() {
+                                // Skip headers hidden by collapsed ancestors
+                                if header_is_hidden(&self.outline_headers, idx, &self.collapsed_headers) {
+                                    continue;
+                                }
+
+                                let has_children = header_has_children(&self.outline_headers, idx);
+                                let is_collapsed = self.collapsed_headers.contains(&idx);
+
                                 // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
                                 let indent = (header.level.saturating_sub(2) as usize) * 12;
-                                let prefix = " ".repeat(indent / 4); // Use spaces for indent
 
-                                let display_text = if header.title.len() > 40 {
-                                    format!("{}{}...", prefix, &header.title[..37])
+                                ui.horizontal(|ui| {
+                                    // Add base indent
+                                    if indent > 0 {
+                                        ui.add_space(indent as f32);
+                                    }
+
+                                    // Fold indicator (clickable if has children)
+                                    if has_children {
+                                        let indicator = if is_collapsed { ">" } else { "v" };
+                                        let indicator_response = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(indicator)
+                                                    .small()
+                                                    .color(ui.visuals().weak_text_color())
+                                            ).sense(egui::Sense::click())
+                                        );
+                                        if !is_dragging && indicator_response.clicked() {
+                                            toggle_index = Some(idx);
+                                        }
+                                    } else {
+                                        // Empty space for alignment
+                                        ui.add_space(12.0);
+                                    }
+
+                                    // Header title
+                                    let display_text = if header.title.len() > 35 {
+                                        format!("{}...", &header.title[..32])
+                                    } else {
+                                        header.title.clone()
+                                    };
+
+                                    let response = ui.selectable_label(false, &display_text);
+                                    if !is_dragging && response.clicked() {
+                                        clicked_header_line = Some(header.line_number);
+                                    }
+                                });
+                            }
+                            // Apply toggle after iteration to avoid borrow issues
+                            if let Some(idx) = toggle_index {
+                                if self.collapsed_headers.contains(&idx) {
+                                    self.collapsed_headers.remove(&idx);
                                 } else {
-                                    format!("{}{}", prefix, &header.title)
-                                };
-
-                                // Always use selectable_label for consistent spacing
-                                // Only handle clicks when not dragging (to avoid accidental clicks during resize)
-                                let response = ui.selectable_label(false, &display_text);
-                                if !is_dragging && response.clicked() {
-                                    clicked_header_line = Some(header.line_number);
+                                    self.collapsed_headers.insert(idx);
                                 }
                             }
                         });
@@ -1273,17 +1359,56 @@ impl eframe::App for MarkdownApp {
                                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                                     .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
                                     .show(ui, |ui| {
-                                        for header in &child.outline_headers {
+                                        let mut toggle_index: Option<usize> = None;
+                                        for (idx, header) in child.outline_headers.iter().enumerate() {
+                                            // Skip headers hidden by collapsed ancestors
+                                            if header_is_hidden(&child.outline_headers, idx, &child.collapsed_headers) {
+                                                continue;
+                                            }
+
+                                            let has_children = header_has_children(&child.outline_headers, idx);
+                                            let is_collapsed = child.collapsed_headers.contains(&idx);
+
                                             let indent = (header.level.saturating_sub(2) as usize) * 12;
-                                            let prefix = " ".repeat(indent / 4);
-                                            let display_text = if header.title.len() > 40 {
-                                                format!("{}{}...", prefix, &header.title[..37])
+
+                                            ui.horizontal(|ui| {
+                                                if indent > 0 {
+                                                    ui.add_space(indent as f32);
+                                                }
+
+                                                if has_children {
+                                                    let indicator = if is_collapsed { ">" } else { "v" };
+                                                    let indicator_response = ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(indicator)
+                                                                .small()
+                                                                .color(ui.visuals().weak_text_color())
+                                                        ).sense(egui::Sense::click())
+                                                    );
+                                                    if !is_dragging && indicator_response.clicked() {
+                                                        toggle_index = Some(idx);
+                                                    }
+                                                } else {
+                                                    ui.add_space(12.0);
+                                                }
+
+                                                let display_text = if header.title.len() > 35 {
+                                                    format!("{}...", &header.title[..32])
+                                                } else {
+                                                    header.title.clone()
+                                                };
+
+                                                let response = ui.selectable_label(false, &display_text);
+                                                if !is_dragging && response.clicked() {
+                                                    clicked_header_line = Some(header.line_number);
+                                                }
+                                            });
+                                        }
+                                        if let Some(idx) = toggle_index {
+                                            if child.collapsed_headers.contains(&idx) {
+                                                child.collapsed_headers.remove(&idx);
                                             } else {
-                                                format!("{}{}", prefix, &header.title)
-                                            };
-                                            let response = ui.selectable_label(false, &display_text);
-                                            if !is_dragging && response.clicked() {
-                                                clicked_header_line = Some(header.line_number);
+                                                child.collapsed_headers.insert(idx);
                                             }
                                         }
                                     });
