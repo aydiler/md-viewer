@@ -62,6 +62,39 @@ struct MarkdownApp {
 
 ---
 
+## Custom Tab System
+
+### Avoid iterating and mutating tabs simultaneously
+**Context:** Rendering tab bar while handling close actions
+**Problem:** Can't mutate `self.tabs` while iterating over it in a closure
+**Fix:** Collect tab info (title, active state) before iterating, then process actions after:
+```rust
+// Collect data first
+let tab_info: Vec<(String, bool)> = self.tabs.iter()
+    .enumerate()
+    .map(|(idx, tab)| (tab.title(), idx == self.active_tab))
+    .collect();
+
+// Then iterate over collected data
+for (idx, (title, is_active)) in tab_info.iter().enumerate() {
+    // Render without borrowing self.tabs
+}
+
+// Handle mutations after the loop
+if let Some(idx) = tab_to_close {
+    self.close_tab(idx);
+}
+```
+**Files:** `src/main.rs`
+
+### ui.close() replaces ui.close_menu()
+**Context:** Closing context menus in egui 0.33
+**Problem:** `ui.close_menu()` is deprecated
+**Fix:** Use `ui.close()` instead
+**Files:** `src/main.rs`
+
+---
+
 ## notify / File Watching
 
 ### notify-debouncer-mini 0.4 requires notify 6.x
