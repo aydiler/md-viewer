@@ -20,6 +20,17 @@ use egui_mcp_bridge::{McpBridge, McpUiExt};
 const APP_KEY: &str = "md-viewer-state";
 const MAX_WATCHER_RETRIES: u32 = 3;
 
+// Optimal widths for initial window sizing (based on typography research)
+// Content: 600px optimal for 55-75 CPL readability
+// Explorer: 200px default with 16px inner margins
+// Outline: 200px default with 8px inner margins
+// Plus ~16px for panel separators
+const CONTENT_OPTIMAL_WIDTH: f32 = 600.0;
+const EXPLORER_DEFAULT_WIDTH: f32 = 216.0; // 200 + 16 margins
+const OUTLINE_DEFAULT_WIDTH: f32 = 208.0; // 200 + 8 margins
+const PANEL_SEPARATORS: f32 = 16.0;
+const OPTIMAL_WINDOW_HEIGHT: f32 = 750.0;
+
 /// Persisted state saved between sessions
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedState {
@@ -542,9 +553,13 @@ fn main() -> eframe::Result<()> {
 
     let args = Args::parse();
 
+    // Calculate optimal window width assuming both sidebars are shown (the default)
+    let optimal_width =
+        CONTENT_OPTIMAL_WIDTH + EXPLORER_DEFAULT_WIDTH + OUTLINE_DEFAULT_WIDTH + PANEL_SEPARATORS;
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 700.0])
+            .with_inner_size([optimal_width, OPTIMAL_WINDOW_HEIGHT])
             .with_min_inner_size([400.0, 300.0])
             .with_title("Markdown Viewer")
             .with_drag_and_drop(true),
