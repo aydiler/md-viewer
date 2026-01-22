@@ -35,7 +35,7 @@ egui_dock = "0.15"
 - Would need to adapt our sidebars to work with docking
 - Extra dependency ~100KB
 
-### Option 2: Custom Vec<Tab> implementation
+### Option 2: Custom `Vec<Tab>` implementation
 
 Simple `Vec<Tab>` with manual tab bar rendering:
 ```rust
