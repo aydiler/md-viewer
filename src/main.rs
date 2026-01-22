@@ -14,6 +14,9 @@ use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "mcp")]
+use egui_mcp_bridge::McpBridge;
+
 const APP_KEY: &str = "md-viewer-state";
 const MAX_WATCHER_RETRIES: u32 = 3;
 
@@ -554,6 +557,9 @@ struct MarkdownApp {
     // File explorer state
     file_explorer: FileExplorer,
     show_explorer: bool,
+    // MCP bridge for E2E testing
+    #[cfg(feature = "mcp")]
+    mcp_bridge: McpBridge,
 }
 
 impl MarkdownApp {
@@ -622,6 +628,11 @@ impl MarkdownApp {
             file_explorer.expanded_dirs = expanded.into_iter().collect();
         }
 
+        #[cfg(feature = "mcp")]
+        let mcp_bridge = McpBridge::builder().port(9877).build();
+        #[cfg(feature = "mcp")]
+        log::info!("MCP bridge listening on port {}", mcp_bridge.port());
+
         let mut app = Self {
             tabs,
             active_tab,
@@ -638,6 +649,8 @@ impl MarkdownApp {
             hovered_tab: None,
             file_explorer,
             show_explorer,
+            #[cfg(feature = "mcp")]
+            mcp_bridge,
         };
 
         if watch {
@@ -906,6 +919,10 @@ impl MarkdownApp {
         let tab_count = tab_info.len();
         let hovered_tab = self.hovered_tab;
 
+        // Collect widget data for MCP registration (name, widget_type, rect, value)
+        #[cfg(feature = "mcp")]
+        let mut widget_data: Vec<(String, &'static str, egui::Rect, Option<String>)> = Vec::new();
+
         ui.horizontal(|ui| {
             // Scrollable tab area
             egui::ScrollArea::horizontal()
@@ -923,6 +940,15 @@ impl MarkdownApp {
 
                                 let response = ui.selectable_label(*is_active, text);
 
+                                // Collect tab widget data for MCP
+                                #[cfg(feature = "mcp")]
+                                widget_data.push((
+                                    format!("Tab: {}", title),
+                                    "tab",
+                                    response.rect,
+                                    Some(if *is_active { "active".to_string() } else { "".to_string() }),
+                                ));
+
                                 if response.clicked() {
                                     new_active = Some(idx);
                                 }
@@ -935,6 +961,16 @@ impl MarkdownApp {
                                 // Close button (show on hover or active)
                                 if *is_active || is_hovered {
                                     let close_btn = ui.small_button("×");
+
+                                    // Collect close button widget data for MCP
+                                    #[cfg(feature = "mcp")]
+                                    widget_data.push((
+                                        format!("Close Tab: {}", title),
+                                        "button",
+                                        close_btn.rect,
+                                        None,
+                                    ));
+
                                     if close_btn.clicked() {
                                         tab_to_close = Some(idx);
                                     }
@@ -968,10 +1004,32 @@ impl MarkdownApp {
                 });
 
             // New tab button
-            if ui.button("+").on_hover_text("New Tab (Ctrl+T)").clicked() {
+            let new_tab_btn = ui.button("+").on_hover_text("New Tab (Ctrl+T)");
+
+            // Collect new tab button widget data for MCP
+            #[cfg(feature = "mcp")]
+            widget_data.push((
+                "New Tab".to_string(),
+                "button",
+                new_tab_btn.rect,
+                None,
+            ));
+
+            if new_tab_btn.clicked() {
                 self.open_file_dialog();
             }
         });
+
+        // Register all collected widgets with MCP bridge
+        #[cfg(feature = "mcp")]
+        for (name, widget_type, rect, value) in widget_data {
+            self.mcp_bridge.register_widget_rect(
+                &name,
+                widget_type,
+                rect,
+                value.as_deref(),
+            );
+        }
 
         // Apply new active tab
         if let Some(idx) = new_active {
@@ -1004,6 +1062,10 @@ impl MarkdownApp {
         // Handle outline header click
         let mut clicked_header_title: Option<String> = None;
 
+        // Collect widget data for MCP registration (name, widget_type, rect, value)
+        #[cfg(feature = "mcp")]
+        let mut widget_data: Vec<(String, &'static str, egui::Rect, Option<String>)> = Vec::new();
+
         // Outline sidebar
         if self.show_outline && !tab.outline_headers.is_empty() {
             let is_dragging = ui.ctx().input(|i| i.pointer.any_down());
@@ -1027,10 +1089,33 @@ impl MarkdownApp {
                     if has_nested {
                         ui.horizontal(|ui| {
                             ui.add_space(6.0);
-                            if ui.small_button("Expand All").clicked() {
+                            let expand_btn = ui.small_button("Expand All");
+
+                            // Collect Expand All button for MCP
+                            #[cfg(feature = "mcp")]
+                            widget_data.push((
+                                "Expand All".to_string(),
+                                "button",
+                                expand_btn.rect,
+                                None,
+                            ));
+
+                            if expand_btn.clicked() {
                                 tab.collapsed_headers.clear();
                             }
-                            if ui.small_button("Collapse All").clicked() {
+
+                            let collapse_btn = ui.small_button("Collapse All");
+
+                            // Collect Collapse All button for MCP
+                            #[cfg(feature = "mcp")]
+                            widget_data.push((
+                                "Collapse All".to_string(),
+                                "button",
+                                collapse_btn.rect,
+                                None,
+                            ));
+
+                            if collapse_btn.clicked() {
                                 for i in 0..tab.outline_headers.len() {
                                     if header_has_children(&tab.outline_headers, i) {
                                         tab.collapsed_headers.insert(i);
@@ -1085,6 +1170,16 @@ impl MarkdownApp {
                                                 egui::FontId::monospace(16.0),
                                                 text_color,
                                             );
+
+                                            // Collect fold indicator for MCP
+                                            #[cfg(feature = "mcp")]
+                                            widget_data.push((
+                                                format!("Toggle: {}", header.title),
+                                                "button",
+                                                rect,
+                                                Some(if is_collapsed { "collapsed".to_string() } else { "expanded".to_string() }),
+                                            ));
+
                                             if !is_dragging && response.clicked() {
                                                 toggle_index = Some(idx);
                                             }
@@ -1099,6 +1194,16 @@ impl MarkdownApp {
                                     };
 
                                     let response = ui.selectable_label(false, &display_text);
+
+                                    // Collect header for MCP
+                                    #[cfg(feature = "mcp")]
+                                    widget_data.push((
+                                        format!("Header: {}", header.title),
+                                        "header",
+                                        response.rect,
+                                        Some(format!("h{}", header.level)),
+                                    ));
+
                                     if !is_dragging && response.clicked() {
                                         clicked_header_title = Some(header.title.clone());
                                     }
@@ -1114,6 +1219,17 @@ impl MarkdownApp {
                             }
                         });
                 });
+        }
+
+        // Register all collected widgets with MCP bridge
+        #[cfg(feature = "mcp")]
+        for (name, widget_type, rect, value) in widget_data {
+            self.mcp_bridge.register_widget_rect(
+                &name,
+                widget_type,
+                rect,
+                value.as_deref(),
+            );
         }
 
         // Calculate scroll target if header was clicked
@@ -1305,6 +1421,16 @@ impl MarkdownApp {
                     };
 
                     let response = ui.selectable_label(is_open, text);
+
+                    // Register file entry with MCP bridge
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        &format!("File: {}", name),
+                        "file",
+                        &response,
+                        Some(if is_open { "open" } else { "" }),
+                    );
+
                     // Show full name on hover if truncated
                     if name.len() > max_len {
                         response.clone().on_hover_text(name);
@@ -1322,7 +1448,18 @@ impl MarkdownApp {
 
                     // Expand/collapse indicator
                     let indicator = if is_expanded { "v" } else { ">" };
-                    if ui.small_button(indicator).clicked() {
+                    let expand_btn = ui.small_button(indicator);
+
+                    // Register expand button with MCP bridge
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        &format!("Toggle: {}", name),
+                        "button",
+                        &expand_btn,
+                        Some(if is_expanded { "expanded" } else { "collapsed" }),
+                    );
+
+                    if expand_btn.clicked() {
                         self.file_explorer.toggle_expanded(path);
                     }
 
@@ -1338,6 +1475,16 @@ impl MarkdownApp {
                         name.clone()
                     };
                     let response = ui.label(&display_name);
+
+                    // Register directory label with MCP bridge (informational, not clickable)
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        &format!("Directory: {}", name),
+                        "label",
+                        &response,
+                        Some(if is_expanded { "expanded" } else { "collapsed" }),
+                    );
+
                     // Show full name on hover if truncated
                     if name.len() > max_len {
                         response.on_hover_text(name);
@@ -1360,6 +1507,12 @@ impl MarkdownApp {
 }
 
 impl eframe::App for MarkdownApp {
+    #[cfg(feature = "mcp")]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.mcp_bridge.process_commands();
+        self.mcp_bridge.inject_raw_input(raw_input);
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let state = PersistedState {
             dark_mode: Some(self.dark_mode),
@@ -1375,6 +1528,14 @@ impl eframe::App for MarkdownApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Enable AccessKit for MCP bridge
+        #[cfg(feature = "mcp")]
+        {
+            ctx.enable_accesskit();
+            self.mcp_bridge.begin_frame();
+            ctx.request_repaint(); // Keep processing MCP commands
+        }
+
         // Check for file changes and reload affected tabs
         let changed_paths = self.check_file_changes();
         if !changed_paths.is_empty() {
@@ -1877,6 +2038,10 @@ impl eframe::App for MarkdownApp {
                 egui::Color32::WHITE,
             );
         }
+
+        // Capture AccessKit output for MCP bridge
+        #[cfg(feature = "mcp")]
+        self.mcp_bridge.capture_output(ctx);
     }
 }
 

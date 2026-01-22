@@ -14,8 +14,12 @@ eframe = { version = "0.33", default-features = false, features = [
     "wayland",
     "x11",
     "persistence",
+    "accesskit",
 ] }
-egui = "0.33"
+egui = { version = "0.33", features = ["accesskit"] }
+
+# MCP bridge for E2E testing (optional, enable with --features mcp)
+egui-mcp-bridge = { path = "../../../egui-mcp/crates/egui-mcp-bridge", optional = true }
 
 # Markdown rendering with syntax highlighting (vendored fork with typography support)
 egui_commonmark = { path = "crates/egui_commonmark/egui_commonmark", features = [
@@ -43,6 +47,10 @@ serde = { version = "1", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
 regex = "1.12.2"
+
+[features]
+default = []
+mcp = ["dep:egui-mcp-bridge"]
 
 [profile.release]
 opt-level = "z"
