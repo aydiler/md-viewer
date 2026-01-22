@@ -1018,7 +1018,7 @@ impl eframe::App for MarkdownApp {
             });
         });
 
-        // Outline sidebar (left side)
+        // Outline sidebar (right side)
         let mut clicked_header_line: Option<usize> = None;
         if self.show_outline && !self.outline_headers.is_empty() {
             // Check if any pointer is down (potential resize in progress)
@@ -1027,12 +1027,12 @@ impl eframe::App for MarkdownApp {
             // Use document title if available, otherwise "Outline"
             let sidebar_title = self.document_title.as_deref().unwrap_or("Outline");
 
-            egui::SidePanel::left("outline")
+            egui::SidePanel::right("outline")
                 .resizable(true)
                 .default_width(200.0)
                 .min_width(120.0)
                 .max_width(400.0)
-                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 }))
+                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }))
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -1249,18 +1249,18 @@ impl eframe::App for MarkdownApp {
                         });
                     });
 
-                    // Outline sidebar (if enabled)
+                    // Outline sidebar (right side, if enabled)
                     let mut clicked_header_line: Option<usize> = None;
                     if show_outline && !child.outline_headers.is_empty() {
                         let is_dragging = ctx.input(|i| i.pointer.any_down());
                         let sidebar_title = child.document_title.as_deref().unwrap_or("Outline");
 
-                        egui::SidePanel::left("child_outline")
+                        egui::SidePanel::right("child_outline")
                             .resizable(true)
                             .default_width(200.0)
                             .min_width(120.0)
                             .max_width(400.0)
-                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 }))
+                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }))
                             .show(ctx, |ui| {
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
