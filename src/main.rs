@@ -1463,9 +1463,13 @@ impl MarkdownApp {
                         self.file_explorer.toggle_expanded(path);
                     }
 
-                    // Folder icon
+                    // Folder icon - clickable to toggle expand
                     let folder_icon = if is_expanded { "📂" } else { "📁" };
-                    ui.label(folder_icon);
+                    let icon_response = ui.add(egui::Label::new(folder_icon).sense(egui::Sense::click()));
+                    icon_response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if icon_response.clicked() {
+                        self.file_explorer.toggle_expanded(path);
+                    }
 
                     // Truncate long folder names
                     let max_len = 22;
@@ -1474,9 +1478,11 @@ impl MarkdownApp {
                     } else {
                         name.clone()
                     };
-                    let response = ui.label(&display_name);
+                    // Directory name - clickable to toggle expand
+                    let response = ui.add(egui::Label::new(&display_name).sense(egui::Sense::click()));
+                    response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
 
-                    // Register directory label with MCP bridge (informational, not clickable)
+                    // Register directory label with MCP bridge
                     #[cfg(feature = "mcp")]
                     self.mcp_bridge.register_widget(
                         &format!("Directory: {}", name),
@@ -1487,7 +1493,10 @@ impl MarkdownApp {
 
                     // Show full name on hover if truncated
                     if name.len() > max_len {
-                        response.on_hover_text(name);
+                        response.clone().on_hover_text(name);
+                    }
+                    if response.clicked() {
+                        self.file_explorer.toggle_expanded(path);
                     }
                 });
 
