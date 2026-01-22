@@ -1220,12 +1220,10 @@ impl eframe::App for MarkdownApp {
                 .default_width(200.0)
                 .min_width(120.0)
                 .max_width(400.0)
-                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }))
+                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
                 .show(ctx, |ui| {
-                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.set_max_width(ui.available_width());
-                        ui.add_space(6.0);
                         ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
                     });
                     ui.separator();
@@ -1250,6 +1248,7 @@ impl eframe::App for MarkdownApp {
                                 if !is_dragging && response.clicked() {
                                     clicked_header_line = Some(header.line_number);
                                 }
+                                ui.add_space(4.0);
                             }
                         });
                 });
@@ -1556,12 +1555,10 @@ impl eframe::App for MarkdownApp {
                             .default_width(200.0)
                             .min_width(120.0)
                             .max_width(400.0)
-                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 }))
+                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
                             .show(ctx, |ui| {
-                                ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     ui.set_max_width(ui.available_width());
-                                    ui.add_space(6.0);
                                     ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
                                 });
                                 ui.separator();
@@ -1581,6 +1578,7 @@ impl eframe::App for MarkdownApp {
                                             if !is_dragging && response.clicked() {
                                                 clicked_header_line = Some(header.line_number);
                                             }
+                                            ui.add_space(4.0);
                                         }
                                     });
                             });
