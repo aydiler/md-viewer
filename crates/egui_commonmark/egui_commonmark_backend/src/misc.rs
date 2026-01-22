@@ -1,6 +1,6 @@
 use crate::alerts::AlertBundle;
 use crate::typography::TypographyConfig;
-use egui::{RichText, TextBuffer, TextStyle, Ui, text::LayoutJob};
+use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
 
 use crate::pulldown::ScrollableCache;
@@ -299,18 +299,16 @@ impl CodeBlock {
             let mono_font_size = ui.text_style_height(&TextStyle::Monospace);
             let code_line_height = options.typography.resolve_code_line_height(mono_font_size);
 
-            let mut layout = |ui: &Ui, string: &dyn TextBuffer, wrap_width: f32| {
-                let mut job = if let Some(lang) = &self.lang {
-                    self.syntax_highlighting(cache, options, lang, ui, string.as_str(), code_line_height)
-                } else {
-                    plain_highlighting(ui, string.as_str(), code_line_height)
-                };
-
-                job.wrap.max_width = wrap_width;
-                ui.fonts_mut(|f| f.layout_job(job))
+            // Build the LayoutJob for syntax highlighting
+            let mut job = if let Some(lang) = &self.lang {
+                self.syntax_highlighting(cache, options, lang, ui, &self.content, code_line_height)
+            } else {
+                plain_highlighting(ui, &self.content, code_line_height)
             };
 
-            crate::elements::code_block(ui, max_width, &self.content, &mut layout);
+            job.wrap.max_width = max_width;
+
+            crate::elements::code_block(ui, &self.content, job);
         });
     }
 }

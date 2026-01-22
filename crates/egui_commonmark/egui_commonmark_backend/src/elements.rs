@@ -1,5 +1,5 @@
 use crate::typography::TypographyConfig;
-use egui::{self, NumExt, RichText, Sense, TextBuffer, TextStyle, Ui, Vec2, epaint};
+use egui::{self, NumExt, RichText, Sense, TextStyle, Ui, Vec2, epaint};
 
 /// Add extra vertical spacing based on typography configuration.
 /// Returns the amount of space added.
@@ -120,31 +120,26 @@ fn width_body_space(ui: &Ui) -> f32 {
     ui.fonts_mut(|f| f.glyph_width(&id, ' '))
 }
 
-/// Enhanced/specialized version of egui's code blocks. This one features copy button and borders
-pub fn code_block<'t>(
-    ui: &mut Ui,
-    max_width: f32,
-    text: &str,
-    layouter: &'t mut dyn FnMut(&Ui, &dyn TextBuffer, f32) -> std::sync::Arc<egui::Galley>,
-) {
-    let mut text = text.strip_suffix('\n').unwrap_or(text);
+/// Enhanced/specialized version of egui's code blocks. This one features copy button and borders.
+/// Uses selectable Label instead of TextEdit to allow text selection across code block boundaries.
+pub fn code_block(ui: &mut Ui, text: &str, layout_job: egui::text::LayoutJob) {
+    let text = text.strip_suffix('\n').unwrap_or(text);
 
-    // To manually add background color to the code block, we imitate what
-    // TextEdit does internally
+    // Reserve space for background drawing
     let where_to_put_background = ui.painter().add(egui::Shape::Noop);
 
-    // We use a `TextEdit` to make the text selectable.
-    // Note that we take a `&mut` to a non-`mut` `&str`, which is
-    // the how to tell `egui` that the text is not editable.
-    let output = egui::TextEdit::multiline(&mut text)
-        .layouter(layouter)
-        .desired_width(max_width)
-        // prevent trailing lines
-        .desired_rows(1)
-        .show(ui);
+    // Use a Frame to add padding around the code block
+    let frame_response = egui::Frame::new()
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            // Use selectable Label with the pre-computed LayoutJob
+            // This integrates with egui's unified label text selection
+            ui.add(egui::Label::new(layout_job).selectable(true))
+        });
 
-    // Background color + frame (This is lost when TextEdit it not editable)
-    let frame_rect = output.response.rect;
+    let frame_rect = frame_response.response.rect;
+
+    // Draw background color + frame
     ui.painter().set(
         where_to_put_background,
         epaint::RectShape::new(
@@ -164,7 +159,7 @@ pub fn code_block<'t>(
     );
 
     // Check if we should show ✔ instead of 🗐 if the text was copied and the mouse is hovered
-    let persistent_id = ui.make_persistent_id(output.response.id);
+    let persistent_id = ui.make_persistent_id(frame_response.response.id);
     let copied_icon = ui.memory_mut(|m| *m.data.get_temp_mut_or_default::<bool>(persistent_id));
 
     let copy_button = ui
@@ -178,9 +173,6 @@ pub fn code_block<'t>(
                 .frame(false)
                 .fill(egui::Color32::TRANSPARENT),
         )
-        // workaround for a regression after egui 0.27 where the edit cursor was shown even when
-        // hovering over the button. We try interact_cursor first to allow the cursor to be
-        // overriden
         .on_hover_cursor(
             ui.visuals()
                 .interact_cursor
@@ -195,20 +187,9 @@ pub fn code_block<'t>(
         ui.memory_mut(|m| *m.data.get_temp_mut_or_default(persistent_id) = true);
     }
 
+    // Copy full code block text when button clicked
     if copy_button.clicked() {
-        use egui::TextBuffer as _;
-        let copy_text = if let Some(cursor) = output.cursor_range {
-            let selected_chars = cursor.as_sorted_char_range();
-            let selected_text = text.char_range(selected_chars);
-            if selected_text.is_empty() {
-                text.to_owned()
-            } else {
-                selected_text.to_owned()
-            }
-        } else {
-            text.to_owned()
-        };
-        ui.ctx().copy_text(copy_text);
+        ui.ctx().copy_text(text.to_owned());
     }
 }
 
