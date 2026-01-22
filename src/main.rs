@@ -1110,22 +1110,28 @@ impl eframe::App for MarkdownApp {
                                         ui.add_space(indent as f32);
                                     }
 
-                                    // Fold indicator (clickable if has children)
+                                    // Fold indicator (fixed width area for alignment)
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(20.0, 20.0),
+                                        egui::Sense::click()
+                                    );
                                     if has_children {
-                                        let indicator = if is_collapsed { ">" } else { "v" };
-                                        let indicator_response = ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(indicator)
-                                                    .small()
-                                                    .color(ui.visuals().weak_text_color())
-                                            ).sense(egui::Sense::click())
+                                        let indicator = if is_collapsed { "+" } else { "-" };
+                                        let text_color = if response.hovered() {
+                                            ui.visuals().strong_text_color()
+                                        } else {
+                                            ui.visuals().text_color()
+                                        };
+                                        ui.painter().text(
+                                            rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            indicator,
+                                            egui::FontId::monospace(16.0),
+                                            text_color,
                                         );
-                                        if !is_dragging && indicator_response.clicked() {
+                                        if !is_dragging && response.clicked() {
                                             toggle_index = Some(idx);
                                         }
-                                    } else {
-                                        // Empty space for alignment
-                                        ui.add_space(12.0);
                                     }
 
                                     // Header title
@@ -1376,20 +1382,28 @@ impl eframe::App for MarkdownApp {
                                                     ui.add_space(indent as f32);
                                                 }
 
+                                                // Fold indicator (fixed width area for alignment)
+                                                let (rect, response) = ui.allocate_exact_size(
+                                                    egui::vec2(20.0, 20.0),
+                                                    egui::Sense::click()
+                                                );
                                                 if has_children {
-                                                    let indicator = if is_collapsed { ">" } else { "v" };
-                                                    let indicator_response = ui.add(
-                                                        egui::Label::new(
-                                                            egui::RichText::new(indicator)
-                                                                .small()
-                                                                .color(ui.visuals().weak_text_color())
-                                                        ).sense(egui::Sense::click())
+                                                    let indicator = if is_collapsed { "+" } else { "-" };
+                                                    let text_color = if response.hovered() {
+                                                        ui.visuals().strong_text_color()
+                                                    } else {
+                                                        ui.visuals().text_color()
+                                                    };
+                                                    ui.painter().text(
+                                                        rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        indicator,
+                                                        egui::FontId::monospace(16.0),
+                                                        text_color,
                                                     );
-                                                    if !is_dragging && indicator_response.clicked() {
+                                                    if !is_dragging && response.clicked() {
                                                         toggle_index = Some(idx);
                                                     }
-                                                } else {
-                                                    ui.add_space(12.0);
                                                 }
 
                                                 let display_text = if header.title.len() > 35 {
