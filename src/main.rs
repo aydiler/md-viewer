@@ -1275,6 +1275,22 @@ impl eframe::App for MarkdownApp {
                 .max_width(400.0)
                 .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
                 .show(ctx, |ui| {
+                    // Collapse/Expand All buttons
+                    if any_header_has_children(&self.outline_headers) {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Collapse All").clicked() {
+                                for idx in 0..self.outline_headers.len() {
+                                    if header_has_children(&self.outline_headers, idx) {
+                                        self.collapsed_headers.insert(idx);
+                                    }
+                                }
+                            }
+                            if ui.small_button("Expand All").clicked() {
+                                self.collapsed_headers.clear();
+                            }
+                        });
+                        ui.separator();
+                    }
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
@@ -1655,6 +1671,22 @@ impl eframe::App for MarkdownApp {
                             .max_width(400.0)
                             .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
                             .show(ctx, |ui| {
+                                // Collapse/Expand All buttons
+                                if any_header_has_children(&child.outline_headers) {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Collapse All").clicked() {
+                                            for idx in 0..child.outline_headers.len() {
+                                                if header_has_children(&child.outline_headers, idx) {
+                                                    child.collapsed_headers.insert(idx);
+                                                }
+                                            }
+                                        }
+                                        if ui.small_button("Expand All").clicked() {
+                                            child.collapsed_headers.clear();
+                                        }
+                                    });
+                                    ui.separator();
+                                }
                                 egui::ScrollArea::vertical()
                                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                                     .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
