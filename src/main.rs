@@ -1279,7 +1279,7 @@ impl MarkdownApp {
                     ui.add_space(indent as f32);
 
                     // Expand/collapse indicator
-                    let indicator = if is_expanded { "▼" } else { "▶" };
+                    let indicator = if is_expanded { "v" } else { ">" };
                     if ui.small_button(indicator).clicked() {
                         self.file_explorer.toggle_expanded(path);
                     }
