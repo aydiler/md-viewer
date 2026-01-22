@@ -877,6 +877,24 @@ impl MarkdownApp {
                     }),
                 )
                 .show_inside(ui, |ui| {
+                    // Expand/Collapse All buttons (only if there are nested headers)
+                    let has_nested = any_header_has_children(&tab.outline_headers);
+                    if has_nested {
+                        ui.horizontal(|ui| {
+                            ui.add_space(6.0);
+                            if ui.small_button("Expand All").clicked() {
+                                tab.collapsed_headers.clear();
+                            }
+                            if ui.small_button("Collapse All").clicked() {
+                                for i in 0..tab.outline_headers.len() {
+                                    if header_has_children(&tab.outline_headers, i) {
+                                        tab.collapsed_headers.insert(i);
+                                    }
+                                }
+                            }
+                        });
+                        ui.separator();
+                    }
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
