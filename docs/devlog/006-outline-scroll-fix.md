@@ -43,7 +43,7 @@ Recording positions on every render causes jumping because the viewport-relative
 Due to `show_viewport` optimization, headers below the initial viewport aren't rendered until scrolled into view. Positions are recorded progressively as user scrolls through document.
 
 ### Visual alignment offset needed
-Raw position puts header exactly at viewport top edge. Subtracting 25px provides better visual alignment with some breathing room above the header.
+Raw position puts header exactly at viewport top edge. Subtracting 50px provides better visual alignment with some breathing room above the header.
 
 ## Files Changed
 
