@@ -32,6 +32,7 @@
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+D | Toggle dark/light mode |
+| Ctrl+Shift+E | Toggle file explorer |
 | Ctrl+Shift+O | Toggle outline sidebar |
 | Ctrl++ / Ctrl+= | Zoom in |
 | Ctrl+- | Zoom out |

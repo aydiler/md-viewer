@@ -1,6 +1,6 @@
 # Architecture
 
-Single-file Rust desktop application (`src/main.rs`, ~1100 lines) for viewing markdown files using egui + egui_commonmark with a custom tab system.
+Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing markdown files using egui + egui_commonmark with a custom tab system.
 
 ## Core Components
 
@@ -10,6 +10,8 @@ Single-file Rust desktop application (`src/main.rs`, ~1100 lines) for viewing ma
   - `dark_mode: bool` - global theme setting
   - `zoom_level: f32` - global zoom (0.5 to 3.0)
   - `show_outline: bool` - toggle outline sidebar visibility
+  - `show_explorer: bool` - toggle file explorer visibility
+  - `file_explorer: FileExplorer` - file explorer state
   - `watch_enabled: bool` - file watching state
   - `watcher` + `watcher_rx` - file watching via mpsc channel
   - `watched_paths: HashSet<PathBuf>` - unified watcher for all open tabs
@@ -30,8 +32,20 @@ Single-file Rust desktop application (`src/main.rs`, ~1100 lines) for viewing ma
   - `dark_mode: Option<bool>`
   - `zoom_level: Option<f32>`
   - `show_outline: Option<bool>`
+  - `show_explorer: Option<bool>` - file explorer visibility
+  - `explorer_root: Option<PathBuf>` - file explorer root directory
+  - `expanded_dirs: Option<Vec<PathBuf>>` - expanded directories in explorer
   - `open_tabs: Option<Vec<PathBuf>>` - restore tabs on startup
   - `active_tab: Option<usize>` - restore active tab position
+
+- **FileExplorer**: Left sidebar showing markdown files in a directory tree:
+  - `root: Option<PathBuf>` - root directory to display
+  - `tree: Vec<FileTreeNode>` - hierarchical file tree
+  - `expanded_dirs: HashSet<PathBuf>` - which directories are expanded
+
+- **FileTreeNode**: Enum representing a node in the file explorer tree:
+  - `File { path, name }` - a markdown file
+  - `Directory { path, name, children }` - a directory containing markdown files
 
 - **File Watching**: Uses `notify-debouncer-mini` with 200ms debounce. Watches all open tab paths. On change, reloads matching tabs. Auto-recovers up to 3 times on watcher failure.
 
@@ -61,8 +75,10 @@ update() → check_file_changes() → reload affected tabs
          → TopBottomPanel (menu bar + LIVE indicator + file path)
          → TopBottomPanel (error bar, if any)
          → TopBottomPanel (tab bar) → render_tab_bar()
+         → SidePanel::left (file explorer) → render_file_explorer()
+           → render_tree_node() (recursive)
          → CentralPanel → render_tab_content()
-           → SidePanel::left (outline, if show_outline && headers exist)
+           → SidePanel::right (outline, if show_outline && headers exist)
            → ScrollArea::show_viewport → CommonMarkViewer
            → check_link_hooks() → handle navigation
          → Drag-and-drop overlay
@@ -81,3 +97,18 @@ The tab system uses a simple `Vec<Tab>` with an `active_tab` index:
 - Regular click navigates within the current tab
 - Each tab maintains independent navigation history (Alt+Left/Right)
 - Session restore opens previously open tabs and restores active tab
+
+## File Explorer
+
+Left sidebar showing all markdown files in a hierarchical directory tree:
+- Root directory determined by: CLI file → persisted state → first open tab → cwd
+- Recursive scanning with 10 level depth limit
+- Filters: .md, .markdown, .txt files only
+- Skip hidden files (starting with .)
+- Only shows directories containing markdown files
+- Sorted: directories first, then files, alphabetically
+- Toggle visibility with Ctrl+Shift+E
+- Click file to open in new tab (or focus if already open)
+- Expand/collapse directories with arrow buttons
+- Refresh button to rescan directory
+- Session persistence for: visibility, root directory, expanded directories

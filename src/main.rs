@@ -25,6 +25,10 @@ struct PersistedState {
     show_outline: Option<bool>,
     open_tabs: Option<Vec<PathBuf>>,
     active_tab: Option<usize>,
+    // File explorer state
+    show_explorer: Option<bool>,
+    explorer_root: Option<PathBuf>,
+    expanded_dirs: Option<Vec<PathBuf>>,
 }
 
 /// Represents a markdown header for the outline
@@ -41,6 +45,124 @@ struct ParsedHeaders {
     document_title: Option<String>,
     /// Outline headers (excludes the first h1)
     outline_headers: Vec<Header>,
+}
+
+/// A node in the file explorer tree
+#[derive(Clone)]
+enum FileTreeNode {
+    File { path: PathBuf, name: String },
+    Directory { path: PathBuf, name: String, children: Vec<FileTreeNode> },
+}
+
+/// File explorer state
+struct FileExplorer {
+    root: Option<PathBuf>,
+    tree: Vec<FileTreeNode>,
+    expanded_dirs: HashSet<PathBuf>,
+}
+
+impl Default for FileExplorer {
+    fn default() -> Self {
+        Self {
+            root: None,
+            tree: Vec::new(),
+            expanded_dirs: HashSet::new(),
+        }
+    }
+}
+
+impl FileExplorer {
+    /// Scan a directory recursively for markdown files
+    fn scan_directory(path: &PathBuf, depth: usize) -> Vec<FileTreeNode> {
+        const MAX_DEPTH: usize = 10;
+
+        if depth >= MAX_DEPTH {
+            return Vec::new();
+        }
+
+        let Ok(entries) = fs::read_dir(path) else {
+            return Vec::new();
+        };
+
+        let mut nodes: Vec<FileTreeNode> = Vec::new();
+
+        // Collect and sort entries
+        let mut entry_list: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        entry_list.sort_by(|a, b| {
+            let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
+            }
+        });
+
+        for entry in entry_list {
+            let entry_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // Skip hidden files
+            if name.starts_with('.') {
+                continue;
+            }
+
+            if entry_path.is_dir() {
+                let children = Self::scan_directory(&entry_path, depth + 1);
+                // Only include directories that contain markdown files
+                if !children.is_empty() {
+                    nodes.push(FileTreeNode::Directory {
+                        path: entry_path,
+                        name,
+                        children,
+                    });
+                }
+            } else if Self::is_markdown_file(&entry_path) {
+                nodes.push(FileTreeNode::File {
+                    path: entry_path,
+                    name,
+                });
+            }
+        }
+
+        nodes
+    }
+
+    fn is_markdown_file(path: &PathBuf) -> bool {
+        path.extension()
+            .map(|ext| {
+                let ext = ext.to_string_lossy().to_lowercase();
+                ext == "md" || ext == "markdown" || ext == "txt"
+            })
+            .unwrap_or(false)
+    }
+
+    /// Set root directory and rescan
+    fn set_root(&mut self, path: PathBuf) {
+        self.root = Some(path.clone());
+        self.tree = Self::scan_directory(&path, 0);
+    }
+
+    /// Refresh the file tree
+    fn refresh(&mut self) {
+        if let Some(root) = &self.root.clone() {
+            self.tree = Self::scan_directory(root, 0);
+        }
+    }
+
+    /// Toggle directory expansion
+    fn toggle_expanded(&mut self, path: &PathBuf) {
+        if self.expanded_dirs.contains(path) {
+            self.expanded_dirs.remove(path);
+        } else {
+            self.expanded_dirs.insert(path.clone());
+        }
+    }
+
+    /// Check if a directory is expanded
+    fn is_expanded(&self, path: &PathBuf) -> bool {
+        self.expanded_dirs.contains(path)
+    }
 }
 
 /// Per-tab state for a document
@@ -429,6 +551,9 @@ struct MarkdownApp {
     watched_paths: HashSet<PathBuf>,
     // Tab being hovered for close button
     hovered_tab: Option<usize>,
+    // File explorer state
+    file_explorer: FileExplorer,
+    show_explorer: bool,
 }
 
 impl MarkdownApp {
@@ -444,11 +569,12 @@ impl MarkdownApp {
             .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
+        let show_explorer = persisted.show_explorer.unwrap_or(true);
 
         // Determine initial tabs
-        let initial_tabs: Vec<Tab> = if let Some(path) = file {
+        let initial_tabs: Vec<Tab> = if let Some(ref path) = file {
             // CLI argument takes priority
-            vec![Tab::new(path)]
+            vec![Tab::new(path.clone())]
         } else if let Some(paths) = persisted.open_tabs {
             // Restore previous session tabs
             paths
@@ -472,6 +598,30 @@ impl MarkdownApp {
             .unwrap_or(0)
             .min(tabs.len().saturating_sub(1));
 
+        // Initialize file explorer
+        let mut file_explorer = FileExplorer::default();
+
+        // Determine explorer root:
+        // 1. From CLI file path
+        // 2. From persisted state
+        // 3. From first open tab
+        // 4. Current working directory as fallback
+        let explorer_root = file
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .or(persisted.explorer_root.filter(|p| p.exists()))
+            .or_else(|| tabs.first().and_then(|t| t.path.parent().map(|p| p.to_path_buf())))
+            .or_else(|| std::env::current_dir().ok());
+
+        if let Some(root) = explorer_root {
+            file_explorer.set_root(root);
+        }
+
+        // Restore expanded directories
+        if let Some(expanded) = persisted.expanded_dirs {
+            file_explorer.expanded_dirs = expanded.into_iter().collect();
+        }
+
         let mut app = Self {
             tabs,
             active_tab,
@@ -486,6 +636,8 @@ impl MarkdownApp {
             watcher_retry_count: 0,
             watched_paths: HashSet::new(),
             hovered_tab: None,
+            file_explorer,
+            show_explorer,
         };
 
         if watch {
@@ -1020,6 +1172,139 @@ impl MarkdownApp {
 
         open_in_new_tab
     }
+
+    /// Render the file explorer sidebar
+    /// Returns Some(path) if a file was clicked to open
+    fn render_file_explorer(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
+        let mut file_to_open: Option<PathBuf> = None;
+
+        if !self.show_explorer {
+            return None;
+        }
+
+        egui::SidePanel::left("file_explorer")
+            .resizable(true)
+            .default_width(220.0)
+            .min_width(150.0)
+            .max_width(400.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 8,
+                    right: 8,
+                    top: 8,
+                    bottom: 8,
+                }),
+            )
+            .show(ctx, |ui| {
+                // Header with folder name and refresh button
+                ui.horizontal(|ui| {
+                    if let Some(root) = &self.file_explorer.root {
+                        let folder_name = root
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| root.display().to_string());
+                        ui.strong(&folder_name);
+                    } else {
+                        ui.strong("No folder");
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("↻").on_hover_text("Refresh").clicked() {
+                            self.file_explorer.refresh();
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // File tree
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Collect open tab paths for highlighting
+                        let open_paths: HashSet<PathBuf> = self.tabs.iter()
+                            .filter(|t| t.path.exists())
+                            .map(|t| t.path.clone())
+                            .collect();
+
+                        // Clone tree to avoid borrow issues
+                        let tree = self.file_explorer.tree.clone();
+                        for node in &tree {
+                            if let Some(path) = self.render_tree_node(ui, node, 0, &open_paths) {
+                                file_to_open = Some(path);
+                            }
+                        }
+                    });
+            });
+
+        file_to_open
+    }
+
+    /// Render a single node in the file tree (recursive)
+    fn render_tree_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        node: &FileTreeNode,
+        depth: usize,
+        open_paths: &HashSet<PathBuf>,
+    ) -> Option<PathBuf> {
+        let mut file_to_open: Option<PathBuf> = None;
+        let indent = depth * 16;
+
+        match node {
+            FileTreeNode::File { path, name } => {
+                ui.horizontal(|ui| {
+                    ui.add_space(indent as f32);
+
+                    // File icon
+                    ui.label("📄");
+
+                    // Highlight if file is open in a tab
+                    let is_open = open_paths.contains(path);
+                    let text = if is_open {
+                        egui::RichText::new(name).strong()
+                    } else {
+                        egui::RichText::new(name)
+                    };
+
+                    if ui.selectable_label(is_open, text).clicked() {
+                        file_to_open = Some(path.clone());
+                    }
+                });
+            }
+            FileTreeNode::Directory { path, name, children } => {
+                let is_expanded = self.file_explorer.is_expanded(path);
+
+                ui.horizontal(|ui| {
+                    ui.add_space(indent as f32);
+
+                    // Expand/collapse indicator
+                    let indicator = if is_expanded { "▼" } else { "▶" };
+                    if ui.small_button(indicator).clicked() {
+                        self.file_explorer.toggle_expanded(path);
+                    }
+
+                    // Folder icon
+                    let folder_icon = if is_expanded { "📂" } else { "📁" };
+                    ui.label(folder_icon);
+
+                    // Folder name
+                    ui.label(name);
+                });
+
+                // Render children if expanded
+                if is_expanded {
+                    for child in children {
+                        if let Some(path) = self.render_tree_node(ui, child, depth + 1, open_paths) {
+                            file_to_open = Some(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        file_to_open
+    }
 }
 
 impl eframe::App for MarkdownApp {
@@ -1030,6 +1315,9 @@ impl eframe::App for MarkdownApp {
             show_outline: Some(self.show_outline),
             open_tabs: Some(self.get_open_tab_paths()),
             active_tab: Some(self.active_tab),
+            show_explorer: Some(self.show_explorer),
+            explorer_root: self.file_explorer.root.clone(),
+            expanded_dirs: Some(self.file_explorer.expanded_dirs.iter().cloned().collect()),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -1088,6 +1376,7 @@ impl eframe::App for MarkdownApp {
         let mut toggle_watch = false;
         let mut toggle_dark = false;
         let mut toggle_outline = false;
+        let mut toggle_explorer = false;
         let mut quit_app = false;
         let mut zoom_delta: f32 = 0.0;
         let mut go_back = false;
@@ -1106,6 +1395,10 @@ impl eframe::App for MarkdownApp {
             // Ctrl+Shift+O: Toggle outline
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
                 toggle_outline = true;
+            }
+            // Ctrl+Shift+E: Toggle file explorer
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
+                toggle_explorer = true;
             }
             // Ctrl+W: Close current tab
             if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
@@ -1208,6 +1501,9 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_outline {
             self.show_outline = !self.show_outline;
+        }
+        if toggle_explorer {
+            self.show_explorer = !self.show_explorer;
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1360,6 +1656,19 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    let explorer_text = if self.show_explorer {
+                        "✓ Show Explorer"
+                    } else {
+                        "Show Explorer"
+                    };
+                    if ui
+                        .add(egui::Button::new(explorer_text).shortcut_text("Ctrl+Shift+E"))
+                        .clicked()
+                    {
+                        self.show_explorer = !self.show_explorer;
+                        ui.close();
+                    }
+
                     let outline_text = if self.show_outline {
                         "✓ Show Outline"
                     } else {
@@ -1467,6 +1776,14 @@ impl eframe::App for MarkdownApp {
         // Close tab if requested
         if let Some(idx) = tab_to_close {
             self.close_tab(idx);
+        }
+
+        // File explorer (left sidebar)
+        let explorer_file = self.render_file_explorer(ctx);
+
+        // Open file from explorer
+        if let Some(path) = explorer_file {
+            self.open_in_new_tab(path);
         }
 
         // Main content area
