@@ -1514,11 +1514,20 @@ impl MarkdownApp {
                     #[cfg(feature = "mcp")]
                     let response = ui.mcp_label(format!("Directory: {}", name), &display_name, Some(state_value));
                     #[cfg(not(feature = "mcp"))]
-                    let response = ui.label(&display_name);
+                    let response = ui.add(
+                        egui::Label::new(&display_name)
+                            .selectable(false)
+                            .sense(egui::Sense::click())
+                    );
 
                     // Show full name on hover if truncated
                     if name.len() > max_len {
-                        response.on_hover_text(name);
+                        response.clone().on_hover_text(name);
+                    }
+
+                    // Click directory name to toggle expansion
+                    if response.clicked() {
+                        self.file_explorer.toggle_expanded(path);
                     }
                 });
 
