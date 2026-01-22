@@ -317,15 +317,8 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         }
     }
 
-    let first_h1_idx = all_headers.iter().position(|h| h.level == 1);
-    let document_title = first_h1_idx.map(|idx| all_headers[idx].title.clone());
-
-    let outline_headers = all_headers
-        .into_iter()
-        .enumerate()
-        .filter(|(idx, _)| Some(*idx) != first_h1_idx)
-        .map(|(_, h)| h)
-        .collect();
+    let document_title = all_headers.iter().find(|h| h.level == 1).map(|h| h.title.clone());
+    let outline_headers = all_headers;
 
     ParsedHeaders {
         document_title,
