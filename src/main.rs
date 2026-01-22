@@ -1511,13 +1511,17 @@ impl MarkdownApp {
                         name.clone()
                     };
 
-                    #[cfg(feature = "mcp")]
-                    let response = ui.mcp_label(format!("Directory: {}", name), &display_name, Some(state_value));
-                    #[cfg(not(feature = "mcp"))]
                     let response = ui.add(
                         egui::Label::new(&display_name)
                             .selectable(false)
                             .sense(egui::Sense::click())
+                    );
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        &format!("Directory: {}", name),
+                        "button",
+                        &response,
+                        Some(state_value),
                     );
 
                     // Show full name on hover if truncated
