@@ -1155,6 +1155,11 @@ impl MarkdownApp {
             });
 
             tab.last_content_height = scroll_output.content_size.y;
+
+            // Request repaint during active scrolling for smooth animation
+            if ui.ctx().input(|i| i.smooth_scroll_delta.length_sq() > 0.0) {
+                ui.ctx().request_repaint();
+            }
         });
 
         // Check for clicked links
@@ -1389,6 +1394,10 @@ impl eframe::App for MarkdownApp {
             style
                 .text_styles
                 .insert(TextStyle::Monospace, FontId::monospace(14.0));
+
+            // Smoother scroll animation
+            style.animation_time = 0.15; // Faster UI animations (default: 0.1)
+            style.scroll_animation.points_per_second = 1500.0; // Faster scroll (default: 1000)
         });
 
         ctx.set_zoom_factor(self.zoom_level);
