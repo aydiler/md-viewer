@@ -2,6 +2,32 @@
 
 These rules ensure Claude has accurate context before modifying code, preventing regressions from working with stale or incomplete information.
 
+## Automatic Session Start (Do This First)
+
+When the user asks to implement a feature or fix a bug, **automatically perform these checks before writing any code**:
+
+1. **Check branch and status:**
+   ```bash
+   git branch --show-current
+   git status --short
+   ```
+
+2. **Verify branch is fresh** (critical for feature branches):
+   ```bash
+   git fetch origin 2>/dev/null
+   git log --oneline HEAD..origin/main 2>/dev/null | head -5
+   ```
+   If output is not empty, warn: "Branch may be stale. Consider rebasing on main first."
+
+3. **Show recent commits** for context:
+   ```bash
+   git log --oneline -5
+   ```
+
+4. **Search LESSONS.md** for keywords related to the task.
+
+Report findings briefly before proceeding. Use `/session-start` to run this explicitly if needed.
+
 ## Before Implementing ANY Feature
 
 ### 1. Read Recent Commits

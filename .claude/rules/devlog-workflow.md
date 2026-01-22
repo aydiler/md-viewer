@@ -6,6 +6,26 @@ Every feature implementation should create a devlog file in `docs/devlog/` to ca
 - Architecture decisions
 - Future improvement ideas
 
+## Automatic Devlog Creation
+
+When creating a feature worktree or starting non-trivial work, **automatically create a devlog**:
+
+```bash
+# Find next number
+LAST=$(ls docs/devlog/[0-9]*.md 2>/dev/null | sort | tail -1 | grep -oP '\d{3}' | head -1)
+NEXT=$(printf "%03d" $((10#$LAST + 1)))
+
+# Create from template
+cp docs/devlog/TEMPLATE.md docs/devlog/${NEXT}-<feature-name>.md
+```
+
+Then update the new file with:
+- Branch name
+- Today's date
+- Initial feature checklist
+
+Use `/new-devlog <name>` as an explicit shortcut if needed.
+
 ## Devlog Structure
 
 ```
@@ -22,7 +42,7 @@ docs/devlog/
 
 ## When to Create
 
-1. **At worktree creation**: Copy TEMPLATE.md immediately (see worktree-workflow.md)
+1. **At worktree creation**: Create immediately (automated - see above)
 2. **During implementation**: Document discoveries as you learn them
 3. **At completion**: Update status, add architecture details, note future improvements
 

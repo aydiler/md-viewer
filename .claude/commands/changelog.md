@@ -1,9 +1,10 @@
 ---
-description: Generate CHANGELOG.md from git history
+description: Generate CHANGELOG.md (suggested automatically before releases)
 allowed-tools: Bash, Write
 ---
 
-Generate or update the CHANGELOG.md using git-cliff.
+**Note:** Changelog generation is suggested automatically when discussing releases (see release-workflow.md).
+Use `/changelog` to explicitly generate/update.
 
 **Steps:**
 

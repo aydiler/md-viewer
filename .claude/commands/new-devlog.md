@@ -1,9 +1,10 @@
 ---
-description: Create a new numbered devlog from template
+description: Explicitly create a devlog (usually created automatically with worktrees)
 allowed-tools: Bash, Read, Write
 ---
 
-Create a new devlog for a feature or task.
+**Note:** Devlogs are created automatically when creating worktrees (see devlog-workflow.md).
+Use `/new-devlog <name>` to explicitly create one mid-session.
 
 **Steps:**
 

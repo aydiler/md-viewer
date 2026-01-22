@@ -16,34 +16,29 @@ This repo uses a bare repository setup at `~/markdown-viewer/.bare`. All worktre
 
 ## Creating a Feature Worktree
 
-**Step 1: Create worktree**
+When asked to implement a feature that requires a new branch, **automatically create a worktree**:
+
 ```bash
+# Create worktree
 git -C ~/markdown-viewer/.bare worktree add \
     ~/markdown-viewer/worktrees/<name> -b feature/<name>
+
+# Change to the new worktree
+cd ~/markdown-viewer/worktrees/<name>
+
+# Create devlog (see devlog-workflow.md for automation)
+LAST=$(ls docs/devlog/[0-9]*.md 2>/dev/null | sort | tail -1 | grep -oP '\d{3}' | head -1)
+NEXT=$(printf "%03d" $((10#$LAST + 1)))
+cp docs/devlog/TEMPLATE.md docs/devlog/${NEXT}-<name>.md
+
+# Verify fresh base
+git fetch origin 2>/dev/null
+git log --oneline HEAD..origin/main
 ```
 
-**Step 2: Create devlog stub**
-```bash
-# Find next number
-ls docs/devlog/[0-9]*.md | sort | tail -1
-
-# Copy template (replace NNN with next number)
-cp docs/devlog/TEMPLATE.md docs/devlog/NNN-<name>.md
-```
+If the last command shows commits, warn about stale branch and suggest rebase.
 
 Devlog MUST exist before any commits. Infrastructure and "phase work" still require devlogs.
-
-**Step 3: Verify fresh base (CRITICAL)**
-```bash
-# Ensure you're based on latest main
-git fetch origin
-git log --oneline HEAD..origin/main  # Should be empty!
-
-# If NOT empty, your branch is stale. Rebase first:
-git rebase origin/main
-```
-
-**Why this matters:** Working from stale code causes regressions. Recent fixes in main won't be in your branch, and your changes may silently overwrite them when merged.
 
 Claude Code automatically finds `.claude/rules/` by searching parent directories (via the root symlink).
 
@@ -55,13 +50,9 @@ git -C ~/markdown-viewer/.bare worktree remove \
     ~/markdown-viewer/worktrees/<name>                    # Remove after merge
 ```
 
-## Slash Command
-
-Use `/feature <description>` to automatically create a worktree, implement a feature, and report when done.
-
 ## Before Writing Code
 
-After creating a worktree, before writing ANY code:
+These checks happen automatically (see `context-awareness.md`), but ensure:
 
 1. **Read files you'll modify** - Use Read tool, don't rely on memory
 2. **Check recent commits** - `git log --oneline -10`

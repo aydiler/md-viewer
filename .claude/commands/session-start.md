@@ -1,9 +1,10 @@
 ---
-description: Start a development session with fresh context
+description: Explicitly run session start checks (usually runs automatically)
 allowed-tools: Bash, Read
 ---
 
-Prepare for a development session by gathering context and verifying branch freshness.
+**Note:** These checks run automatically when starting implementation work (see context-awareness.md).
+Use `/session-start` to explicitly re-run them.
 
 **Steps:**
 
