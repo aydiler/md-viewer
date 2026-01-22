@@ -108,6 +108,40 @@ painter.rect_filled(rect, rounding, color);
 ```
 **Files:** `src/main.rs`
 
+### Text selection clears when content leaves viewport (BY DESIGN)
+**Context:** Implementing scroll-while-selecting feature
+**Problem:** Text selection disappears when selected content scrolls out of view
+**Root cause:** egui intentionally clears selection in `label_text_selection.rs`:
+```rust
+if !state.has_reached_primary || !state.has_reached_secondary {
+    // We didn't see both cursors this frame - deselect to avoid glitches
+    let prev_selection = state.selection.take();
+}
+```
+**Why:** egui validates selection every frame by checking if cursor endpoints were "seen" during rendering. When labels scroll out of view, they aren't rendered, endpoints aren't reached, selection is cleared.
+**Workarounds:**
+- Accept limitation (selection works if content stays in viewport)
+- Disable selection: `ui.style_mut().interaction.selectable_labels = false;`
+- Use TextEdit instead of Labels (handles own selection state)
+- Implement custom selection tracking (significant effort)
+**Files:** `src/main.rs`, `docs/devlog/009-drag-scroll.md`
+
+### Scroll during selection requires post-render state modification
+**Context:** Mouse wheel scroll while selecting text
+**Problem:** Setting `scroll_area.vertical_scroll_offset()` BEFORE rendering breaks selection
+**Fix:** Modify scroll state AFTER `show_viewport()`:
+```rust
+let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| { ... });
+
+// Apply scroll AFTER rendering
+if raw_scroll.abs() > 0.0 {
+    scroll_output.state.offset.y = new_offset;
+    scroll_output.state.store(ui.ctx(), scroll_output.id);
+}
+```
+**Gotcha:** Avoid `state.store()` at scroll boundaries (offset near 0 or max) - can still break selection
+**Files:** `src/main.rs`
+
 ---
 
 ## Custom Tab System

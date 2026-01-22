@@ -1127,16 +1127,22 @@ impl MarkdownApp {
 
         // Main content area
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            // Get scroll input
+            let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
+            let content_rect = ui.available_rect_before_wrap();
 
+            let mut scroll_area = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .enable_scrolling(true)
+                .id_salt(tab.id);
+
+            // Apply pending scroll offset from header clicks
             if let Some(offset) = tab.pending_scroll_offset.take() {
                 scroll_area = scroll_area.vertical_scroll_offset(offset);
             }
 
-            let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
+            let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
                 tab.scroll_offset = viewport.min.y;
-
-                // Set scroll offset for header position tracking
                 tab.cache.set_scroll_offset(viewport.min.y);
 
                 CommonMarkViewer::new()
@@ -1156,7 +1162,25 @@ impl MarkdownApp {
 
             tab.last_content_height = scroll_output.content_size.y;
 
-            // Request repaint during active scrolling for smooth animation
+            // Manual scroll handling when wheel is used (works during selection)
+            if raw_scroll.abs() > 0.0 {
+                let current_offset = scroll_output.state.offset.y;
+                let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
+                let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
+
+                // Don't store if we'd hit a boundary (causes selection to break)
+                let would_hit_top = new_offset < 0.5;
+                let would_hit_bottom = new_offset > max_scroll - 0.5;
+                let offset_changed = (new_offset - current_offset).abs() > 0.5;
+
+                if offset_changed && !would_hit_top && !would_hit_bottom {
+                    scroll_output.state.offset.y = new_offset;
+                    scroll_output.state.store(ui.ctx(), scroll_output.id);
+                    ui.ctx().request_repaint();
+                }
+            }
+
+            // Request repaint during smooth scrolling
             if ui.ctx().input(|i| i.smooth_scroll_delta.length_sq() > 0.0) {
                 ui.ctx().request_repaint();
             }
