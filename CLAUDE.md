@@ -34,6 +34,8 @@ This is a **bare repository** setup. The git database lives in `.bare/` and all 
 - `devlog-workflow.md` - How to document feature implementations
 - `worktree-workflow.md` - How to create and manage worktrees
 - `system-dependencies.md` - Arch Linux packages
+- `refactoring-rules.md` - **Read before refactoring** - prevent regressions
+- `context-awareness.md` - **Read before coding** - ensure fresh context
 
 **Imported** (via `@path`):
 - @docs/ARCHITECTURE.md - Core components, libraries, rendering flow

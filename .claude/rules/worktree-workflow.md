@@ -33,6 +33,18 @@ cp docs/devlog/TEMPLATE.md docs/devlog/NNN-<name>.md
 
 Devlog MUST exist before any commits. Infrastructure and "phase work" still require devlogs.
 
+**Step 3: Verify fresh base (CRITICAL)**
+```bash
+# Ensure you're based on latest main
+git fetch origin
+git log --oneline HEAD..origin/main  # Should be empty!
+
+# If NOT empty, your branch is stale. Rebase first:
+git rebase origin/main
+```
+
+**Why this matters:** Working from stale code causes regressions. Recent fixes in main won't be in your branch, and your changes may silently overwrite them when merged.
+
 Claude Code automatically finds `.claude/rules/` by searching parent directories (via the root symlink).
 
 ## Managing Worktrees
@@ -46,6 +58,17 @@ git -C ~/markdown-viewer/.bare worktree remove \
 ## Slash Command
 
 Use `/feature <description>` to automatically create a worktree, implement a feature, and report when done.
+
+## Before Writing Code
+
+After creating a worktree, before writing ANY code:
+
+1. **Read files you'll modify** - Use Read tool, don't rely on memory
+2. **Check recent commits** - `git log --oneline -10`
+3. **Check LESSONS.md** - Search for relevant gotchas
+4. **Preserve existing patterns** - If code uses `.scroll_source()`, keep it
+
+See `context-awareness.md` and `refactoring-rules.md` for full guidelines.
 
 ## Branch Protection
 
