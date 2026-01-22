@@ -1268,9 +1268,6 @@ impl eframe::App for MarkdownApp {
             // Check if any pointer is down (potential resize in progress)
             let is_dragging = ctx.input(|i| i.pointer.any_down());
 
-            // Use document title if available, otherwise "Outline"
-            let sidebar_title = self.document_title.as_deref().unwrap_or("Outline");
-
             egui::SidePanel::right("outline")
                 .resizable(true)
                 .default_width(200.0)
@@ -1278,11 +1275,6 @@ impl eframe::App for MarkdownApp {
                 .max_width(400.0)
                 .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.set_max_width(ui.available_width());
-                        ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
-                    });
-                    ui.separator();
                     egui::ScrollArea::vertical()
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
@@ -1655,7 +1647,6 @@ impl eframe::App for MarkdownApp {
                     let mut clicked_header_line: Option<usize> = None;
                     if show_outline && !child.outline_headers.is_empty() {
                         let is_dragging = ctx.input(|i| i.pointer.any_down());
-                        let sidebar_title = child.document_title.as_deref().unwrap_or("Outline");
 
                         egui::SidePanel::right("child_outline")
                             .resizable(true)
@@ -1664,11 +1655,6 @@ impl eframe::App for MarkdownApp {
                             .max_width(400.0)
                             .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
                             .show(ctx, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.set_max_width(ui.available_width());
-                                    ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
-                                });
-                                ui.separator();
                                 egui::ScrollArea::vertical()
                                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                                     .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
