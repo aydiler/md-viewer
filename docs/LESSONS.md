@@ -264,3 +264,24 @@ let target_path = target_path.canonicalize()?;  // Resolves ../
     └── feature-x/   # Feature branches
 ```
 **Benefit:** Each worktree is fully isolated with own working directory
+
+---
+
+## egui MCP / Virtual Display Testing
+
+### Wayland systems ignore DISPLAY env var
+**Context:** Testing egui apps on virtual X11 display (Xvfb)
+**Problem:** Setting `DISPLAY=:99` doesn't work on Wayland systems - app still opens on real screen
+**Root cause:** egui/winit defaults to Wayland when available, ignoring DISPLAY
+**Solution:** Use `egui_launch` MCP tool which auto-detects this and forces X11 mode:
+```
+egui_launch({
+  applicationPath: "./target/debug/app",
+  env: { "DISPLAY": ":99" }  // Tool auto-adds WINIT_UNIX_BACKEND=x11
+})
+```
+**Manual workaround:**
+```bash
+DISPLAY=:99 WINIT_UNIX_BACKEND=x11 WAYLAND_DISPLAY= ./app
+```
+**Files:** `~/.claude/CLAUDE.md`, `~/egui-mcp/`
