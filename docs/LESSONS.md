@@ -37,6 +37,19 @@ format.line_height = Some(line_height);  // Must set explicitly
 ```
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs`
 
+### default_width overflows at narrow widths
+**Context:** Text was cut off instead of wrapping when window narrowed below 600px
+**Problem:** `CommonMarkOptions::max_width()` returned `default_width` even when larger than `available_width`
+**Fix:** Cap the width at `available_width`:
+```rust
+// Before (buggy):
+if default_width as f32 > max_width { default_width as f32 }
+
+// After (fixed):
+(default_width as f32).min(available_width)
+```
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs`
+
 ---
 
 ## egui
