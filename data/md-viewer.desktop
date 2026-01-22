@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Markdown Viewer
+Comment=View markdown files with live reload
+Exec=md-viewer %f
+Icon=text-markdown
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;Viewer;
+MimeType=text/markdown;text/x-markdown;
+StartupNotify=false
+StartupWMClass=md-viewer
