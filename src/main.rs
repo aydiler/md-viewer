@@ -402,6 +402,16 @@ fn parse_headers(content: &str) -> ParsedHeaders {
     }
 }
 
+/// Check if any header in the list has children
+fn any_header_has_children(headers: &[Header]) -> bool {
+    for i in 0..headers.len() {
+        if header_has_children(headers, i) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if header at `index` has children (headers with higher level following it)
 fn header_has_children(headers: &[Header], index: usize) -> bool {
     if index >= headers.len() {
@@ -1278,6 +1288,8 @@ impl eframe::App for MarkdownApp {
                         .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
                         .show(ui, |ui| {
                             let mut toggle_index: Option<usize> = None;
+                            // Only reserve space for fold indicators if any header has children
+                            let show_fold_indicators = any_header_has_children(&self.outline_headers);
                             for (idx, header) in self.outline_headers.iter().enumerate() {
                                 // Skip headers hidden by collapsed ancestors
                                 if header_is_hidden(&self.outline_headers, idx, &self.collapsed_headers) {
@@ -1297,26 +1309,29 @@ impl eframe::App for MarkdownApp {
                                     }
 
                                     // Fold indicator (fixed width area for alignment)
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        egui::vec2(20.0, 20.0),
-                                        egui::Sense::click()
-                                    );
-                                    if has_children {
-                                        let indicator = if is_collapsed { "+" } else { "-" };
-                                        let text_color = if response.hovered() {
-                                            ui.visuals().strong_text_color()
-                                        } else {
-                                            ui.visuals().text_color()
-                                        };
-                                        ui.painter().text(
-                                            rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            indicator,
-                                            egui::FontId::monospace(16.0),
-                                            text_color,
+                                    // Only allocate space if any header has children
+                                    if show_fold_indicators {
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            egui::vec2(20.0, 20.0),
+                                            egui::Sense::click()
                                         );
-                                        if !is_dragging && response.clicked() {
-                                            toggle_index = Some(idx);
+                                        if has_children {
+                                            let indicator = if is_collapsed { "+" } else { "-" };
+                                            let text_color = if response.hovered() {
+                                                ui.visuals().strong_text_color()
+                                            } else {
+                                                ui.visuals().text_color()
+                                            };
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                indicator,
+                                                egui::FontId::monospace(16.0),
+                                                text_color,
+                                            );
+                                            if !is_dragging && response.clicked() {
+                                                toggle_index = Some(idx);
+                                            }
                                         }
                                     }
 
@@ -1659,6 +1674,8 @@ impl eframe::App for MarkdownApp {
                                     .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
                                     .show(ui, |ui| {
                                         let mut toggle_index: Option<usize> = None;
+                                        // Only reserve space for fold indicators if any header has children
+                                        let show_fold_indicators = any_header_has_children(&child.outline_headers);
                                         for (idx, header) in child.outline_headers.iter().enumerate() {
                                             // Skip headers hidden by collapsed ancestors
                                             if header_is_hidden(&child.outline_headers, idx, &child.collapsed_headers) {
@@ -1676,26 +1693,29 @@ impl eframe::App for MarkdownApp {
                                                 }
 
                                                 // Fold indicator (fixed width area for alignment)
-                                                let (rect, response) = ui.allocate_exact_size(
-                                                    egui::vec2(20.0, 20.0),
-                                                    egui::Sense::click()
-                                                );
-                                                if has_children {
-                                                    let indicator = if is_collapsed { "+" } else { "-" };
-                                                    let text_color = if response.hovered() {
-                                                        ui.visuals().strong_text_color()
-                                                    } else {
-                                                        ui.visuals().text_color()
-                                                    };
-                                                    ui.painter().text(
-                                                        rect.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        indicator,
-                                                        egui::FontId::monospace(16.0),
-                                                        text_color,
+                                                // Only allocate space if any header has children
+                                                if show_fold_indicators {
+                                                    let (rect, response) = ui.allocate_exact_size(
+                                                        egui::vec2(20.0, 20.0),
+                                                        egui::Sense::click()
                                                     );
-                                                    if !is_dragging && response.clicked() {
-                                                        toggle_index = Some(idx);
+                                                    if has_children {
+                                                        let indicator = if is_collapsed { "+" } else { "-" };
+                                                        let text_color = if response.hovered() {
+                                                            ui.visuals().strong_text_color()
+                                                        } else {
+                                                            ui.visuals().text_color()
+                                                        };
+                                                        ui.painter().text(
+                                                            rect.center(),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            indicator,
+                                                            egui::FontId::monospace(16.0),
+                                                            text_color,
+                                                        );
+                                                        if !is_dragging && response.clicked() {
+                                                            toggle_index = Some(idx);
+                                                        }
                                                     }
                                                 }
 
