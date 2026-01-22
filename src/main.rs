@@ -1,10 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
@@ -19,6 +19,7 @@ use egui_mcp_bridge::{McpBridge, McpUiExt};
 
 const APP_KEY: &str = "md-viewer-state";
 const MAX_WATCHER_RETRIES: u32 = 3;
+const FLASH_DURATION_MS: u64 = 600;
 
 /// Persisted state saved between sessions
 #[derive(Serialize, Deserialize, Default)]
@@ -579,6 +580,8 @@ struct MarkdownApp {
     // File explorer state
     file_explorer: FileExplorer,
     show_explorer: bool,
+    // Flash effect for updated files (path -> start time)
+    flashing_paths: HashMap<PathBuf, Instant>,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -671,6 +674,7 @@ impl MarkdownApp {
             hovered_tab: None,
             file_explorer,
             show_explorer,
+            flashing_paths: HashMap::new(),
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -914,7 +918,26 @@ impl MarkdownApp {
     }
 
     fn reload_changed_tabs(&mut self, changed_paths: Vec<PathBuf>) {
+        let now = Instant::now();
         for path in changed_paths {
+            // Trigger flash effect for the changed file
+            self.flashing_paths.insert(path.clone(), now);
+
+            // Also flash parent directories up to the explorer root
+            if let Some(root) = &self.file_explorer.root {
+                let mut current = path.parent();
+                while let Some(parent) = current {
+                    if parent.starts_with(root) || parent == root {
+                        self.flashing_paths.insert(parent.to_path_buf(), now);
+                    }
+                    if parent == root {
+                        break;
+                    }
+                    current = parent.parent();
+                }
+            }
+
+            // Reload the tab content
             for tab in &mut self.tabs {
                 if tab.path == path {
                     log::info!("Reloading tab: {:?}", path);
@@ -1426,6 +1449,29 @@ impl MarkdownApp {
         file_to_open
     }
 
+    /// Calculate flash intensity for a path (0.0 = no flash, 1.0 = full flash)
+    fn get_flash_intensity(&self, path: &PathBuf) -> f32 {
+        // Try the path directly first
+        let start_time = self.flashing_paths.get(path).or_else(|| {
+            // Try canonical path if direct lookup fails
+            path.canonicalize().ok().and_then(|canonical| {
+                self.flashing_paths.get(&canonical)
+            })
+        });
+
+        if let Some(start_time) = start_time {
+            let elapsed = start_time.elapsed().as_millis() as u64;
+            if elapsed < FLASH_DURATION_MS {
+                // Fade out: 1.0 -> 0.0 over the duration
+                1.0 - (elapsed as f32 / FLASH_DURATION_MS as f32)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        }
+    }
+
     /// Render a single node in the file tree (recursive)
     fn render_tree_node(
         &mut self,
@@ -1439,7 +1485,12 @@ impl MarkdownApp {
 
         match node {
             FileTreeNode::File { path, name } => {
-                ui.horizontal(|ui| {
+                // Calculate flash intensity for this file
+                let flash_intensity = self.get_flash_intensity(path);
+                let dark_mode = self.dark_mode;
+
+                // Render file row and get its rect
+                let row_response = ui.horizontal(|ui| {
                     ui.add_space(indent as f32);
 
                     // File icon
@@ -1479,16 +1530,33 @@ impl MarkdownApp {
                         file_to_open = Some(path.clone());
                     }
                 });
+
+                // Paint flash overlay on top using the row rect
+                if flash_intensity > 0.0 {
+                    let alpha = ((flash_intensity * 180.0) as u8).max(60);
+                    let flash_color = if dark_mode {
+                        egui::Color32::from_rgba_unmultiplied(60, 200, 60, alpha)
+                    } else {
+                        egui::Color32::from_rgba_unmultiplied(80, 200, 80, alpha)
+                    };
+                    let rect = row_response.response.rect;
+                    // Use debug_painter which draws on top of everything
+                    ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
+                }
             }
             FileTreeNode::Directory { path, name, children } => {
                 let is_expanded = self.file_explorer.is_expanded(path);
 
-                ui.horizontal(|ui| {
+                // Calculate flash intensity for this directory
+                let flash_intensity = self.get_flash_intensity(path);
+                let dark_mode = self.dark_mode;
+
+                // Render directory row and get its rect
+                let row_response = ui.horizontal(|ui| {
                     ui.add_space(indent as f32);
 
                     // Expand/collapse indicator
                     let indicator = if is_expanded { "v" } else { ">" };
-                    let state_value = if is_expanded { "expanded" } else { "collapsed" };
 
                     #[cfg(feature = "mcp")]
                     let expand_btn = ui.mcp_small_button(format!("Toggle: {}", name), indicator);
@@ -1517,12 +1585,15 @@ impl MarkdownApp {
                             .sense(egui::Sense::click())
                     );
                     #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget(
-                        &format!("Directory: {}", name),
-                        "button",
-                        &response,
-                        Some(state_value),
-                    );
+                    {
+                        let state_value = if is_expanded { "expanded" } else { "collapsed" };
+                        self.mcp_bridge.register_widget(
+                            &format!("Directory: {}", name),
+                            "button",
+                            &response,
+                            Some(state_value),
+                        );
+                    }
 
                     // Show full name on hover if truncated
                     if name.len() > max_len {
@@ -1534,6 +1605,19 @@ impl MarkdownApp {
                         self.file_explorer.toggle_expanded(path);
                     }
                 });
+
+                // Paint flash overlay on top using the row rect
+                if flash_intensity > 0.0 {
+                    let alpha = ((flash_intensity * 180.0) as u8).max(60);
+                    let flash_color = if dark_mode {
+                        egui::Color32::from_rgba_unmultiplied(60, 200, 60, alpha)
+                    } else {
+                        egui::Color32::from_rgba_unmultiplied(80, 200, 80, alpha)
+                    };
+                    let rect = row_response.response.rect;
+                    // Use debug_painter which draws on top of everything
+                    ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
+                }
 
                 // Render children if expanded
                 if is_expanded {
@@ -1585,6 +1669,17 @@ impl eframe::App for MarkdownApp {
         let changed_paths = self.check_file_changes();
         if !changed_paths.is_empty() {
             self.reload_changed_tabs(changed_paths);
+        }
+
+        // Clean up expired flash effects and request repaints while animating
+        if !self.flashing_paths.is_empty() {
+            let flash_duration = Duration::from_millis(FLASH_DURATION_MS);
+            self.flashing_paths.retain(|_, start_time| start_time.elapsed() < flash_duration);
+
+            // Request repaints while there are active flashes
+            if !self.flashing_paths.is_empty() {
+                ctx.request_repaint_after(Duration::from_millis(16)); // ~60fps for smooth animation
+            }
         }
 
         // Request periodic repaints when watching is enabled
