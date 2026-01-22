@@ -166,6 +166,28 @@ impl FileExplorer {
     fn is_expanded(&self, path: &PathBuf) -> bool {
         self.expanded_dirs.contains(path)
     }
+
+    /// Expand all directories in the tree
+    fn expand_all(&mut self) {
+        self.expanded_dirs = Self::collect_all_dirs(&self.tree);
+    }
+
+    /// Collapse all directories in the tree
+    fn collapse_all(&mut self) {
+        self.expanded_dirs.clear();
+    }
+
+    /// Collect all directory paths from a tree recursively
+    fn collect_all_dirs(nodes: &[FileTreeNode]) -> HashSet<PathBuf> {
+        let mut dirs = HashSet::new();
+        for node in nodes {
+            if let FileTreeNode::Directory { path, children, .. } = node {
+                dirs.insert(path.clone());
+                dirs.extend(Self::collect_all_dirs(children));
+            }
+        }
+        dirs
+    }
 }
 
 /// Per-tab state for a document
@@ -1356,6 +1378,20 @@ impl MarkdownApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("↻").on_hover_text("Refresh").clicked() {
                             self.file_explorer.refresh();
+                        }
+                        // Icon-only buttons need explicit registration since they
+                        // don't generate meaningful AccessKit labels
+                        let collapse_btn = ui.small_button("⊟").on_hover_text("Collapse all");
+                        #[cfg(feature = "mcp")]
+                        self.mcp_bridge.register_widget("Collapse All", "button", &collapse_btn, None);
+                        if collapse_btn.clicked() {
+                            self.file_explorer.collapse_all();
+                        }
+                        let expand_btn = ui.small_button("⊞").on_hover_text("Expand all");
+                        #[cfg(feature = "mcp")]
+                        self.mcp_bridge.register_widget("Expand All", "button", &expand_btn, None);
+                        if expand_btn.clicked() {
+                            self.file_explorer.expand_all();
                         }
                     });
                 });
