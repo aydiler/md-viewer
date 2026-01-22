@@ -802,7 +802,7 @@ impl MarkdownApp {
         };
 
         // Handle outline header click
-        let mut clicked_header_line: Option<usize> = None;
+        let mut clicked_header_title: Option<String> = None;
 
         // Outline sidebar
         if self.show_outline && !tab.outline_headers.is_empty() {
@@ -846,7 +846,7 @@ impl MarkdownApp {
                                 };
                                 let response = ui.selectable_label(false, &display_text);
                                 if !is_dragging && response.clicked() {
-                                    clicked_header_line = Some(header.line_number);
+                                    clicked_header_title = Some(header.title.clone());
                                 }
                             }
                         });
@@ -854,10 +854,11 @@ impl MarkdownApp {
         }
 
         // Calculate scroll target if header was clicked
-        if let Some(line_number) = clicked_header_line {
-            if tab.content_lines > 0 && tab.last_content_height > 0.0 {
-                let ratio = line_number as f32 / tab.content_lines as f32;
-                tab.pending_scroll_offset = Some(ratio * tab.last_content_height);
+        if let Some(title) = clicked_header_title {
+            // Look up actual rendered position from cache
+            if let Some(y_pos) = tab.cache.get_header_position(&title) {
+                // Subtract small offset so header appears slightly below top edge
+                tab.pending_scroll_offset = Some((y_pos - 25.0).max(0.0));
             }
         }
 
@@ -871,6 +872,9 @@ impl MarkdownApp {
 
             let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
                 tab.scroll_offset = viewport.min.y;
+
+                // Set scroll offset for header position tracking
+                tab.cache.set_scroll_offset(viewport.min.y);
 
                 CommonMarkViewer::new()
                     .max_image_width(Some(800))
