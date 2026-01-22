@@ -1,6 +1,6 @@
 # Architecture
 
-Single-file Rust desktop application (`src/main.rs`, ~1050 lines) for viewing markdown files using egui + egui_commonmark.
+Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing markdown files using egui + egui_commonmark.
 
 ## Core Components
 
@@ -16,6 +16,14 @@ Single-file Rust desktop application (`src/main.rs`, ~1050 lines) for viewing ma
   - `pending_scroll_offset` - scroll target for outline navigation
   - `history_back` + `history_forward` - navigation history for back/forward
   - `local_links: Vec<String>` - cached local markdown links for link hook handling
+  - `child_windows: Vec<ChildWindow>` - multi-window support for opening links in new windows
+  - `next_child_id: u64` - counter for generating unique viewport IDs
+
+- **ChildWindow**: Struct for child windows opened via Ctrl+Click on links. Each has:
+  - Its own `CommonMarkCache`, content, scroll state, outline, and navigation history
+  - Shared settings from main window: `dark_mode`, `zoom_level`, `show_outline`
+  - No file watching (simplicity for Phase A)
+  - Links navigate in-place (no Ctrl+Click to spawn sub-children)
 
 - **PersistedState**: Serializable struct for session persistence (dark_mode, last_file, zoom_level, show_outline). Stored via eframe's storage API with key `"md-viewer-state"`.
 
@@ -46,7 +54,19 @@ update() → check_file_changes() → reload if needed
          → TopBottomPanel (menu bar + LIVE indicator)
          → SidePanel::left (outline, if show_outline && outline_headers exist)
          → CentralPanel → ScrollArea::show_viewport → CommonMarkViewer
-         → check_link_hooks() → navigate_to_link() if local link clicked
+         → check_link_hooks() → Ctrl+Click opens new window OR navigate in-place
+         → show_viewport_immediate() for each child window
+         → cleanup closed child windows
 ```
 
 Uses `show_viewport` for optimized rendering - egui clips content outside the visible area.
+
+## Multi-Window Support
+
+Child windows are rendered using egui's `show_viewport_immediate()` API, which allows:
+- Direct state modification within the callback
+- Separate OS windows with their own title bars
+- Shared theme/zoom settings from the main window
+- Independent navigation history per window
+
+Ctrl+Click on a link in the main window opens it in a new window. If the file is already open in a child window, the existing window is reactivated instead of creating a duplicate.

@@ -13,3 +13,4 @@
 | Ctrl+Scroll | Zoom in/out with mouse wheel |
 | Alt+Left | Navigate back in history |
 | Alt+Right | Navigate forward in history |
+| Ctrl+Click link | Open link in new window (main window only) |

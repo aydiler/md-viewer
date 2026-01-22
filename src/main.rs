@@ -41,6 +41,138 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
+/// A child window displaying a markdown file
+struct ChildWindow {
+    id: egui::ViewportId,
+    path: PathBuf,
+    content: String,
+    cache: CommonMarkCache,
+    open: bool,
+    document_title: Option<String>,
+    outline_headers: Vec<Header>,
+    scroll_offset: f32,
+    last_content_height: f32,
+    pending_scroll_offset: Option<f32>,
+    content_lines: usize,
+    local_links: Vec<String>,
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
+}
+
+impl ChildWindow {
+    fn new(id: egui::ViewportId, path: PathBuf) -> Self {
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let parsed = parse_headers(&content);
+        let local_links = parse_local_links(&content);
+        let content_lines = content.lines().count();
+
+        let mut cache = CommonMarkCache::default();
+        for link in &local_links {
+            cache.add_link_hook(link);
+        }
+
+        Self {
+            id,
+            path,
+            content,
+            cache,
+            open: true,
+            document_title: parsed.document_title,
+            outline_headers: parsed.outline_headers,
+            scroll_offset: 0.0,
+            last_content_height: 0.0,
+            pending_scroll_offset: None,
+            content_lines,
+            local_links,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+        }
+    }
+
+    fn window_title(&self) -> String {
+        let filename = self.path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        format!("{} - Markdown Viewer", filename)
+    }
+
+    fn load_file(&mut self, path: &PathBuf) {
+        if !path.exists() {
+            return;
+        }
+
+        if let Ok(bytes) = fs::read(path) {
+            let content = String::from_utf8_lossy(&bytes);
+            self.content_lines = content.lines().count();
+            self.content = content.into_owned();
+            self.path = path.clone();
+            self.cache = CommonMarkCache::default();
+
+            let parsed = parse_headers(&self.content);
+            self.document_title = parsed.document_title;
+            self.outline_headers = parsed.outline_headers;
+
+            self.local_links = parse_local_links(&self.content);
+            for link in &self.local_links {
+                self.cache.add_link_hook(link);
+            }
+        }
+    }
+
+    fn navigate_to_link(&mut self, link: &str) {
+        if link.starts_with('#') {
+            return;
+        }
+
+        let Some(current_dir) = self.path.parent() else {
+            return;
+        };
+
+        let path_part = link.split('#').next().unwrap_or(link);
+        let target_path = current_dir.join(path_part);
+
+        let target_path = match target_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        self.history_back.push(self.path.clone());
+        self.history_forward.clear();
+        self.load_file(&target_path);
+    }
+
+    fn check_link_hooks(&mut self) -> Option<String> {
+        for link in &self.local_links {
+            if let Some(true) = self.cache.get_link_hook(link) {
+                return Some(link.clone());
+            }
+        }
+        None
+    }
+
+    fn can_go_back(&self) -> bool {
+        !self.history_back.is_empty()
+    }
+
+    fn can_go_forward(&self) -> bool {
+        !self.history_forward.is_empty()
+    }
+
+    fn navigate_back(&mut self) {
+        if let Some(prev_path) = self.history_back.pop() {
+            self.history_forward.push(self.path.clone());
+            self.load_file(&prev_path);
+        }
+    }
+
+    fn navigate_forward(&mut self) {
+        if let Some(next_path) = self.history_forward.pop() {
+            self.history_back.push(self.path.clone());
+            self.load_file(&next_path);
+        }
+    }
+}
+
 /// Parse local markdown file links and anchor links from content, skipping code blocks.
 /// Returns a list of link destinations that should be handled internally (not opened in browser).
 fn parse_local_links(content: &str) -> Vec<String> {
@@ -210,6 +342,9 @@ struct MarkdownApp {
     history_forward: Vec<PathBuf>,
     // Cached local links for the current document
     local_links: Vec<String>,
+    // Child windows for multi-window support
+    child_windows: Vec<ChildWindow>,
+    next_child_id: u64,
 }
 
 impl MarkdownApp {
@@ -253,6 +388,8 @@ impl MarkdownApp {
             history_back: Vec::new(),
             history_forward: Vec::new(),
             local_links,
+            child_windows: Vec::new(),
+            next_child_id: 0,
         };
 
         // Determine which file to load: CLI argument takes priority, then persisted last file
@@ -562,6 +699,49 @@ impl MarkdownApp {
 
     fn can_go_forward(&self) -> bool {
         !self.history_forward.is_empty()
+    }
+
+    /// Resolve a link relative to the current file
+    fn resolve_link(&self, link: &str) -> Option<PathBuf> {
+        if link.starts_with('#') {
+            return None;
+        }
+
+        let current_file = self.current_file.as_ref()?;
+        let current_dir = current_file.parent()?;
+        let path_part = link.split('#').next().unwrap_or(link);
+        let target_path = current_dir.join(path_part);
+        target_path.canonicalize().ok()
+    }
+
+    /// Open a link in a new window
+    fn open_in_new_window(&mut self, link: &str) {
+        let Some(target_path) = self.resolve_link(link) else {
+            log::warn!("Could not resolve link for new window: {}", link);
+            return;
+        };
+
+        // Skip if same as main window
+        if self.current_file.as_ref() == Some(&target_path) {
+            log::debug!("Link is same as main window, not opening new window");
+            return;
+        }
+
+        // Check if already open in a child window - reactivate if so
+        for window in &mut self.child_windows {
+            if window.path == target_path {
+                log::debug!("File already open in child window, reactivating");
+                window.open = true;
+                return;
+            }
+        }
+
+        // Create new child window
+        let id = egui::ViewportId::from_hash_of(format!("child_{}", self.next_child_id));
+        self.next_child_id += 1;
+
+        log::info!("Opening new window for: {:?}", target_path);
+        self.child_windows.push(ChildWindow::new(id, target_path));
     }
 }
 
@@ -965,8 +1145,202 @@ impl eframe::App for MarkdownApp {
 
         // Check if any local link was clicked and navigate to it
         if let Some(clicked_link) = self.check_link_hooks() {
-            self.navigate_to_link(&clicked_link);
+            let ctrl_held = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+            if ctrl_held {
+                self.open_in_new_window(&clicked_link);
+            } else {
+                self.navigate_to_link(&clicked_link);
+            }
         }
+
+        // Render child windows using immediate viewports
+        let dark_mode = self.dark_mode;
+        let zoom_level = self.zoom_level;
+        let show_outline = self.show_outline;
+
+        for child in &mut self.child_windows {
+            if !child.open {
+                continue;
+            }
+
+            let viewport_builder = egui::ViewportBuilder::default()
+                .with_inner_size([900.0, 700.0])
+                .with_min_inner_size([400.0, 300.0])
+                .with_title(child.window_title());
+
+            ctx.show_viewport_immediate(
+                child.id,
+                viewport_builder,
+                |ctx, _class| {
+                    // Apply theme settings (shared with main window)
+                    let visuals = if dark_mode {
+                        let mut v = egui::Visuals::dark();
+                        v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+                        v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+                        v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E);
+                        v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
+                        v
+                    } else {
+                        let mut v = egui::Visuals::light();
+                        v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
+                        v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
+                        v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
+                        v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
+                        v
+                    };
+                    ctx.set_visuals(visuals);
+                    ctx.style_mut(|style| {
+                        style.url_in_tooltip = true;
+                        use egui::{FontId, TextStyle};
+                        style.text_styles.insert(TextStyle::Body, FontId::proportional(16.0));
+                        style.text_styles.insert(TextStyle::Heading, FontId::proportional(32.0));
+                        style.text_styles.insert(TextStyle::Small, FontId::proportional(13.0));
+                        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(14.0));
+                    });
+                    ctx.set_zoom_factor(zoom_level);
+
+                    // Check for close request
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        child.open = false;
+                    }
+
+                    // Handle keyboard shortcuts for this window
+                    let mut go_back = false;
+                    let mut go_forward = false;
+                    ctx.input(|i| {
+                        if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
+                            go_back = true;
+                        }
+                        if i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight) {
+                            go_forward = true;
+                        }
+                    });
+                    if go_back {
+                        child.navigate_back();
+                    }
+                    if go_forward {
+                        child.navigate_forward();
+                    }
+
+                    // Menu bar with navigation
+                    egui::TopBottomPanel::top("child_menu_bar").show(ctx, |ui| {
+                        egui::MenuBar::new().ui(ui, |ui| {
+                            // Navigation buttons
+                            let can_back = child.can_go_back();
+                            if ui.add_enabled(can_back, egui::Button::new("←")).on_hover_text("Back (Alt+←)").clicked() {
+                                child.navigate_back();
+                            }
+
+                            let can_forward = child.can_go_forward();
+                            if ui.add_enabled(can_forward, egui::Button::new("→")).on_hover_text("Forward (Alt+→)").clicked() {
+                                child.navigate_forward();
+                            }
+
+                            ui.separator();
+
+                            // Show file path
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(child.path.display().to_string())
+                                        .small()
+                                        .color(ui.visuals().weak_text_color())
+                                );
+                            });
+                        });
+                    });
+
+                    // Outline sidebar (if enabled)
+                    let mut clicked_header_line: Option<usize> = None;
+                    if show_outline && !child.outline_headers.is_empty() {
+                        let is_dragging = ctx.input(|i| i.pointer.any_down());
+                        let sidebar_title = child.document_title.as_deref().unwrap_or("Outline");
+
+                        egui::SidePanel::left("child_outline")
+                            .resizable(true)
+                            .default_width(200.0)
+                            .min_width(120.0)
+                            .max_width(400.0)
+                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 }))
+                            .show(ctx, |ui| {
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.set_max_width(ui.available_width());
+                                    ui.add_space(6.0);
+                                    ui.add(egui::Label::new(egui::RichText::new(sidebar_title).heading()).truncate());
+                                });
+                                ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                                    .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
+                                    .show(ui, |ui| {
+                                        for header in &child.outline_headers {
+                                            let indent = (header.level.saturating_sub(2) as usize) * 12;
+                                            let prefix = " ".repeat(indent / 4);
+                                            let display_text = if header.title.len() > 40 {
+                                                format!("{}{}...", prefix, &header.title[..37])
+                                            } else {
+                                                format!("{}{}", prefix, &header.title)
+                                            };
+                                            let response = ui.selectable_label(false, &display_text);
+                                            if !is_dragging && response.clicked() {
+                                                clicked_header_line = Some(header.line_number);
+                                            }
+                                        }
+                                    });
+                            });
+                    }
+
+                    // Calculate scroll target if header was clicked
+                    if let Some(line_number) = clicked_header_line {
+                        if child.content_lines > 0 && child.last_content_height > 0.0 {
+                            let ratio = line_number as f32 / child.content_lines as f32;
+                            child.pending_scroll_offset = Some(ratio * child.last_content_height);
+                        }
+                    }
+
+                    // Main content panel
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin { left: 4, right: 8, top: 4, bottom: 4 }))
+                        .show(ctx, |ui| {
+                            let mut scroll_area = egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
+
+                            if let Some(offset) = child.pending_scroll_offset.take() {
+                                scroll_area = scroll_area.vertical_scroll_offset(offset);
+                            }
+
+                            let scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
+                                child.scroll_offset = viewport.min.y;
+
+                                CommonMarkViewer::new()
+                                    .max_image_width(Some(800))
+                                    .default_width(Some(600))
+                                    .indentation_spaces(2)
+                                    .show_alt_text_on_hover(true)
+                                    .syntax_theme_dark("base16-ocean.dark")
+                                    .syntax_theme_light("base16-ocean.light")
+                                    .line_height(1.5)
+                                    .code_line_height(1.3)
+                                    .paragraph_spacing(2.0)
+                                    .heading_spacing_above(2.0)
+                                    .heading_spacing_below(0.75)
+                                    .show(ui, &mut child.cache, &child.content);
+                            });
+
+                            child.last_content_height = scroll_output.content_size.y;
+                        });
+
+                    // Check if any local link was clicked (in-place navigation only)
+                    if let Some(clicked_link) = child.check_link_hooks() {
+                        child.navigate_to_link(&clicked_link);
+                    }
+                },
+            );
+        }
+
+        // Clean up closed child windows
+        self.child_windows.retain(|w| w.open);
 
         // Drag and drop overlay
         if self.is_dragging {
