@@ -596,16 +596,8 @@ impl CommonMarkViewerInternal {
         } else if self.text_style.heading.is_some() {
             // Accumulate heading text for position tracking
             self.current_heading_text.push_str(&text);
-            // Calculate a rect at the left edge for heading placement
-            let available = ui.available_rect_before_wrap();
-            let left_edge = ui.min_rect().left();
-            let heading_rect = egui::Rect::from_min_size(
-                egui::pos2(left_edge, available.top()),
-                egui::vec2(available.width() + (available.left() - left_edge), 0.0),
-            );
-            ui.allocate_ui_at_rect(heading_rect, |ui| {
-                ui.label(rich_text);
-            });
+            // ui.end_row() in start_tag already ensures headings start at left edge
+            ui.label(rich_text);
         } else {
             ui.label(rich_text);
         }
