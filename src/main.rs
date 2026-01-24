@@ -1363,9 +1363,9 @@ impl MarkdownApp {
         };
 
         // Content area (no inner CentralPanel needed - we're already in one)
-        // Small right margin prevents scrollbar/resize-handle overlap jitter
+        // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::none()
-            .inner_margin(egui::Margin { right: 3, ..Default::default() })
+            .inner_margin(egui::Margin { left: 8, right: 3, ..Default::default() })
             .show(ui, |ui| {
             // Get scroll input
             let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
