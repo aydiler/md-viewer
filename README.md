@@ -33,11 +33,18 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ## Screenshots
 
-| Dark Mode | Light Mode |
-|:---------:|:----------:|
-| ![Dark Mode](screenshots/dark-mode.png) | ![Light Mode](screenshots/light-mode.png) |
+### Dark Mode
+*File explorer, document outline, and tabbed browsing*
 
-### Syntax Highlighting
+![Dark Mode](screenshots/dark-mode.png)
+
+### Light Mode with Syntax Highlighting
+*Code blocks with 200+ language support via syntect*
+
+![Light Mode](screenshots/light-mode.png)
+
+### Dark Mode with Code
+*Consistent syntax highlighting across themes*
 
 ![Syntax Highlighting](screenshots/syntax-highlighting.png)
 
