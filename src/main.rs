@@ -1148,13 +1148,16 @@ impl MarkdownApp {
         tab_to_close
     }
 
-    /// Render the active tab's content
-    fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
-        let mut open_in_new_tab: Option<PathBuf> = None;
-
+    /// Render the outline sidebar (right panel)
+    /// Rendered at top level for proper layout space allocation
+    fn render_outline(&mut self, ctx: &egui::Context) {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
-            return None;
+            return;
         };
+
+        if !self.show_outline || tab.outline_headers.is_empty() {
+            return;
+        }
 
         // Handle outline header click
         let mut clicked_header_title: Option<String> = None;
@@ -1163,161 +1166,158 @@ impl MarkdownApp {
         #[cfg(feature = "mcp")]
         let mut widget_data: Vec<(String, &'static str, egui::Rect, Option<String>)> = Vec::new();
 
-        // Outline sidebar
-        if self.show_outline && !tab.outline_headers.is_empty() {
-            let is_dragging = ui.ctx().input(|i| i.pointer.any_down());
+        let is_dragging = ctx.input(|i| i.pointer.any_down());
 
-            egui::SidePanel::right("outline")
-                .resizable(true)
-                .default_width(200.0)
-                .min_width(120.0)
-                .max_width(400.0)
-                .frame(
-                    egui::Frame::side_top_panel(&ui.ctx().style()).inner_margin(egui::Margin {
-                        left: 8,
-                        right: 0,
-                        top: 8,
-                        bottom: 0,
-                    }),
-                )
-                .show_inside(ui, |ui| {
-                    // Expand/Collapse All buttons (only if there are nested headers)
-                    let has_nested = any_header_has_children(&tab.outline_headers);
-                    if has_nested {
-                        ui.horizontal(|ui| {
-                            ui.add_space(6.0);
-                            let expand_btn = ui.small_button("Expand All");
+        egui::SidePanel::right("outline")
+            .resizable(true)
+            .default_width(200.0)
+            .min_width(120.0)
+            .max_width(400.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 8,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }),
+            )
+            .show(ctx, |ui| {
+                // Expand/Collapse All buttons (only if there are nested headers)
+                let has_nested = any_header_has_children(&tab.outline_headers);
+                if has_nested {
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        let expand_btn = ui.small_button("Expand All");
 
-                            // Collect Expand All button for MCP
-                            #[cfg(feature = "mcp")]
-                            widget_data.push((
-                                "Outline: Expand All".to_string(),
-                                "button",
-                                expand_btn.rect,
-                                None,
-                            ));
+                        // Collect Expand All button for MCP
+                        #[cfg(feature = "mcp")]
+                        widget_data.push((
+                            "Outline: Expand All".to_string(),
+                            "button",
+                            expand_btn.rect,
+                            None,
+                        ));
 
-                            if expand_btn.clicked() {
-                                tab.collapsed_headers.clear();
-                            }
+                        if expand_btn.clicked() {
+                            tab.collapsed_headers.clear();
+                        }
 
-                            let collapse_btn = ui.small_button("Collapse All");
+                        let collapse_btn = ui.small_button("Collapse All");
 
-                            // Collect Collapse All button for MCP
-                            #[cfg(feature = "mcp")]
-                            widget_data.push((
-                                "Outline: Collapse All".to_string(),
-                                "button",
-                                collapse_btn.rect,
-                                None,
-                            ));
+                        // Collect Collapse All button for MCP
+                        #[cfg(feature = "mcp")]
+                        widget_data.push((
+                            "Outline: Collapse All".to_string(),
+                            "button",
+                            collapse_btn.rect,
+                            None,
+                        ));
 
-                            if collapse_btn.clicked() {
-                                for i in 0..tab.outline_headers.len() {
-                                    if header_has_children(&tab.outline_headers, i) {
-                                        tab.collapsed_headers.insert(i);
-                                    }
+                        if collapse_btn.clicked() {
+                            for i in 0..tab.outline_headers.len() {
+                                if header_has_children(&tab.outline_headers, i) {
+                                    tab.collapsed_headers.insert(i);
                                 }
                             }
-                        });
-                        ui.separator();
-                    }
-                    egui::ScrollArea::vertical()
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .id_salt("outline")
-                        .show(ui, |ui| {
-                            let mut toggle_index: Option<usize> = None;
-                            // Only reserve space for fold indicators if any header has children
-                            let show_fold_indicators = any_header_has_children(&tab.outline_headers);
-                            for (idx, header) in tab.outline_headers.iter().enumerate() {
-                                // Skip headers hidden by collapsed ancestors
-                                if header_is_hidden(&tab.outline_headers, idx, &tab.collapsed_headers) {
-                                    continue;
+                        }
+                    });
+                    ui.separator();
+                }
+                egui::ScrollArea::vertical()
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .id_salt("outline")
+                    .show(ui, |ui| {
+                        let mut toggle_index: Option<usize> = None;
+                        // Only reserve space for fold indicators if any header has children
+                        let show_fold_indicators = any_header_has_children(&tab.outline_headers);
+                        for (idx, header) in tab.outline_headers.iter().enumerate() {
+                            // Skip headers hidden by collapsed ancestors
+                            if header_is_hidden(&tab.outline_headers, idx, &tab.collapsed_headers) {
+                                continue;
+                            }
+
+                            let has_children = header_has_children(&tab.outline_headers, idx);
+                            let is_collapsed = tab.collapsed_headers.contains(&idx);
+
+                            // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
+                            let indent = (header.level.saturating_sub(2) as usize) * 12;
+
+                            ui.horizontal(|ui| {
+                                // Add base indent
+                                if indent > 0 {
+                                    ui.add_space(indent as f32);
                                 }
 
-                                let has_children = header_has_children(&tab.outline_headers, idx);
-                                let is_collapsed = tab.collapsed_headers.contains(&idx);
-
-                                // Indent based on header level (h2 = 0, h3 = 1 indent, etc.)
-                                let indent = (header.level.saturating_sub(2) as usize) * 12;
-
-                                ui.horizontal(|ui| {
-                                    // Add base indent
-                                    if indent > 0 {
-                                        ui.add_space(indent as f32);
-                                    }
-
-                                    // Fold indicator (fixed width area for alignment)
-                                    // Only allocate space if any header has children
-                                    if show_fold_indicators {
-                                        let (rect, response) = ui.allocate_exact_size(
-                                            egui::vec2(20.0, 20.0),
-                                            egui::Sense::click()
+                                // Fold indicator (fixed width area for alignment)
+                                // Only allocate space if any header has children
+                                if show_fold_indicators {
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(20.0, 20.0),
+                                        egui::Sense::click()
+                                    );
+                                    if has_children {
+                                        let indicator = if is_collapsed { "+" } else { "-" };
+                                        let text_color = if response.hovered() {
+                                            ui.visuals().strong_text_color()
+                                        } else {
+                                            ui.visuals().text_color()
+                                        };
+                                        ui.painter().text(
+                                            rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            indicator,
+                                            egui::FontId::monospace(16.0),
+                                            text_color,
                                         );
-                                        if has_children {
-                                            let indicator = if is_collapsed { "+" } else { "-" };
-                                            let text_color = if response.hovered() {
-                                                ui.visuals().strong_text_color()
-                                            } else {
-                                                ui.visuals().text_color()
-                                            };
-                                            ui.painter().text(
-                                                rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                indicator,
-                                                egui::FontId::monospace(16.0),
-                                                text_color,
-                                            );
 
-                                            // Collect fold indicator for MCP
-                                            #[cfg(feature = "mcp")]
-                                            widget_data.push((
-                                                format!("Toggle: {}", header.title),
-                                                "button",
-                                                rect,
-                                                Some(if is_collapsed { "collapsed".to_string() } else { "expanded".to_string() }),
-                                            ));
+                                        // Collect fold indicator for MCP
+                                        #[cfg(feature = "mcp")]
+                                        widget_data.push((
+                                            format!("Toggle: {}", header.title),
+                                            "button",
+                                            rect,
+                                            Some(if is_collapsed { "collapsed".to_string() } else { "expanded".to_string() }),
+                                        ));
 
-                                            if !is_dragging && response.clicked() {
-                                                toggle_index = Some(idx);
-                                            }
+                                        if !is_dragging && response.clicked() {
+                                            toggle_index = Some(idx);
                                         }
                                     }
-
-                                    // Header title
-                                    let display_text = if header.title.len() > 35 {
-                                        format!("{}...", &header.title[..32])
-                                    } else {
-                                        header.title.clone()
-                                    };
-
-                                    let response = ui.selectable_label(false, &display_text);
-
-                                    // Collect header for MCP
-                                    #[cfg(feature = "mcp")]
-                                    widget_data.push((
-                                        format!("Header: {}", header.title),
-                                        "header",
-                                        response.rect,
-                                        Some(format!("h{}", header.level)),
-                                    ));
-
-                                    if !is_dragging && response.clicked() {
-                                        clicked_header_title = Some(header.title.clone());
-                                    }
-                                });
-                            }
-                            // Apply toggle after iteration to avoid borrow issues
-                            if let Some(idx) = toggle_index {
-                                if tab.collapsed_headers.contains(&idx) {
-                                    tab.collapsed_headers.remove(&idx);
-                                } else {
-                                    tab.collapsed_headers.insert(idx);
                                 }
+
+                                // Header title
+                                let display_text = if header.title.len() > 35 {
+                                    format!("{}...", &header.title[..32])
+                                } else {
+                                    header.title.clone()
+                                };
+
+                                let response = ui.selectable_label(false, &display_text);
+
+                                // Collect header for MCP
+                                #[cfg(feature = "mcp")]
+                                widget_data.push((
+                                    format!("Header: {}", header.title),
+                                    "header",
+                                    response.rect,
+                                    Some(format!("h{}", header.level)),
+                                ));
+
+                                if !is_dragging && response.clicked() {
+                                    clicked_header_title = Some(header.title.clone());
+                                }
+                            });
+                        }
+                        // Apply toggle after iteration to avoid borrow issues
+                        if let Some(idx) = toggle_index {
+                            if tab.collapsed_headers.contains(&idx) {
+                                tab.collapsed_headers.remove(&idx);
+                            } else {
+                                tab.collapsed_headers.insert(idx);
                             }
-                        });
-                });
-        }
+                        }
+                    });
+            });
 
         // Register all collected widgets with MCP bridge
         #[cfg(feature = "mcp")]
@@ -1338,9 +1338,18 @@ impl MarkdownApp {
                 tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
             }
         }
+    }
 
-        // Main content area
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+    /// Render the active tab's content
+    fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
+        let mut open_in_new_tab: Option<PathBuf> = None;
+
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return None;
+        };
+
+        // Content area (no inner CentralPanel needed - we're already in one)
+        {
             // Get scroll input
             let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
             let content_rect = ui.available_rect_before_wrap();
@@ -1402,7 +1411,7 @@ impl MarkdownApp {
             if ui.ctx().input(|i| i.smooth_scroll_delta.length_sq() > 0.0) {
                 ui.ctx().request_repaint();
             }
-        });
+        }
 
         // Check for clicked links
         if let Some(clicked_link) = tab.check_link_hooks() {
@@ -2195,6 +2204,9 @@ impl eframe::App for MarkdownApp {
         if let Some(path) = explorer_file {
             self.open_in_new_tab(path);
         }
+
+        // Outline sidebar (right) - at top level for proper layout
+        self.render_outline(ctx);
 
         // Main content area
         let mut open_in_new_tab: Option<PathBuf> = None;
