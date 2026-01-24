@@ -3,8 +3,20 @@ name = "md-viewer"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.76"
-description = "Lightweight markdown viewer"
-authors = ["Ahmet"]
+description = "Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload"
+authors = ["Ahmet Yildirim <ahmetyildirim@protonmail.com>"]
+license = "MIT"
+repository = "https://github.com/aydiler/md-viewer"
+homepage = "https://github.com/aydiler/md-viewer"
+documentation = "https://github.com/aydiler/md-viewer#readme"
+readme = "README.md"
+keywords = ["markdown", "viewer", "egui", "linux", "desktop"]
+categories = ["command-line-utilities", "gui", "visualization"]
+exclude = [
+    "docs/devlog/*",
+    "screenshots/*",
+    ".claude/*",
+]
 
 [dependencies]
 # Core GUI framework - eframe re-exports egui

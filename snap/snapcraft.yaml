@@ -1,0 +1,54 @@
+name: md-viewer
+base: core22
+version: '0.1.0'
+summary: Fast, lightweight markdown viewer for Linux
+description: |
+  A fast, lightweight markdown viewer built with Rust and egui.
+
+  Features:
+  - GitHub Flavored Markdown with syntax highlighting (200+ languages)
+  - Tab system for multiple documents
+  - File explorer sidebar
+  - Outline/table of contents sidebar
+  - Dark and light themes
+  - Live reload on file changes
+  - Session persistence
+  - Native X11 and Wayland support
+
+grade: stable
+confinement: strict
+
+architectures:
+  - build-on: amd64
+
+apps:
+  md-viewer:
+    command: bin/md-viewer
+    extensions: [gnome]
+    plugs:
+      - home
+      - removable-media
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      - opengl
+
+parts:
+  md-viewer:
+    plugin: rust
+    source: .
+    build-packages:
+      - clang
+      - pkg-config
+      - libxcb-dev
+      - libxkbcommon-dev
+      - libssl-dev
+      - libgtk-3-dev
+      - libfontconfig1-dev
+      - libdbus-1-dev
+    stage-packages:
+      - libxcb1
+      - libxkbcommon0
+      - libfontconfig1
+    rust-channel: stable

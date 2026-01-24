@@ -1,5 +1,10 @@
 # md-viewer
 
+[![Crates.io](https://img.shields.io/crates/v/md-viewer.svg)](https://crates.io/crates/md-viewer)
+[![AUR](https://img.shields.io/aur/version/md-viewer-git)](https://aur.archlinux.org/packages/md-viewer-git)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![GitHub stars](https://img.shields.io/github/stars/aydiler/md-viewer)](https://github.com/aydiler/md-viewer/stargazers)
+
 A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed for distraction-free reading with excellent typography and syntax highlighting.
 
 ![Dark Mode](screenshots/dark-mode.png)
@@ -91,11 +96,33 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ## Installation
 
+### Arch Linux (AUR)
+
+```bash
+# Using yay
+yay -S md-viewer-git
+
+# Using paru
+paru -S md-viewer-git
+```
+
+### Snap Store
+
+```bash
+sudo snap install md-viewer
+```
+
+### Cargo (crates.io)
+
+```bash
+cargo install md-viewer
+```
+
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/md-viewer
+git clone https://github.com/aydiler/md-viewer
 cd md-viewer
 
 # Build release binary
