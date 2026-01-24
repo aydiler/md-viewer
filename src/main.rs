@@ -154,6 +154,12 @@ impl FileExplorer {
 
     /// Set root directory and rescan
     fn set_root(&mut self, path: PathBuf) {
+        // Convert empty path to current directory
+        let path = if path.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            path
+        };
         self.root = Some(path.clone());
         self.tree = Self::scan_directory(&path, 0);
     }
@@ -1564,15 +1570,17 @@ impl MarkdownApp {
                         egui::RichText::new(&display_name)
                     };
 
-                    #[cfg(feature = "mcp")]
-                    let response = ui.mcp_selectable_label_with_value(
-                        format!("File: {}", name),
-                        is_open,
-                        text,
-                        if is_open { "open" } else { "" },
-                    );
-                    #[cfg(not(feature = "mcp"))]
                     let response = ui.selectable_label(is_open, text);
+                    #[cfg(feature = "mcp")]
+                    {
+                        let state_value = if is_open { "open" } else { "" };
+                        self.mcp_bridge.register_widget(
+                            &format!("File: {}", name),
+                            "button",
+                            &response,
+                            Some(state_value),
+                        );
+                    }
 
                     // Show full name on hover if truncated
                     if name.len() > max_len {
