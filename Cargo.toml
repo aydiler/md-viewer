@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.76"
 description = "Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload"
-authors = ["Ahmet Yildirim <ahmetyildirim@protonmail.com>"]
 license = "MIT"
 repository = "https://github.com/aydiler/md-viewer"
 homepage = "https://github.com/aydiler/md-viewer"

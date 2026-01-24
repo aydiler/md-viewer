@@ -1,6 +1,6 @@
 [package]
 name = "egui_commonmark_backend_extended"
-authors = ["Erlend Walstad", "Ahmet Yildirim <ahmetyildirim@protonmail.com>"]
+authors = ["Erlend Walstad"]
 
 version.workspace = true
 edition.workspace = true
