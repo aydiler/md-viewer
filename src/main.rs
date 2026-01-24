@@ -1180,12 +1180,14 @@ impl MarkdownApp {
             .min_width(120.0)
             .max_width(400.0)
             .frame(
-                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
-                    left: 8,
-                    right: 0,
-                    top: 8,
-                    bottom: 0,
-                }),
+                egui::Frame::side_top_panel(&ctx.style())
+                    .outer_margin(egui::Margin { left: 8, ..Default::default() })
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 0,
+                        top: 8,
+                        bottom: 0,
+                    }),
             )
             .show(ctx, |ui| {
                 // Expand/Collapse All buttons (only if there are nested headers)
@@ -1363,7 +1365,10 @@ impl MarkdownApp {
         };
 
         // Content area (no inner CentralPanel needed - we're already in one)
-        {
+        // Add right margin to prevent scrollbar/resize-handle overlap with outline panel
+        egui::Frame::none()
+            .inner_margin(egui::Margin { right: 8, ..Default::default() })
+            .show(ui, |ui| {
             // Get scroll input
             let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
             let content_rect = ui.available_rect_before_wrap();
@@ -1425,7 +1430,7 @@ impl MarkdownApp {
             if ui.ctx().input(|i| i.smooth_scroll_delta.length_sq() > 0.0) {
                 ui.ctx().request_repaint();
             }
-        }
+        });
 
         // Check for clicked links
         if let Some(clicked_link) = tab.check_link_hooks() {
@@ -1800,6 +1805,10 @@ impl eframe::App for MarkdownApp {
             // Smoother scroll animation
             style.animation_time = 0.15; // Faster UI animations (default: 0.1)
             style.scroll_animation.points_per_second = 1500.0; // Faster scroll (default: 1000)
+
+            // Reduce resize grab radius to prevent overlap with adjacent scrollbars
+            // Default is ~5.0, reducing to 2.0 prevents jitter between scrollbar and panel resize
+            style.interaction.resize_grab_radius_side = 2.0;
         });
 
         // TEMP: Disable zoom for MCP testing debug
