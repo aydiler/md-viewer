@@ -465,7 +465,12 @@ impl CommonMarkViewerInternal {
             let id = ui.id().with("_table").with(self.curr_table);
             self.curr_table += 1;
 
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            // Wrap table in horizontal scroll to handle overflow
+            egui::ScrollArea::horizontal()
+                .id_salt(id.with("_scroll"))
+                .max_width(max_width)
+                .show(ui, |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
                 let Table { header, rows } = parse_table(events);
 
                 egui::Grid::new(id).striped(true).show(ui, |ui| {
@@ -504,6 +509,7 @@ impl CommonMarkViewerInternal {
 
                         ui.end_row();
                     }
+                    });
                 });
             });
 
