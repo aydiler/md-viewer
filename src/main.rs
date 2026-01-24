@@ -588,8 +588,10 @@ struct MarkdownApp {
     watcher_rx:
         Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
     watcher_retry_count: u32,
-    // Set of paths being watched
+    // Set of paths being watched (individual tab files)
     watched_paths: HashSet<PathBuf>,
+    // Explorer root being watched (uses recursive mode for directory tree updates)
+    watched_explorer_root: Option<PathBuf>,
     // Tab being hovered for close button
     hovered_tab: Option<usize>,
     // File explorer state
@@ -686,6 +688,7 @@ impl MarkdownApp {
             watcher_rx: None,
             watcher_retry_count: 0,
             watched_paths: HashSet::new(),
+            watched_explorer_root: None,
             hovered_tab: None,
             file_explorer,
             show_explorer,
@@ -805,8 +808,11 @@ impl MarkdownApp {
     fn start_watching(&mut self) {
         self.stop_watching();
 
-        let paths = self.get_open_tab_paths();
-        if paths.is_empty() {
+        let tab_paths = self.get_open_tab_paths();
+        let explorer_root = self.file_explorer.root.clone();
+
+        // Need something to watch
+        if tab_paths.is_empty() && explorer_root.is_none() {
             return;
         }
 
@@ -814,7 +820,8 @@ impl MarkdownApp {
 
         match new_debouncer(Duration::from_millis(200), tx) {
             Ok(mut debouncer) => {
-                for path in &paths {
+                // Watch individual tab files (non-recursive)
+                for path in &tab_paths {
                     if let Err(e) = debouncer
                         .watcher()
                         .watch(path, notify::RecursiveMode::NonRecursive)
@@ -825,8 +832,25 @@ impl MarkdownApp {
                     }
                 }
 
-                if !self.watched_paths.is_empty() {
-                    log::info!("Started watching {} files", self.watched_paths.len());
+                // Watch explorer root directory (recursive) for tree updates
+                if let Some(ref root) = explorer_root {
+                    if let Err(e) = debouncer
+                        .watcher()
+                        .watch(root, notify::RecursiveMode::Recursive)
+                    {
+                        log::error!("Failed to watch explorer root {:?}: {}", root, e);
+                    } else {
+                        self.watched_explorer_root = Some(root.clone());
+                        log::info!("Started watching explorer root: {:?}", root);
+                    }
+                }
+
+                if !self.watched_paths.is_empty() || self.watched_explorer_root.is_some() {
+                    log::info!(
+                        "Started watching {} files + explorer root: {}",
+                        self.watched_paths.len(),
+                        self.watched_explorer_root.is_some()
+                    );
                     self.watcher = Some(debouncer);
                     self.watcher_rx = Some(rx);
                     self.watch_enabled = true;
@@ -847,6 +871,7 @@ impl MarkdownApp {
         self.watcher = None;
         self.watcher_rx = None;
         self.watched_paths.clear();
+        self.watched_explorer_root = None;
     }
 
     fn update_watched_paths(&mut self) {
@@ -878,10 +903,9 @@ impl MarkdownApp {
 
     fn check_file_changes(&mut self) -> Vec<PathBuf> {
         let Some(rx) = &self.watcher_rx else {
-            if self.watch_enabled
-                && !self.watched_paths.is_empty()
-                && self.watcher_retry_count < MAX_WATCHER_RETRIES
-            {
+            // Attempt recovery if watching is enabled and there's something to watch
+            let has_watchable = !self.watched_paths.is_empty() || self.watched_explorer_root.is_some();
+            if self.watch_enabled && has_watchable && self.watcher_retry_count < MAX_WATCHER_RETRIES {
                 log::info!(
                     "Attempting to recover file watcher (attempt {})",
                     self.watcher_retry_count + 1
@@ -934,12 +958,19 @@ impl MarkdownApp {
 
     fn reload_changed_tabs(&mut self, changed_paths: Vec<PathBuf>) {
         let now = Instant::now();
+        let mut refresh_tree = false;
+
         for path in changed_paths {
             // Trigger flash effect for the changed file
             self.flashing_paths.insert(path.clone(), now);
 
             // Also flash parent directories up to the explorer root
             if let Some(root) = &self.file_explorer.root {
+                // Check if the changed path is within the explorer root
+                if path.starts_with(root) {
+                    refresh_tree = true;
+                }
+
                 let mut current = path.parent();
                 while let Some(parent) = current {
                     if parent.starts_with(root) || parent == root {
@@ -959,6 +990,12 @@ impl MarkdownApp {
                     tab.reload();
                 }
             }
+        }
+
+        // Refresh the file explorer tree if any changes were within the explorer root
+        if refresh_tree {
+            log::info!("Refreshing file explorer tree");
+            self.file_explorer.refresh();
         }
     }
 
