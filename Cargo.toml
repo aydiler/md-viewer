@@ -31,9 +31,6 @@ eframe = { version = "0.33", default-features = false, features = [
 ] }
 egui = { version = "0.33", features = ["accesskit"] }
 
-# MCP bridge for E2E testing (optional, enable with --features mcp)
-egui-mcp-bridge = { path = "../../../egui-mcp/crates/egui-mcp-bridge", optional = true }
-
 # Markdown rendering with syntax highlighting (fork with typography support)
 egui_commonmark_extended = { version = "0.22.1", features = [
     "better_syntax_highlighting",
@@ -63,7 +60,6 @@ regex = "1.12.2"
 
 [features]
 default = []
-mcp = ["dep:egui-mcp-bridge"]
 
 [profile.release]
 opt-level = "z"
