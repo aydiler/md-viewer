@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use regex::Regex;
