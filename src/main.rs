@@ -1180,14 +1180,12 @@ impl MarkdownApp {
             .min_width(120.0)
             .max_width(400.0)
             .frame(
-                egui::Frame::side_top_panel(&ctx.style())
-                    .outer_margin(egui::Margin { left: 8, ..Default::default() })
-                    .inner_margin(egui::Margin {
-                        left: 8,
-                        right: 0,
-                        top: 8,
-                        bottom: 0,
-                    }),
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 8,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }),
             )
             .show(ctx, |ui| {
                 // Expand/Collapse All buttons (only if there are nested headers)
@@ -1365,9 +1363,9 @@ impl MarkdownApp {
         };
 
         // Content area (no inner CentralPanel needed - we're already in one)
-        // Add right margin to prevent scrollbar/resize-handle overlap with outline panel
+        // Small right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::none()
-            .inner_margin(egui::Margin { right: 8, ..Default::default() })
+            .inner_margin(egui::Margin { right: 3, ..Default::default() })
             .show(ui, |ui| {
             // Get scroll input
             let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);

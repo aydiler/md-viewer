@@ -145,21 +145,17 @@ if raw_scroll.abs() > 0.0 {
 ### Resize handle and scrollbar overlap causes jitter
 **Context:** Resizing outline panel caused mouse jitter when near content scrollbar
 **Problem:** The SidePanel resize handle sensing area overlaps with the adjacent ScrollArea scrollbar, causing rapid switching between resize and scroll modes.
-**Fix:** Combine reduced grab radius with physical margins:
+**Fix:** Combine reduced grab radius with minimal margin:
 ```rust
 // 1. Reduce resize grab radius
 style.interaction.resize_grab_radius_side = 2.0; // Default ~5.0
 
-// 2. Add right margin to content area
+// 2. Add minimal right margin to content area (not visually noticeable)
 egui::Frame::none()
-    .inner_margin(egui::Margin { right: 8, ..Default::default() })
+    .inner_margin(egui::Margin { right: 3, ..Default::default() })
     .show(ui, |ui| { /* content */ });
-
-// 3. Add left outer margin to outline panel
-egui::Frame::side_top_panel(&ctx.style())
-    .outer_margin(egui::Margin { left: 8, ..Default::default() })
 ```
-**Why all three?** Reducing grab radius alone wasn't enough - physical separation via margins ensures no overlap.
+**Why both?** Reduced grab radius alone isn't enough. The 3px margin provides physical separation without creating a visible gap (8px was too much and created a black gap).
 **Files:** `src/main.rs`
 
 ---
