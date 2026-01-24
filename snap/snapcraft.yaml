@@ -24,7 +24,6 @@ architectures:
 apps:
   md-viewer:
     command: bin/md-viewer
-    extensions: [gnome]
     plugs:
       - home
       - removable-media
@@ -33,10 +32,13 @@ apps:
       - wayland
       - x11
       - opengl
+      - gsettings
+    environment:
+      XDG_DATA_DIRS: $SNAP/usr/share:$XDG_DATA_DIRS
 
 parts:
   md-viewer:
-    plugin: rust
+    plugin: nil
     source: .
     build-packages:
       - clang
@@ -51,4 +53,14 @@ parts:
       - libxcb1
       - libxkbcommon0
       - libfontconfig1
-    rust-channel: stable
+      - libgtk-3-0
+      - libglib2.0-0
+      - libgl1
+      - libwayland-client0
+      - libwayland-egl1
+    override-build: |
+      # Remove optional MCP dependency (not needed in production, path doesn't exist in snap build)
+      sed -i '/egui-mcp-bridge/d' Cargo.toml
+      sed -i '/mcp = /d' Cargo.toml
+      cargo build --release
+      install -Dm755 target/release/md-viewer $SNAPCRAFT_PART_INSTALL/bin/md-viewer
