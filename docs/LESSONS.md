@@ -285,3 +285,25 @@ egui_launch({
 DISPLAY=:99 WINIT_UNIX_BACKEND=x11 WAYLAND_DISPLAY= ./app
 ```
 **Files:** `~/.claude/CLAUDE.md`, `~/egui-mcp/`
+
+### Inline code in headers renders incorrectly
+**Context:** Headers like `### Title (`code`)` rendered garbled text
+**Problem:** Each text fragment in a heading was getting its own `allocate_ui_at_rect()` call to force left alignment, causing each fragment to reset to x=0 instead of flowing inline.
+**Fix:** Accumulate all heading RichText fragments, render once at end:
+```rust
+// Add field to accumulate fragments
+current_heading_rich_texts: Vec<egui::RichText>,
+
+// In event_text (heading case) - accumulate, don't render
+self.current_heading_rich_texts.push(rich_text);
+
+// In end_tag(Heading) - render all at once
+let rich_texts = std::mem::take(&mut self.current_heading_rich_texts);
+ui.allocate_ui_at_rect(heading_rect, |ui| {
+    for rt in rich_texts {
+        ui.label(rt);
+    }
+});
+```
+**Key insight:** Single `allocate_ui_at_rect` for left alignment + multiple labels inside for inline flow.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`
