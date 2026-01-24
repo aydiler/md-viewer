@@ -2,6 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/md-viewer.svg)](https://crates.io/crates/md-viewer)
 [![AUR](https://img.shields.io/aur/version/md-viewer-git)](https://aur.archlinux.org/packages/md-viewer-git)
+[![Snap](https://img.shields.io/badge/snap-md--viewer-blue?logo=snapcraft)](https://snapcraft.io/md-viewer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/aydiler/md-viewer)](https://github.com/aydiler/md-viewer/stargazers)
 
