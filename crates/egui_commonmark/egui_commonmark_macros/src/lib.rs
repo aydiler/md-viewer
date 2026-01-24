@@ -3,7 +3,7 @@
 //! It is recommended to use this crate through the parent crate
 //! [egui_commonmark](https://docs.rs/crate/egui_commonmark/latest).
 //! If you for some reason don't want to use it you must also import
-//! [egui_commonmark_backend](https://docs.rs/crate/egui_commonmark_backend/latest)
+//! [egui_commonmark_backend_extended](https://docs.rs/crate/egui_commonmark_backend_extended/latest)
 //! directly from your crate to get access to `CommonMarkCache` and internals that
 //! the macros require for the final generated code.
 //!
@@ -18,8 +18,8 @@
 //!
 //! ```
 //! # // If used through egui_commonmark the backend crate does not need to be relied upon
-//! # use egui_commonmark_backend::CommonMarkCache;
-//! # use egui_commonmark_macros::commonmark;
+//! # use egui_commonmark_backend_extended::CommonMarkCache;
+//! # use egui_commonmark_macros_extended::commonmark;
 //! # egui::__run_test_ui(|ui| {
 //! let mut cache = CommonMarkCache::default();
 //! let _response = commonmark!(ui, &mut cache, "# ATX Heading Level 1");
@@ -39,8 +39,8 @@
 // Unfortunately can't depend on an actual file in the doc test so it must be
 // disabled
 //! ```rust,ignore
-//! # use egui_commonmark_backend::CommonMarkCache;
-//! # use egui_commonmark_macros::commonmark_str;
+//! # use egui_commonmark_backend_extended::CommonMarkCache;
+//! # use egui_commonmark_macros_extended::commonmark_str;
 //! # egui::__run_test_ui(|ui| {
 //! let mut cache = CommonMarkCache::default();
 //! commonmark_str!(ui, &mut cache, "foo.md");
@@ -157,7 +157,7 @@ pub fn commonmark_str(input: proc_macro::TokenStream) -> proc_macro::TokenStream
 
 fn resolve_backend_crate_import() -> proc_macro2::TokenStream {
     // The purpose of this is to ensure that when used through egui_commonmark
-    // the generated code can always find egui_commonmark_backend without the
+    // the generated code can always find egui_commonmark_backend_extended without the
     // user having to import themselves.
     //
     // There are other ways to do this that does not depend on an external crate
@@ -170,14 +170,14 @@ fn resolve_backend_crate_import() -> proc_macro2::TokenStream {
     //
     // With all that said the resolution is the following:
     //
-    // Try egui_commonmark_backend first. This ensures that the tests will run from
+    // Try egui_commonmark_backend_extended first. This ensures that the tests will run from
     // the main workspace despite egui_commonmark being present. However if only
-    // egui_commonmark is present then a `use egui_commonmark::egui_commonmark_backend;`
+    // egui_commonmark is present then a `use egui_commonmark::egui_commonmark_backend_extended;`
     // will be inserted into the generated code.
     //
     // If none of that work's then the user is missing some crates
 
-    let backend_crate = proc_macro_crate::crate_name("egui_commonmark_backend");
+    let backend_crate = proc_macro_crate::crate_name("egui_commonmark_backend_extended");
     let main_crate = proc_macro_crate::crate_name("egui_commonmark");
 
     if backend_crate.is_ok() {
@@ -190,7 +190,7 @@ fn resolve_backend_crate_import() -> proc_macro2::TokenStream {
 
         let crate_name_lit = proc_macro2::Ident::new(&crate_name, proc_macro2::Span::call_site());
         quote::quote!(
-            use #crate_name_lit::egui_commonmark_backend;
+            use #crate_name_lit::egui_commonmark_backend_extended;
         )
     } else {
         proc_macro2::TokenStream::new()

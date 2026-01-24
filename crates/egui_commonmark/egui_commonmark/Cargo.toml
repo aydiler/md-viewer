@@ -1,6 +1,6 @@
 [package]
-name = "egui_commonmark"
-authors = ["Erlend Walstad"]
+name = "egui_commonmark_extended"
+authors = ["Erlend Walstad", "Ahmet Yildirim <ahmetyildirim@protonmail.com>"]
 
 version.workspace = true
 edition.workspace = true
@@ -8,16 +8,16 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
-description = "Commonmark viewer for egui"
-keywords = ["commonmark", "egui"]
+description = "Commonmark viewer for egui - fork with typography (line height) and header position tracking"
+keywords = ["commonmark", "egui", "markdown", "typography"]
 categories = ["gui"]
 readme = "README.md"
-documentation = "https://docs.rs/egui_commonmark"
+documentation = "https://docs.rs/egui_commonmark_extended"
 include = ["src/**/*.rs", "LICENSE-MIT", "LICENSE-APACHE", "Cargo.toml"]
 
 [dependencies]
-egui_commonmark_backend = { workspace = true }
-egui_commonmark_macros = { workspace = true, optional = true }
+egui_commonmark_backend_extended = { workspace = true }
+egui_commonmark_macros_extended = { workspace = true, optional = true }
 
 egui_extras = { workspace = true }
 egui = { workspace = true }
@@ -31,22 +31,22 @@ default = ["load-images", "pulldown_cmark"]
 
 ## Enable proc macros for compile time generation of egui widgets from markdown
 macros = [
-    "dep:egui_commonmark_macros",
+    "dep:egui_commonmark_macros_extended",
 ]
 
 ## Builds upon the `macros` feature. Enables tracking of markdown files to recompile
 ## when their content changes. Uses nightly features
-nightly = ["macros", "egui_commonmark_macros/nightly"]
+nightly = ["macros", "egui_commonmark_macros_extended/nightly"]
 
 # For internal debugging use only!
-dump-macro = ["egui_commonmark_macros/dump-macro"]
+dump-macro = ["egui_commonmark_macros_extended/dump-macro"]
 
 ## No-op feature
 pulldown_cmark = []
 
 ## Syntax highlighting for code blocks using syntect
 better_syntax_highlighting = [
-    "egui_commonmark_backend/better_syntax_highlighting",
+    "egui_commonmark_backend_extended/better_syntax_highlighting",
 ]
 
 ## Enable loading of images. Make sure to also opt in to what image format you need
@@ -67,7 +67,7 @@ fetch = ["egui_extras/http"]
 ## in the background.
 ##
 ## Currently this does not support wasm.
-embedded_image = ["egui_commonmark_backend/embedded_image"]
+embedded_image = ["egui_commonmark_backend_extended/embedded_image"]
 
 [dev-dependencies]
 eframe = { version = "0.33", default-features = false, features = [
@@ -78,7 +78,7 @@ eframe = { version = "0.33", default-features = false, features = [
 ] }
 
 image = { version = "0.25", default-features = false, features = ["png"] }
-egui_commonmark_macros = { workspace = true } # Tests won't build otherswise
+egui_commonmark_macros_extended = { workspace = true } # Tests won't build otherswise
 
 [package.metadata.docs.rs]
 features = ["better_syntax_highlighting", "document-features", "macros"]

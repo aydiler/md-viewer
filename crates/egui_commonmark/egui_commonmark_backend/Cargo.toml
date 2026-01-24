@@ -1,6 +1,6 @@
 [package]
-name = "egui_commonmark_backend"
-authors = ["Erlend Walstad"]
+name = "egui_commonmark_backend_extended"
+authors = ["Erlend Walstad", "Ahmet Yildirim <ahmetyildirim@protonmail.com>"]
 
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
-description = "Shared code for egui_commonmark and egui_commonmark_macros"
+description = "Shared code for egui_commonmark_extended - fork with typography and header tracking"
 keywords = ["commonmark", "egui"]
 categories = ["gui"]
 readme = "README.md"

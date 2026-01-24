@@ -1,10 +1,10 @@
 use egui::__run_test_ui;
-use egui_commonmark_macros::commonmark_str;
+use egui_commonmark_macros_extended::commonmark_str;
 
 // Testing all the different examples should give fairly good coverage
 fn main() {
     __run_test_ui(|ui| {
-        let mut cache = egui_commonmark_backend::CommonMarkCache::default();
+        let mut cache = egui_commonmark_backend_extended::CommonMarkCache::default();
         commonmark_str!(
             ui,
             &mut cache,

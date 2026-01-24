@@ -1,6 +1,6 @@
 [package]
-name = "egui_commonmark_macros"
-authors = ["Erlend Walstad"]
+name = "egui_commonmark_macros_extended"
+authors = ["Erlend Walstad", "Ahmet Yildirim <ahmetyildirim@protonmail.com>"]
 
 version.workspace = true
 edition.workspace = true
@@ -8,11 +8,11 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
-description = "Embed markdown directly into the binary as egui widgets"
-keywords = ["commonmark", "egui"]
+description = "Embed markdown directly into the binary as egui widgets - extended fork"
+keywords = ["commonmark", "egui", "markdown"]
 categories = ["gui"]
 readme = "README.md"
-documentation = "https://docs.rs/egui_commonmark_macros"
+documentation = "https://docs.rs/egui_commonmark_macros_extended"
 include = ["src/**/*.rs", "LICENSE-MIT", "LICENSE-APACHE", "Cargo.toml"]
 
 
@@ -26,7 +26,7 @@ proc-macro2 = { version = "1.0", default-features = false }
 
 pulldown-cmark = { workspace = true, default-features = false }
 
-egui_commonmark_backend = { workspace = true }
+egui_commonmark_backend_extended = { workspace = true }
 egui = { workspace = true }
 
 document-features = { workspace = true, optional = true }

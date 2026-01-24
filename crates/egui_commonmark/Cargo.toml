@@ -11,16 +11,16 @@ resolver = "3"
 [workspace.package]
 license = "MIT OR Apache-2.0"
 edition = "2021"
-rust-version = "1.76"                                        # Follows egui
-version = "0.22.0"
-repository = "https://github.com/lampsitter/egui_commonmark"
+rust-version = "1.76"
+version = "0.22.1"
+repository = "https://github.com/aydiler/md-viewer"
 
 [workspace.dependencies]
 egui_extras = { version = "0.33", default-features = false }
 egui = { version = "0.33", default-features = false }
 
-egui_commonmark_backend = { version = "0.22.0", path = "egui_commonmark_backend", default-features = false }
-egui_commonmark_macros = { version = "0.22.0", path = "egui_commonmark_macros", default-features = false }
+egui_commonmark_backend_extended = { version = "0.22.1", path = "egui_commonmark_backend", default-features = false }
+egui_commonmark_macros_extended = { version = "0.22.1", path = "egui_commonmark_macros", default-features = false }
 
 # To add features to documentation
 document-features = { version = "0.2" }

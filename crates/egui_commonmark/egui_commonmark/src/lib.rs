@@ -68,7 +68,7 @@
 //! ```
 //!
 //! For more information check out the documentation for
-//! [egui_commonmark_macros](https://docs.rs/crate/egui_commonmark_macros/latest)
+//! [egui_commonmark_macros_extended](https://docs.rs/crate/egui_commonmark_macros_extended/latest)
 #![cfg_attr(feature = "document-features", doc = "# Features")]
 #![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
 
@@ -76,21 +76,21 @@ use egui::{self, Id};
 
 mod parsers;
 
-pub use egui_commonmark_backend::RenderHtmlFn;
-pub use egui_commonmark_backend::RenderMathFn;
-pub use egui_commonmark_backend::alerts::{Alert, AlertBundle};
-pub use egui_commonmark_backend::misc::CommonMarkCache;
-pub use egui_commonmark_backend::typography::{Measurement, TypographyConfig};
+pub use egui_commonmark_backend_extended::RenderHtmlFn;
+pub use egui_commonmark_backend_extended::RenderMathFn;
+pub use egui_commonmark_backend_extended::alerts::{Alert, AlertBundle};
+pub use egui_commonmark_backend_extended::misc::CommonMarkCache;
+pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 
 #[cfg(feature = "macros")]
-pub use egui_commonmark_macros::*;
+pub use egui_commonmark_macros_extended::*;
 
 #[cfg(feature = "macros")]
 // Do not rely on this directly!
 #[doc(hidden)]
-pub use egui_commonmark_backend;
+pub use egui_commonmark_backend_extended;
 
-use egui_commonmark_backend::*;
+use egui_commonmark_backend_extended::*;
 
 #[derive(Debug, Default)]
 pub struct CommonMarkViewer<'f> {
@@ -382,7 +382,7 @@ impl<'f> CommonMarkViewer<'f> {
         cache: &mut CommonMarkCache,
         text: &str,
     ) -> egui::InnerResponse<()> {
-        egui_commonmark_backend::prepare_show(cache, ui.ctx());
+        egui_commonmark_backend_extended::prepare_show(cache, ui.ctx());
 
         let (response, _) = parsers::pulldown::CommonMarkViewerInternal::new().show(
             ui,
@@ -405,7 +405,7 @@ impl<'f> CommonMarkViewer<'f> {
         text: &mut String,
     ) -> egui::InnerResponse<()> {
         self.options.mutable = true;
-        egui_commonmark_backend::prepare_show(cache, ui.ctx());
+        egui_commonmark_backend_extended::prepare_show(cache, ui.ctx());
 
         let (mut inner_response, checkmark_events) =
             parsers::pulldown::CommonMarkViewerInternal::new().show(
@@ -452,7 +452,7 @@ impl<'f> CommonMarkViewer<'f> {
         cache: &mut CommonMarkCache,
         text: &str,
     ) {
-        egui_commonmark_backend::prepare_show(cache, ui.ctx());
+        egui_commonmark_backend_extended::prepare_show(cache, ui.ctx());
         parsers::pulldown::CommonMarkViewerInternal::new().show_scrollable(
             Id::new(source_id),
             ui,
