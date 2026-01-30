@@ -24,7 +24,7 @@ jobs:
             libfontconfig1-dev libdbus-1-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
