@@ -65,8 +65,15 @@ struct ParsedHeaders {
 /// A node in the file explorer tree
 #[derive(Clone)]
 enum FileTreeNode {
-    File { path: PathBuf, name: String },
-    Directory { path: PathBuf, name: String, children: Vec<FileTreeNode> },
+    File {
+        path: PathBuf,
+        name: String,
+    },
+    Directory {
+        path: PathBuf,
+        name: String,
+        children: Vec<FileTreeNode>,
+    },
 }
 
 /// File explorer state
@@ -482,7 +489,10 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         }
     }
 
-    let document_title = all_headers.iter().find(|h| h.level == 1).map(|h| h.title.clone());
+    let document_title = all_headers
+        .iter()
+        .find(|h| h.level == 1)
+        .map(|h| h.title.clone());
     let outline_headers = all_headers;
 
     ParsedHeaders {
@@ -591,8 +601,7 @@ struct MarkdownApp {
     is_dragging: bool,
     // File watcher state
     watcher: Option<Debouncer<RecommendedWatcher>>,
-    watcher_rx:
-        Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
+    watcher_rx: Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
     watcher_retry_count: u32,
     // Set of paths being watched (individual tab files)
     watched_paths: HashSet<PathBuf>,
@@ -664,7 +673,10 @@ impl MarkdownApp {
             .as_ref()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .or(persisted.explorer_root.filter(|p| p.exists()))
-            .or_else(|| tabs.first().and_then(|t| t.path.parent().map(|p| p.to_path_buf())))
+            .or_else(|| {
+                tabs.first()
+                    .and_then(|t| t.path.parent().map(|p| p.to_path_buf()))
+            })
             .or_else(|| std::env::current_dir().ok());
 
         if let Some(root) = explorer_root {
@@ -910,8 +922,10 @@ impl MarkdownApp {
     fn check_file_changes(&mut self) -> Vec<PathBuf> {
         let Some(rx) = &self.watcher_rx else {
             // Attempt recovery if watching is enabled and there's something to watch
-            let has_watchable = !self.watched_paths.is_empty() || self.watched_explorer_root.is_some();
-            if self.watch_enabled && has_watchable && self.watcher_retry_count < MAX_WATCHER_RETRIES {
+            let has_watchable =
+                !self.watched_paths.is_empty() || self.watched_explorer_root.is_some();
+            if self.watch_enabled && has_watchable && self.watcher_retry_count < MAX_WATCHER_RETRIES
+            {
                 log::info!(
                     "Attempting to recover file watcher (attempt {})",
                     self.watcher_retry_count + 1
@@ -1049,7 +1063,11 @@ impl MarkdownApp {
                                     format!("Tab: {}", title),
                                     "tab",
                                     response.rect,
-                                    Some(if *is_active { "active".to_string() } else { "".to_string() }),
+                                    Some(if *is_active {
+                                        "active".to_string()
+                                    } else {
+                                        "".to_string()
+                                    }),
                                 ));
 
                                 if response.clicked() {
@@ -1111,12 +1129,7 @@ impl MarkdownApp {
 
             // Collect new tab button widget data for MCP
             #[cfg(feature = "mcp")]
-            widget_data.push((
-                "New Tab".to_string(),
-                "button",
-                new_tab_btn.rect,
-                None,
-            ));
+            widget_data.push(("New Tab".to_string(), "button", new_tab_btn.rect, None));
 
             if new_tab_btn.clicked() {
                 self.open_file_dialog();
@@ -1126,12 +1139,8 @@ impl MarkdownApp {
         // Register all collected widgets with MCP bridge
         #[cfg(feature = "mcp")]
         for (name, widget_type, rect, value) in widget_data {
-            self.mcp_bridge.register_widget_rect(
-                &name,
-                widget_type,
-                rect,
-                value.as_deref(),
-            );
+            self.mcp_bridge
+                .register_widget_rect(&name, widget_type, rect, value.as_deref());
         }
 
         // Apply new active tab
@@ -1259,7 +1268,7 @@ impl MarkdownApp {
                                 if show_fold_indicators {
                                     let (rect, response) = ui.allocate_exact_size(
                                         egui::vec2(20.0, 20.0),
-                                        egui::Sense::click()
+                                        egui::Sense::click(),
                                     );
                                     if has_children {
                                         let indicator = if is_collapsed { "+" } else { "-" };
@@ -1282,7 +1291,11 @@ impl MarkdownApp {
                                             format!("Toggle: {}", header.title),
                                             "button",
                                             rect,
-                                            Some(if is_collapsed { "collapsed".to_string() } else { "expanded".to_string() }),
+                                            Some(if is_collapsed {
+                                                "collapsed".to_string()
+                                            } else {
+                                                "expanded".to_string()
+                                            }),
                                         ));
 
                                         if !is_dragging && response.clicked() {
@@ -1292,48 +1305,44 @@ impl MarkdownApp {
                                 }
 
                                 // Header title
-                                    let display_text = if header.title.len() > 35 {
-                                        format!("{}...", &header.title[..32])
-                                    } else {
-                                        header.title.clone()
-                                    };
-
-                                    let response = ui.selectable_label(false, &display_text);
-
-                                    // Collect header for MCP
-                                    #[cfg(feature = "mcp")]
-                                    widget_data.push((
-                                        format!("Header: {}", header.title),
-                                        "header",
-                                        response.rect,
-                                        Some(format!("h{}", header.level)),
-                                    ));
-
-                                    if !is_dragging && response.clicked() {
-                                        clicked_header_index = Some(idx);
-                                    }
-                                });
-                            }
-                            // Apply toggle after iteration to avoid borrow issues
-                            if let Some(idx) = toggle_index {
-                                if tab.collapsed_headers.contains(&idx) {
-                                    tab.collapsed_headers.remove(&idx);
+                                let display_text = if header.title.len() > 35 {
+                                    format!("{}...", &header.title[..32])
                                 } else {
-                                    tab.collapsed_headers.insert(idx);
+                                    header.title.clone()
+                                };
+
+                                let response = ui.selectable_label(false, &display_text);
+
+                                // Collect header for MCP
+                                #[cfg(feature = "mcp")]
+                                widget_data.push((
+                                    format!("Header: {}", header.title),
+                                    "header",
+                                    response.rect,
+                                    Some(format!("h{}", header.level)),
+                                ));
+
+                                if !is_dragging && response.clicked() {
+                                    clicked_header_index = Some(idx);
                                 }
+                            });
+                        }
+                        // Apply toggle after iteration to avoid borrow issues
+                        if let Some(idx) = toggle_index {
+                            if tab.collapsed_headers.contains(&idx) {
+                                tab.collapsed_headers.remove(&idx);
+                            } else {
+                                tab.collapsed_headers.insert(idx);
                             }
-                        });
+                        }
+                    });
             });
 
         // Register all collected widgets with MCP bridge
         #[cfg(feature = "mcp")]
         for (name, widget_type, rect, value) in widget_data {
-            self.mcp_bridge.register_widget_rect(
-                &name,
-                widget_type,
-                rect,
-                value.as_deref(),
-            );
+            self.mcp_bridge
+                .register_widget_rect(&name, widget_type, rect, value.as_deref());
         }
 
         // Calculate scroll target if header was clicked
@@ -1365,70 +1374,76 @@ impl MarkdownApp {
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::none()
-            .inner_margin(egui::Margin { left: 8, right: 3, ..Default::default() })
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 3,
+                ..Default::default()
+            })
             .show(ui, |ui| {
-            // Get scroll input
-            let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
-            let content_rect = ui.available_rect_before_wrap();
+                // Get scroll input
+                let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
+                let content_rect = ui.available_rect_before_wrap();
 
-            let mut scroll_area = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .enable_scrolling(true)
-                .id_salt(tab.id);
+                let mut scroll_area = egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .enable_scrolling(true)
+                    .id_salt(tab.id);
 
-            // Apply pending scroll offset from header clicks
-            if let Some(offset) = tab.pending_scroll_offset.take() {
-                scroll_area = scroll_area.vertical_scroll_offset(offset);
-            }
+                // Apply pending scroll offset from header clicks
+                if let Some(offset) = tab.pending_scroll_offset.take() {
+                    scroll_area = scroll_area.vertical_scroll_offset(offset);
+                }
 
-            let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
-                tab.scroll_offset = viewport.min.y;
-                tab.cache.set_scroll_offset(viewport.min.y);
+                let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
+                    tab.scroll_offset = viewport.min.y;
+                    tab.cache.set_scroll_offset(viewport.min.y);
 
-                CommonMarkViewer::new()
-                    .max_image_width(Some(800))
-                    .default_width(Some(600))
-                    .indentation_spaces(2)
-                    .show_alt_text_on_hover(true)
-                    .syntax_theme_dark("base16-ocean.dark")
-                    .syntax_theme_light("base16-ocean.light")
-                    .line_height(1.5)
-                    .code_line_height(1.3)
-                    .paragraph_spacing(2.0)
-                    .heading_spacing_above(2.0)
-                    .heading_spacing_below(0.75)
-                    .show(ui, &mut tab.cache, &tab.content);
-            });
+                    CommonMarkViewer::new()
+                        .max_image_width(Some(800))
+                        .default_width(Some(600))
+                        .indentation_spaces(2)
+                        .show_alt_text_on_hover(true)
+                        .syntax_theme_dark("base16-ocean.dark")
+                        .syntax_theme_light("base16-ocean.light")
+                        .line_height(1.5)
+                        .code_line_height(1.3)
+                        .paragraph_spacing(2.0)
+                        .heading_spacing_above(2.0)
+                        .heading_spacing_below(0.75)
+                        .show(ui, &mut tab.cache, &tab.content);
+                });
 
-            tab.last_content_height = scroll_output.content_size.y;
+                tab.last_content_height = scroll_output.content_size.y;
 
-            // Manual scroll handling when wheel is used (works during selection)
-            // Only apply if pointer is over the content area
-            let pointer_over_content = ui.ctx().input(|i| {
-                i.pointer.hover_pos().is_some_and(|pos| content_rect.contains(pos))
-            });
-            if raw_scroll.abs() > 0.0 && pointer_over_content {
-                let current_offset = scroll_output.state.offset.y;
-                let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
-                let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
+                // Manual scroll handling when wheel is used (works during selection)
+                // Only apply if pointer is over the content area
+                let pointer_over_content = ui.ctx().input(|i| {
+                    i.pointer
+                        .hover_pos()
+                        .is_some_and(|pos| content_rect.contains(pos))
+                });
+                if raw_scroll.abs() > 0.0 && pointer_over_content {
+                    let current_offset = scroll_output.state.offset.y;
+                    let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
+                    let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
 
-                // Don't store if we'd hit a boundary (causes selection to break)
-                let would_hit_top = new_offset < 0.5;
-                let would_hit_bottom = new_offset > max_scroll - 0.5;
-                let offset_changed = (new_offset - current_offset).abs() > 0.5;
+                    // Don't store if we'd hit a boundary (causes selection to break)
+                    let would_hit_top = new_offset < 0.5;
+                    let would_hit_bottom = new_offset > max_scroll - 0.5;
+                    let offset_changed = (new_offset - current_offset).abs() > 0.5;
 
-                if offset_changed && !would_hit_top && !would_hit_bottom {
-                    scroll_output.state.offset.y = new_offset;
-                    scroll_output.state.store(ui.ctx(), scroll_output.id);
+                    if offset_changed && !would_hit_top && !would_hit_bottom {
+                        scroll_output.state.offset.y = new_offset;
+                        scroll_output.state.store(ui.ctx(), scroll_output.id);
+                        ui.ctx().request_repaint();
+                    }
+                }
+
+                // Request repaint during smooth scrolling
+                if ui.ctx().input(|i| i.smooth_scroll_delta.length_sq() > 0.0) {
                     ui.ctx().request_repaint();
                 }
-            }
-
-            // Request repaint during smooth scrolling
-            if ui.ctx().input(|i| i.smooth_scroll_delta.length_sq() > 0.0) {
-                ui.ctx().request_repaint();
-            }
-        });
+            });
 
         // Check for clicked links
         if let Some(clicked_link) = tab.check_link_hooks() {
@@ -1484,14 +1499,26 @@ impl MarkdownApp {
                 ui.horizontal(|ui| {
                     let expand_btn = ui.small_button("⊞").on_hover_text("Expand all directories");
                     #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget("Explorer: Expand All", "button", &expand_btn, None);
+                    self.mcp_bridge.register_widget(
+                        "Explorer: Expand All",
+                        "button",
+                        &expand_btn,
+                        None,
+                    );
                     if expand_btn.clicked() {
                         self.file_explorer.expand_all();
                     }
 
-                    let collapse_btn = ui.small_button("⊟").on_hover_text("Collapse all directories");
+                    let collapse_btn = ui
+                        .small_button("⊟")
+                        .on_hover_text("Collapse all directories");
                     #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget("Explorer: Collapse All", "button", &collapse_btn, None);
+                    self.mcp_bridge.register_widget(
+                        "Explorer: Collapse All",
+                        "button",
+                        &collapse_btn,
+                        None,
+                    );
                     if collapse_btn.clicked() {
                         self.file_explorer.collapse_all();
                     }
@@ -1509,7 +1536,9 @@ impl MarkdownApp {
                     .id_salt("file_explorer")
                     .show(ui, |ui| {
                         // Collect open tab paths for highlighting
-                        let open_paths: HashSet<PathBuf> = self.tabs.iter()
+                        let open_paths: HashSet<PathBuf> = self
+                            .tabs
+                            .iter()
                             .filter(|t| t.path.exists())
                             .map(|t| t.path.clone())
                             .collect();
@@ -1532,9 +1561,9 @@ impl MarkdownApp {
         // Try the path directly first
         let start_time = self.flashing_paths.get(path).or_else(|| {
             // Try canonical path if direct lookup fails
-            path.canonicalize().ok().and_then(|canonical| {
-                self.flashing_paths.get(&canonical)
-            })
+            path.canonicalize()
+                .ok()
+                .and_then(|canonical| self.flashing_paths.get(&canonical))
         });
 
         if let Some(start_time) = start_time {
@@ -1624,7 +1653,11 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
             }
-            FileTreeNode::Directory { path, name, children } => {
+            FileTreeNode::Directory {
+                path,
+                name,
+                children,
+            } => {
                 let is_expanded = self.file_explorer.is_expanded(path);
 
                 // Calculate flash intensity for this directory
@@ -1662,7 +1695,7 @@ impl MarkdownApp {
                     let response = ui.add(
                         egui::Label::new(&display_name)
                             .selectable(false)
-                            .sense(egui::Sense::click())
+                            .sense(egui::Sense::click()),
                     );
                     #[cfg(feature = "mcp")]
                     {
@@ -1702,7 +1735,8 @@ impl MarkdownApp {
                 // Render children if expanded
                 if is_expanded {
                     for child in children {
-                        if let Some(path) = self.render_tree_node(ui, child, depth + 1, open_paths) {
+                        if let Some(path) = self.render_tree_node(ui, child, depth + 1, open_paths)
+                        {
                             file_to_open = Some(path);
                         }
                     }
@@ -1754,7 +1788,8 @@ impl eframe::App for MarkdownApp {
         // Clean up expired flash effects and request repaints while animating
         if !self.flashing_paths.is_empty() {
             let flash_duration = Duration::from_millis(FLASH_DURATION_MS);
-            self.flashing_paths.retain(|_, start_time| start_time.elapsed() < flash_duration);
+            self.flashing_paths
+                .retain(|_, start_time| start_time.elapsed() < flash_duration);
 
             // Request repaints while there are active flashes
             if !self.flashing_paths.is_empty() {
@@ -2192,12 +2227,10 @@ impl eframe::App for MarkdownApp {
             egui::TopBottomPanel::top("error_bar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("⚠")
-                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                        egui::RichText::new("⚠").color(egui::Color32::from_rgb(255, 200, 100)),
                     );
                     ui.label(
-                        egui::RichText::new(error)
-                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                        egui::RichText::new(error).color(egui::Color32::from_rgb(255, 200, 100)),
                     );
                     if ui.small_button("✕").clicked() {
                         clear_error = true;
