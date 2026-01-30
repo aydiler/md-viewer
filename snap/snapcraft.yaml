@@ -38,8 +38,9 @@ apps:
 
 parts:
   md-viewer:
-    plugin: nil
+    plugin: rust
     source: .
+    rust-channel: stable
     build-packages:
       - clang
       - pkg-config
@@ -64,6 +65,5 @@ parts:
     override-build: |
       # Remove optional MCP dependency (not needed in production, path doesn't exist in snap build)
       sed -i '/egui-mcp-bridge/d' Cargo.toml
-      sed -i '/mcp = /d' Cargo.toml
-      cargo build --release
-      install -Dm755 target/release/md-viewer $SNAPCRAFT_PART_INSTALL/bin/md-viewer
+      sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
+      craftctl default

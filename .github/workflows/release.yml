@@ -90,7 +90,7 @@ jobs:
             echo "Version ${VERSION} already on crates.io; skipping."
             exit 0
           fi
-          cargo publish
+          cargo publish --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
