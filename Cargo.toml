@@ -1,6 +1,6 @@
 [package]
 name = "md-viewer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.76"
 description = "Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload"
@@ -31,7 +31,7 @@ eframe = { version = "0.33", default-features = false, features = [
 egui = { version = "0.33", features = ["accesskit"] }
 
 # MCP bridge for E2E testing (optional, local dev only - not on crates.io)
-egui-mcp-bridge = { path = "../../../egui-mcp/crates/egui-mcp-bridge", optional = true }
+egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
 
 # Markdown rendering with syntax highlighting (fork with typography support)
 egui_commonmark_extended = { version = "0.22.1", features = [
