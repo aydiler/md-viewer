@@ -41,7 +41,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo build --release
-      - run: cargo test --lib
+      - run: cargo test
 
   version-sync:
     runs-on: ubuntu-latest
