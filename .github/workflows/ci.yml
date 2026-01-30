@@ -1,0 +1,56 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libxcb-dev \
+            libxkbcommon-dev libssl-dev libgtk-3-dev \
+            libfontconfig1-dev libdbus-1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo build --release
+      - run: cargo test --lib
+
+  version-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check versions match
+        run: |
+          # Robust extraction tolerating quotes and spacing
+          CARGO_VER=$(awk -F'"' '/^version[[:space:]]*=[[:space:]]*"/{print $2; exit}' Cargo.toml)
+          SNAP_VER=$(sed -n "s/^version:[[:space:]]*['\"]\\?\\([0-9]\\+\\.[0-9]\\+\\.[0-9]\\+\\)['\"]\\?/\\1/p" snap/snapcraft.yaml)
+
+          echo "Cargo.toml: $CARGO_VER"
+          echo "snapcraft.yaml: $SNAP_VER"
+
+          if [ "$CARGO_VER" != "$SNAP_VER" ]; then
+            echo "::error::Version mismatch! Cargo=$CARGO_VER Snap=$SNAP_VER"
+            exit 1
+          fi
