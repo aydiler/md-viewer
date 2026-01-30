@@ -32,9 +32,11 @@ jobs:
 
       - name: Remove local-only MCP dependency
         run: |
-          # Remove the path dependency but keep the feature (as empty)
-          sed -i '/egui-mcp-bridge/d' Cargo.toml
+          # Remove the path dependency line but keep the feature (as empty)
+          # First, change the mcp feature to empty (must do before removing dep line)
           sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
+          # Then remove the optional dependency line
+          sed -i '/^egui-mcp-bridge = /d' Cargo.toml
 
       - name: Install git-cliff
         run: cargo install git-cliff
@@ -75,9 +77,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Remove local-only MCP dependency
         run: |
-          # Remove the path dependency but keep the feature (as empty)
-          sed -i '/egui-mcp-bridge/d' Cargo.toml
+          # Remove the path dependency line but keep the feature (as empty)
+          # First, change the mcp feature to empty (must do before removing dep line)
           sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
+          # Then remove the optional dependency line
+          sed -i '/^egui-mcp-bridge = /d' Cargo.toml
       - name: Publish to crates.io
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
