@@ -30,6 +30,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Remove local-only MCP dependency
+        run: |
+          sed -i '/egui-mcp-bridge/d' Cargo.toml
+          sed -i '/mcp = /d' Cargo.toml
+
       - name: Install git-cliff
         run: cargo install git-cliff
 
@@ -67,6 +72,10 @@ jobs:
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Remove local-only MCP dependency
+        run: |
+          sed -i '/egui-mcp-bridge/d' Cargo.toml
+          sed -i '/mcp = /d' Cargo.toml
       - name: Publish to crates.io
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
