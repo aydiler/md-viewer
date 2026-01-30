@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -77,20 +77,11 @@ enum FileTreeNode {
 }
 
 /// File explorer state
+#[derive(Default)]
 struct FileExplorer {
     root: Option<PathBuf>,
     tree: Vec<FileTreeNode>,
     expanded_dirs: HashSet<PathBuf>,
-}
-
-impl Default for FileExplorer {
-    fn default() -> Self {
-        Self {
-            root: None,
-            tree: Vec::new(),
-            expanded_dirs: HashSet::new(),
-        }
-    }
 }
 
 impl FileExplorer {
@@ -150,7 +141,7 @@ impl FileExplorer {
         nodes
     }
 
-    fn is_markdown_file(path: &PathBuf) -> bool {
+    fn is_markdown_file(path: &Path) -> bool {
         path.extension()
             .map(|ext| {
                 let ext = ext.to_string_lossy().to_lowercase();
@@ -1103,11 +1094,9 @@ impl MarkdownApp {
                                         tab_to_close = Some(idx);
                                         ui.close();
                                     }
-                                    if tab_count > 1 {
-                                        if ui.button("Close Others").clicked() {
-                                            close_others = Some(idx);
-                                            ui.close();
-                                        }
+                                    if tab_count > 1 && ui.button("Close Others").clicked() {
+                                        close_others = Some(idx);
+                                        ui.close();
                                     }
                                 });
 
@@ -1367,13 +1356,11 @@ impl MarkdownApp {
     fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
         let mut open_in_new_tab: Option<PathBuf> = None;
 
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
-            return None;
-        };
+        let tab = self.tabs.get_mut(self.active_tab)?;
 
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
-        egui::Frame::none()
+        egui::Frame::NONE
             .inner_margin(egui::Margin {
                 left: 8,
                 right: 3,
@@ -1386,7 +1373,6 @@ impl MarkdownApp {
 
                 let mut scroll_area = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .enable_scrolling(true)
                     .id_salt(tab.id);
 
                 // Apply pending scroll offset from header clicks

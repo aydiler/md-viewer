@@ -32,8 +32,9 @@ jobs:
 
       - name: Remove local-only MCP dependency
         run: |
+          # Remove the path dependency but keep the feature (as empty)
           sed -i '/egui-mcp-bridge/d' Cargo.toml
-          sed -i '/mcp = /d' Cargo.toml
+          sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
 
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
