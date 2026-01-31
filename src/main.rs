@@ -1628,6 +1628,24 @@ impl MarkdownApp {
                     if response.clicked() {
                         file_to_open = Some(path.clone());
                     }
+
+                    // Context menu for file actions
+                    response.context_menu(|ui| {
+                        if ui.button("Copy Contents").clicked() {
+                            if let Ok(contents) = fs::read_to_string(path) {
+                                ui.ctx().copy_text(contents);
+                            }
+                            ui.close();
+                        }
+                        if ui.button("Copy Path").clicked() {
+                            ui.ctx().copy_text(path.display().to_string());
+                            ui.close();
+                        }
+                        if ui.button("Copy File URI").clicked() {
+                            ui.ctx().copy_text(format!("file://{}", path.display()));
+                            ui.close();
+                        }
+                    });
                 });
 
                 // Paint flash overlay on top using the row rect
