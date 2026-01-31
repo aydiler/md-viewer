@@ -1367,12 +1367,17 @@ impl MarkdownApp {
                 ..Default::default()
             })
             .show(ui, |ui| {
-                // Get scroll input
+                // Capture scroll input for manual handling during selection
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
                 let mut scroll_area = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .scroll_source(egui::scroll_area::ScrollSource {
+                        scroll_bar: true,
+                        drag: false,
+                        mouse_wheel: true,
+                    })
                     .id_salt(tab.id);
 
                 // Apply pending scroll offset from header clicks
@@ -1401,8 +1406,7 @@ impl MarkdownApp {
 
                 tab.last_content_height = scroll_output.content_size.y;
 
-                // Manual scroll handling when wheel is used (works during selection)
-                // Only apply if pointer is over the content area
+                // Manual scroll handling for mouse wheel during text selection
                 let pointer_over_content = ui.ctx().input(|i| {
                     i.pointer
                         .hover_pos()
@@ -1413,7 +1417,7 @@ impl MarkdownApp {
                     let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
                     let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
 
-                    // Don't store if we'd hit a boundary (causes selection to break)
+                    // Don't store at boundaries (can break selection)
                     let would_hit_top = new_offset < 0.5;
                     let would_hit_bottom = new_offset > max_scroll - 0.5;
                     let offset_changed = (new_offset - current_offset).abs() > 0.5;
