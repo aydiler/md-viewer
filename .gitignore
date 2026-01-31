@@ -1,1 +1,7 @@
 /target
+
+# Snap build artifacts
+/parts/
+/prime/
+/stage/
+*.snap
