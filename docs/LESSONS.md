@@ -63,6 +63,41 @@ let pos = cache.get_header_position(title); // For scroll
 **Key insight:** `ui.cursor().top()` inside `show_viewport` is viewport-relative, not content-relative. Add `viewport.min.y` to convert.
 **Files:** `crates/egui_commonmark/`, `src/main.rs`
 
+### SVG text requires svg_text feature
+**Context:** Shields.io badges rendered as colored rectangles without text
+**Problem:** `egui_extras/svg` feature only enables basic SVG rendering. Text in SVGs requires system fonts to be loaded by resvg.
+**Fix:** Enable `egui_extras/svg_text` feature which calls `fontdb.load_system_fonts()`:
+```toml
+# In egui_commonmark Cargo.toml
+svg_text = ["egui_extras/svg_text"]
+
+# In app Cargo.toml
+egui_commonmark_extended = { features = ["svg", "svg_text", ...] }
+```
+**Requires:** System fonts like Verdana, Arial (install `ttf-ms-fonts` on Arch)
+**Files:** `Cargo.toml`, `crates/egui_commonmark/egui_commonmark/Cargo.toml`
+
+### SVG badges with embedded logos don't render
+**Context:** GitHub stars badge shows broken icon, but License MIT badge works
+**Problem:** resvg doesn't fully support `<image>` elements with embedded SVG data URIs (nested SVGs)
+**Example of failing badge:**
+```xml
+<!-- GitHub stars badge contains embedded logo -->
+<image href="data:image/svg+xml;base64,..." />
+```
+**What works:** Simple text-only badges (no logos)
+**What fails:** Badges with `?logo=` parameter or embedded images
+**Workaround:** Use badges without logos, or accept the limitation
+```markdown
+<!-- Fails (has logo) -->
+![](https://img.shields.io/badge/snap-app-blue?logo=snapcraft)
+
+<!-- Works (no logo) -->
+![](https://img.shields.io/badge/License-MIT-blue.svg)
+```
+**Status:** Upstream limitation in resvg - no fix available
+**Files:** N/A (external limitation)
+
 ---
 
 ## egui
