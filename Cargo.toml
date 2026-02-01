@@ -37,6 +37,7 @@ egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge"
 egui_commonmark_extended = { version = "0.22.1", features = [
     "better_syntax_highlighting",
     "svg",
+    "svg_text",
     "load-images",
     "fetch",
 ] }

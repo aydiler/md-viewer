@@ -56,6 +56,9 @@ load-images = ["egui_extras/image", "egui_extras/file"]
 ## Support loading svg images
 svg = ["egui_extras/svg"]
 
+## Support text rendering in SVG images (requires system fonts like Verdana)
+svg_text = ["egui_extras/svg_text"]
+
 ## Images with urls will be downloaded and displayed
 fetch = ["egui_extras/http"]
 
