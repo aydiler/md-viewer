@@ -15,15 +15,17 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ### Rendering
 - **GitHub Flavored Markdown** - Full GFM support including tables, task lists, and footnotes
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
-- **Images & SVG** - Embedded image support (PNG, JPEG, GIF, SVG)
+- **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
+- **Unicode Support** - System font fallbacks (Noto, DejaVu) for emojis, CJK, and non-Latin scripts
 - **60 FPS Rendering** - Smooth scrolling with viewport-based lazy rendering
 - **Typography** - 1.5x line height for optimal readability (WCAG 2.1 compliant)
 
 ### Navigation
 - **Tab System** - Open multiple documents with tab bar (Ctrl+Click links to open in new tab)
-- **File Explorer** - Hierarchical sidebar showing markdown files in the directory
+- **File Explorer** - Hierarchical sidebar with lazy-loading directories, right-click to copy file contents
 - **Outline Sidebar** - Click-to-navigate table of contents from document headers
-- **Per-Tab History** - Back/forward navigation within each tab (Alt+Left/Right)
+- **Navigation Buttons** - Back/forward buttons in title bar for quick history navigation
+- **Per-Tab History** - Independent back/forward navigation within each tab (Alt+Left/Right)
 - **Internal Links** - Navigate between markdown files with relative links
 
 ### View
@@ -40,17 +42,17 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ## Screenshots
 
 ### Dark Mode
-*File explorer, document outline, and tabbed browsing*
+*File explorer, document outline, and Rust syntax highlighting*
 
 ![Dark Mode](screenshots/dark-mode.png)
 
-### Light Mode with Syntax Highlighting
-*Code blocks with 200+ language support via syntect*
+### Light Mode
+*Clean light theme with the same powerful features*
 
 ![Light Mode](screenshots/light-mode.png)
 
-### Dark Mode with Code
-*Consistent syntax highlighting across themes*
+### Syntax Highlighting
+*200+ languages with semantic coloring for keywords, types, and comments*
 
 ![Syntax Highlighting](screenshots/syntax-highlighting.png)
 
