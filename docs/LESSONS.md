@@ -359,3 +359,37 @@ ui.allocate_ui_at_rect(heading_rect, |ui| {
 ```
 **Key insight:** Single `allocate_ui_at_rect` for left alignment + multiple labels inside for inline flow.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`
+
+### High CPU on virtual displays (Xvfb)
+**Context:** E2E testing on Xvfb uses 500%+ CPU
+**Problem:** Virtual displays lack vsync, so egui renders at unlimited FPS
+**Root cause:**
+1. `ctx.request_repaint()` (without delay) triggers unlimited repaints
+2. Even with `request_repaint_after()`, the rendering loop runs continuously because Xvfb doesn't block on vsync
+**Fix:** Detect virtual display and add explicit sleep:
+```rust
+// In struct
+is_virtual_display: bool,
+
+// In constructor
+let is_virtual_display = std::env::var("DISPLAY")
+    .map(|d| d != ":0" && d != ":0.0" && !d.is_empty())
+    .unwrap_or(false);
+
+// In update()
+if self.is_virtual_display {
+    std::thread::sleep(Duration::from_millis(16)); // ~60 FPS cap
+}
+
+// For MCP polling, use delay:
+ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
+```
+**Result:** CPU drops from 500%+ to ~220%
+**Files:** `src/main.rs`
+
+### "Connection reset by peer" during egui_launch
+**Context:** Bridge logs errors during MCP connection polling
+**Problem:** `egui_launch` polls every 200ms to check if bridge is ready, connecting then disconnecting
+**Explanation:** This is normal behavior during startup - not an actual error
+**Note:** The error can be ignored; it's just polling to detect when the app is ready
+**Files:** `~/egui-mcp/crates/egui-mcp-bridge/src/server.rs`

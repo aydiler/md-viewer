@@ -695,6 +695,8 @@ struct MarkdownApp {
     show_explorer: bool,
     // Flash effect for updated files (path -> start time)
     flashing_paths: HashMap<PathBuf, Instant>,
+    // True if running on virtual display (e.g., Xvfb :99) - limits frame rate
+    is_virtual_display: bool,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -777,6 +779,12 @@ impl MarkdownApp {
         #[cfg(feature = "mcp")]
         log::info!("MCP bridge listening on port {}", mcp_bridge.port());
 
+        // Detect virtual display (e.g., Xvfb :99) to limit frame rate
+        // Virtual displays lack vsync, causing unlimited FPS and high CPU
+        let is_virtual_display = std::env::var("DISPLAY")
+            .map(|d| d != ":0" && d != ":0.0" && !d.is_empty())
+            .unwrap_or(false);
+
         let mut app = Self {
             tabs,
             active_tab,
@@ -795,6 +803,7 @@ impl MarkdownApp {
             file_explorer,
             show_explorer,
             flashing_paths: HashMap::new(),
+            is_virtual_display,
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -1878,7 +1887,8 @@ impl eframe::App for MarkdownApp {
             ctx.enable_accesskit();
             self.mcp_bridge.begin_frame();
             self.mcp_bridge.store_in_context(ctx); // Enable McpUiExt methods
-            ctx.request_repaint(); // Keep processing MCP commands
+            // Poll for MCP commands at reasonable rate (prevents CPU spin on virtual displays)
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         // Check for file changes and reload affected tabs
@@ -1903,6 +1913,13 @@ impl eframe::App for MarkdownApp {
         // Use watch_enabled instead of watcher.is_some() to ensure recovery can happen
         if self.watch_enabled {
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
+        // Limit frame rate on virtual displays (e.g., Xvfb) which lack vsync
+        // request_repaint_after alone doesn't limit actual frame rate, so we sleep
+        // This prevents 500%+ CPU usage during E2E testing
+        if self.is_virtual_display {
+            std::thread::sleep(Duration::from_millis(16)); // ~60 FPS cap
         }
 
         // Apply theme settings
@@ -2287,6 +2304,34 @@ impl eframe::App for MarkdownApp {
                     }
                 });
 
+                // Navigation buttons (visible arrows for back/forward)
+                ui.separator();
+                let can_back = self
+                    .tabs
+                    .get(self.active_tab)
+                    .map(|t| t.can_go_back())
+                    .unwrap_or(false);
+                let back_btn = ui.add_enabled(can_back, egui::Button::new("◀").small());
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Navigate Back", "button", &back_btn, None);
+                if back_btn.on_hover_text("Back (Alt+←)").clicked() {
+                    go_back = true;
+                }
+
+                let can_forward = self
+                    .tabs
+                    .get(self.active_tab)
+                    .map(|t| t.can_go_forward())
+                    .unwrap_or(false);
+                let forward_btn = ui.add_enabled(can_forward, egui::Button::new("▶").small());
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Navigate Forward", "button", &forward_btn, None);
+                if forward_btn.on_hover_text("Forward (Alt+→)").clicked() {
+                    go_forward = true;
+                }
+
                 // Show status on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Show zoom level if not at 100%
@@ -2323,6 +2368,18 @@ impl eframe::App for MarkdownApp {
                 });
             });
         });
+
+        // Handle navigation button clicks (must be after menu bar UI)
+        if go_back {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.navigate_back();
+            }
+        }
+        if go_forward {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.navigate_forward();
+            }
+        }
 
         // Show error message if any
         let mut clear_error = false;
