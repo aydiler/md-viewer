@@ -106,7 +106,8 @@ enum FileTreeNode {
     Directory {
         path: PathBuf,
         name: String,
-        children: Vec<FileTreeNode>,
+        /// None = not yet loaded, Some = loaded (may be empty)
+        children: Option<Vec<FileTreeNode>>,
     },
 }
 
@@ -119,14 +120,8 @@ struct FileExplorer {
 }
 
 impl FileExplorer {
-    /// Scan a directory recursively for markdown files
-    fn scan_directory(path: &PathBuf, depth: usize) -> Vec<FileTreeNode> {
-        const MAX_DEPTH: usize = 10;
-
-        if depth >= MAX_DEPTH {
-            return Vec::new();
-        }
-
+    /// Scan a directory shallowly - only one level, subdirectories marked as unloaded
+    fn scan_directory_shallow(path: &PathBuf) -> Vec<FileTreeNode> {
         let Ok(entries) = fs::read_dir(path) else {
             return Vec::new();
         };
@@ -155,13 +150,13 @@ impl FileExplorer {
             }
 
             if entry_path.is_dir() {
-                let children = Self::scan_directory(&entry_path, depth + 1);
-                // Only include directories that contain markdown files
-                if !children.is_empty() {
+                // Check if directory might contain markdown files (has any non-hidden entries)
+                // We don't recurse - just check if it's worth showing
+                if Self::dir_might_have_markdown(&entry_path) {
                     nodes.push(FileTreeNode::Directory {
                         path: entry_path,
                         name,
-                        children,
+                        children: None, // Lazy - not loaded yet
                     });
                 }
             } else if Self::is_markdown_file(&entry_path) {
@@ -175,6 +170,20 @@ impl FileExplorer {
         nodes
     }
 
+    /// Quick check if a directory might contain markdown files
+    /// Returns true if directory has any non-hidden entries (optimistic)
+    fn dir_might_have_markdown(path: &PathBuf) -> bool {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with('.') {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn is_markdown_file(path: &Path) -> bool {
         path.extension()
             .map(|ext| {
@@ -184,7 +193,7 @@ impl FileExplorer {
             .unwrap_or(false)
     }
 
-    /// Set root directory and rescan
+    /// Set root directory and rescan (shallow)
     fn set_root(&mut self, path: PathBuf) {
         // Convert empty path to current directory
         let path = if path.as_os_str().is_empty() {
@@ -193,21 +202,55 @@ impl FileExplorer {
             path
         };
         self.root = Some(path.clone());
-        self.tree = Self::scan_directory(&path, 0);
+        self.tree = Self::scan_directory_shallow(&path);
     }
 
-    /// Refresh the file tree
+    /// Refresh the file tree (clears loaded state, rescans shallowly)
     fn refresh(&mut self) {
         if let Some(root) = &self.root.clone() {
-            self.tree = Self::scan_directory(root, 0);
+            self.tree = Self::scan_directory_shallow(root);
+            // Re-load children for currently expanded directories
+            let expanded: Vec<PathBuf> = self.expanded_dirs.iter().cloned().collect();
+            for dir_path in expanded {
+                self.load_children(&dir_path);
+            }
         }
     }
 
-    /// Toggle directory expansion
+    /// Load children for a specific directory (lazy loading)
+    fn load_children(&mut self, dir_path: &PathBuf) {
+        Self::load_children_in_tree(&mut self.tree, dir_path);
+    }
+
+    /// Recursively find and load children for a directory in the tree
+    fn load_children_in_tree(nodes: &mut [FileTreeNode], target_path: &PathBuf) -> bool {
+        for node in nodes.iter_mut() {
+            if let FileTreeNode::Directory { path, children, .. } = node {
+                if path == target_path {
+                    // Found the target directory - load its children if not loaded
+                    if children.is_none() {
+                        *children = Some(Self::scan_directory_shallow(path));
+                    }
+                    return true;
+                }
+                // Recurse into loaded children
+                if let Some(ref mut child_nodes) = children {
+                    if Self::load_children_in_tree(child_nodes, target_path) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Toggle directory expansion (loads children if not yet loaded)
     fn toggle_expanded(&mut self, path: &PathBuf) {
         if self.expanded_dirs.contains(path) {
             self.expanded_dirs.remove(path);
         } else {
+            // Load children before expanding if not yet loaded
+            self.load_children(path);
             self.expanded_dirs.insert(path.clone());
         }
     }
@@ -217,9 +260,28 @@ impl FileExplorer {
         self.expanded_dirs.contains(path)
     }
 
-    /// Expand all directories in the tree
+    /// Expand all directories in the tree (loads all children recursively)
     fn expand_all(&mut self) {
+        // First, recursively load all directories
+        Self::load_all_children(&mut self.tree);
+        // Then collect all directory paths
         self.expanded_dirs = Self::collect_all_dirs(&self.tree);
+    }
+
+    /// Recursively load all unloaded directories
+    fn load_all_children(nodes: &mut [FileTreeNode]) {
+        for node in nodes.iter_mut() {
+            if let FileTreeNode::Directory { path, children, .. } = node {
+                // Load children if not yet loaded
+                if children.is_none() {
+                    *children = Some(Self::scan_directory_shallow(path));
+                }
+                // Recurse into children
+                if let Some(ref mut child_nodes) = children {
+                    Self::load_all_children(child_nodes);
+                }
+            }
+        }
     }
 
     /// Collapse all directories in the tree
@@ -227,13 +289,16 @@ impl FileExplorer {
         self.expanded_dirs.clear();
     }
 
-    /// Collect all directory paths from a tree recursively
+    /// Collect all directory paths from a tree recursively (only loaded directories)
     fn collect_all_dirs(nodes: &[FileTreeNode]) -> HashSet<PathBuf> {
         let mut dirs = HashSet::new();
         for node in nodes {
             if let FileTreeNode::Directory { path, children, .. } = node {
                 dirs.insert(path.clone());
-                dirs.extend(Self::collect_all_dirs(children));
+                // Only recurse into loaded children
+                if let Some(child_nodes) = children {
+                    dirs.extend(Self::collect_all_dirs(child_nodes));
+                }
             }
         }
         dirs
@@ -1843,12 +1908,15 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
 
-                // Render children if expanded
+                // Render children if expanded (children are loaded by toggle_expanded)
                 if is_expanded {
-                    for child in children {
-                        if let Some(path) = self.render_tree_node(ui, child, depth + 1, open_paths)
-                        {
-                            file_to_open = Some(path);
+                    if let Some(child_nodes) = children {
+                        for child in child_nodes {
+                            if let Some(path) =
+                                self.render_tree_node(ui, child, depth + 1, open_paths)
+                            {
+                                file_to_open = Some(path);
+                            }
                         }
                     }
                 }
