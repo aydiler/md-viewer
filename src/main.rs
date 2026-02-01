@@ -866,8 +866,11 @@ impl MarkdownApp {
             file_explorer.set_root(root);
         }
 
-        // Restore expanded directories
+        // Restore expanded directories and load their children
         if let Some(expanded) = persisted.expanded_dirs {
+            for dir_path in &expanded {
+                file_explorer.load_children(dir_path);
+            }
             file_explorer.expanded_dirs = expanded.into_iter().collect();
         }
 
