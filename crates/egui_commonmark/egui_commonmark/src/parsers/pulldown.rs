@@ -601,7 +601,11 @@ impl CommonMarkViewerInternal {
         } else if let Some(block) = &mut self.code_block {
             block.content.push_str(&text);
         } else if let Some(link) = &mut self.link {
-            link.text.push(rich_text);
+            // Add underline and hyperlink color for better visibility
+            let link_text = rich_text
+                .underline()
+                .color(ui.visuals().hyperlink_color);
+            link.text.push(link_text);
         } else if self.text_style.heading.is_some() {
             // Accumulate heading text for position tracking
             self.current_heading_text.push_str(&text);
