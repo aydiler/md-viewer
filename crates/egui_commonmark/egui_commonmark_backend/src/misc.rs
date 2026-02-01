@@ -229,13 +229,37 @@ impl Link {
                 egui::Align::LEFT,
             );
         }
-        if cache.link_hooks().contains_key(&destination) {
-            let ui_link = ui.link(layout_job);
-            if ui_link.clicked() || ui_link.middle_clicked() {
-                cache.link_hooks_mut().insert(destination, true);
+
+        // Apply underline and hyperlink color to all sections for better visibility
+        let link_color = ui.visuals().hyperlink_color;
+        for section in &mut layout_job.sections {
+            section.format.underline = egui::Stroke::new(1.0, link_color);
+            section.format.color = link_color;
+        }
+
+        // Use clickable label to preserve our custom underline styling
+        let response = ui.add(
+            egui::Label::new(layout_job)
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
+
+        let is_hook = cache.link_hooks().contains_key(&destination);
+
+        if response.clicked() || response.middle_clicked() {
+            if is_hook {
+                cache.link_hooks_mut().insert(destination.clone(), true);
+            } else {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(&destination));
             }
-        } else {
-            ui.hyperlink_to(layout_job, destination);
+        }
+
+        // Show pointer cursor and URL on hover
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if !is_hook {
+                response.on_hover_text(&destination);
+            }
         }
     }
 }

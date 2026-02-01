@@ -70,3 +70,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[patch.crates-io]
+egui_commonmark_extended = { path = "crates/egui_commonmark/egui_commonmark" }
+egui_commonmark_backend_extended = { path = "crates/egui_commonmark/egui_commonmark_backend" }

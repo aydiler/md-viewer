@@ -1029,8 +1029,6 @@ dependencies = [
 [[package]]
 name = "egui_commonmark_backend_extended"
 version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d0f5db93f1a38249fda61d837d636049828dcb51696ddd5f0e7f77a4eb8ac47"
 dependencies = [
  "egui",
  "egui_extras",
@@ -1041,8 +1039,6 @@ dependencies = [
 [[package]]
 name = "egui_commonmark_extended"
 version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3c4773a58711458bf3ced496907db7301c314c46a81fef8e3e0ee7bc4ca4c45"
 dependencies = [
  "egui",
  "egui_commonmark_backend_extended",
