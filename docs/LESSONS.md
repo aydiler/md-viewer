@@ -86,6 +86,42 @@ struct MarkdownApp {
 
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/typography.rs`
 
+### Font fallback for Unicode support
+**Context:** Red triangles appearing for emojis, CJK, and non-Latin scripts
+**Problem:** egui's default fonts don't include most Unicode characters
+**Fix:** Load system fonts (Noto family) as fallbacks at startup:
+```rust
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    // Load font file
+    let font_data = fs::read("/usr/share/fonts/noto/NotoSans-Regular.ttf")?;
+    fonts.font_data.insert(
+        "NotoSans".to_string(),
+        egui::FontData::from_owned(font_data).into(), // .into() for Arc
+    );
+    // Add as fallback (after default fonts)
+    fonts.families.get_mut(&egui::FontFamily::Proportional)
+        .unwrap().push("NotoSans".to_string());
+    ctx.set_fonts(fonts);
+}
+```
+**Files:** `src/main.rs`
+
+### egui 0.33 FontData requires Arc wrapper
+**Context:** Compiler error when adding fonts
+**Problem:** `fonts.font_data.insert()` expects `Arc<FontData>`, not `FontData`
+**Fix:** Add `.into()` to convert:
+```rust
+egui::FontData::from_owned(font_data).into()
+```
+**Files:** `src/main.rs`
+
+### Color emojis not supported in egui
+**Context:** Emojis render as monochrome outlines despite loading NotoColorEmoji
+**Root cause:** egui's font renderer (ab_glyph) doesn't support color font formats (COLR/CPAL, CBDT/CBLC)
+**Workaround:** None - this is an upstream limitation. Emojis will render as simple outlines.
+**Files:** `src/main.rs`
+
 ### egui 0.33 Painter API changes
 **Context:** Implementing minimap with custom drawing
 **Changes:**

@@ -18,6 +18,40 @@ use serde::{Deserialize, Serialize};
 use egui_mcp_bridge::{McpBridge, McpUiExt};
 
 const APP_KEY: &str = "md-viewer-state";
+
+/// System font paths for fallback (Arch Linux / common Linux paths)
+const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
+    // Noto Sans for extended Latin, Greek, Cyrillic
+    ("NotoSans", "/usr/share/fonts/noto/NotoSans-Regular.ttf"),
+    ("NotoSans", "/usr/share/fonts/TTF/NotoSans-Regular.ttf"),
+    ("NotoSans", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+    // CJK fonts (Chinese, Japanese, Korean)
+    ("NotoSansCJK", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+    ("NotoSansCJK", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    ("NotoSansCJK", "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"),
+    // Emoji
+    ("NotoEmoji", "/usr/share/fonts/noto/NotoColorEmoji.ttf"),
+    ("NotoEmoji", "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf"),
+    ("NotoEmoji", "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf"),
+    ("NotoEmoji", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+    // Arabic
+    ("NotoSansArabic", "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf"),
+    ("NotoSansArabic", "/usr/share/fonts/TTF/NotoSansArabic-Regular.ttf"),
+    // Hebrew
+    ("NotoSansHebrew", "/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf"),
+    ("NotoSansHebrew", "/usr/share/fonts/TTF/NotoSansHebrew-Regular.ttf"),
+    // Devanagari (Hindi, Sanskrit)
+    ("NotoSansDevanagari", "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf"),
+    ("NotoSansDevanagari", "/usr/share/fonts/TTF/NotoSansDevanagari-Regular.ttf"),
+    // Thai
+    ("NotoSansThai", "/usr/share/fonts/noto/NotoSansThai-Regular.ttf"),
+    ("NotoSansThai", "/usr/share/fonts/TTF/NotoSansThai-Regular.ttf"),
+    // Symbols (math, arrows, etc.)
+    ("NotoSansSymbols", "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf"),
+    ("NotoSansSymbols", "/usr/share/fonts/TTF/NotoSansSymbols-Regular.ttf"),
+    ("NotoSansSymbols2", "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf"),
+    ("NotoSansSymbols2", "/usr/share/fonts/TTF/NotoSansSymbols2-Regular.ttf"),
+];
 const MAX_WATCHER_RETRIES: u32 = 3;
 const FLASH_DURATION_MS: u64 = 600;
 
@@ -541,6 +575,62 @@ fn any_header_has_children(headers: &[Header]) -> bool {
     false
 }
 
+/// Setup custom fonts with system font fallbacks for Unicode support.
+/// Loads Noto fonts from system for extended character coverage.
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut loaded_fonts: HashSet<String> = HashSet::new();
+
+    // Try to load each font from its possible paths
+    for (font_name, font_path) in SYSTEM_FONT_PATHS {
+        // Skip if we already loaded this font
+        if loaded_fonts.contains(*font_name) {
+            continue;
+        }
+
+        let path = Path::new(font_path);
+        if path.exists() {
+            match fs::read(path) {
+                Ok(font_data) => {
+                    log::info!("Loaded font fallback: {} from {}", font_name, font_path);
+
+                    fonts.font_data.insert(
+                        font_name.to_string(),
+                        egui::FontData::from_owned(font_data).into(),
+                    );
+
+                    // Add to proportional family as fallback (after default fonts)
+                    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                        family.push(font_name.to_string());
+                    }
+
+                    // Also add text fonts to monospace for code blocks with Unicode
+                    // (but not emoji - that would look weird in code)
+                    if !font_name.contains("Emoji") {
+                        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                            family.push(font_name.to_string());
+                        }
+                    }
+
+                    loaded_fonts.insert(font_name.to_string());
+                }
+                Err(e) => {
+                    log::debug!("Failed to read font {}: {}", font_path, e);
+                }
+            }
+        }
+    }
+
+    if loaded_fonts.is_empty() {
+        log::warn!("No system fonts loaded. Unicode characters may show as red triangles.");
+        log::warn!("Install noto-fonts, noto-fonts-cjk, and noto-fonts-emoji for full Unicode support.");
+    } else {
+        log::info!("Loaded {} font fallbacks for Unicode support", loaded_fonts.len());
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -612,6 +702,9 @@ struct MarkdownApp {
 
 impl MarkdownApp {
     fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>, watch: bool) -> Self {
+        // Setup fonts with system font fallbacks for Unicode support
+        setup_fonts(&cc.egui_ctx);
+
         // Load persisted state
         let persisted: PersistedState = cc
             .storage
