@@ -356,6 +356,8 @@ struct Tab {
 
 impl Tab {
     fn new(path: PathBuf) -> Self {
+        // Canonicalize path for consistent comparison with watcher events
+        let path = path.canonicalize().unwrap_or(path);
         let content = fs::read_to_string(&path).unwrap_or_default();
         let parsed = parse_headers(&content);
         let local_links = parse_local_links(&content);
@@ -939,6 +941,8 @@ impl MarkdownApp {
     }
 
     fn open_in_new_tab(&mut self, path: PathBuf) {
+        // Canonicalize for consistent comparison with existing tabs
+        let path = path.canonicalize().unwrap_or(path);
         // Check if already open
         if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
             self.active_tab = idx;
