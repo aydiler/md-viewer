@@ -24,37 +24,97 @@ const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
     // Noto Sans for extended Latin, Greek, Cyrillic
     ("NotoSans", "/usr/share/fonts/noto/NotoSans-Regular.ttf"),
     ("NotoSans", "/usr/share/fonts/TTF/NotoSans-Regular.ttf"),
-    ("NotoSans", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+    (
+        "NotoSans",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ),
     // CJK fonts (Chinese, Japanese, Korean)
-    ("NotoSansCJK", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
-    ("NotoSansCJK", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-    ("NotoSansCJK", "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"),
+    (
+        "NotoSansCJK",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    ),
+    (
+        "NotoSansCJK",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ),
+    (
+        "NotoSansCJK",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    ),
     // Emoji
     ("NotoEmoji", "/usr/share/fonts/noto/NotoColorEmoji.ttf"),
-    ("NotoEmoji", "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf"),
-    ("NotoEmoji", "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf"),
-    ("NotoEmoji", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+    (
+        "NotoEmoji",
+        "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+    ),
+    (
+        "NotoEmoji",
+        "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+    ),
+    (
+        "NotoEmoji",
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    ),
     // Arabic
-    ("NotoSansArabic", "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf"),
-    ("NotoSansArabic", "/usr/share/fonts/TTF/NotoSansArabic-Regular.ttf"),
+    (
+        "NotoSansArabic",
+        "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
+    ),
+    (
+        "NotoSansArabic",
+        "/usr/share/fonts/TTF/NotoSansArabic-Regular.ttf",
+    ),
     // Hebrew
-    ("NotoSansHebrew", "/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf"),
-    ("NotoSansHebrew", "/usr/share/fonts/TTF/NotoSansHebrew-Regular.ttf"),
+    (
+        "NotoSansHebrew",
+        "/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf",
+    ),
+    (
+        "NotoSansHebrew",
+        "/usr/share/fonts/TTF/NotoSansHebrew-Regular.ttf",
+    ),
     // Devanagari (Hindi, Sanskrit)
-    ("NotoSansDevanagari", "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf"),
-    ("NotoSansDevanagari", "/usr/share/fonts/TTF/NotoSansDevanagari-Regular.ttf"),
+    (
+        "NotoSansDevanagari",
+        "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf",
+    ),
+    (
+        "NotoSansDevanagari",
+        "/usr/share/fonts/TTF/NotoSansDevanagari-Regular.ttf",
+    ),
     // Thai
-    ("NotoSansThai", "/usr/share/fonts/noto/NotoSansThai-Regular.ttf"),
-    ("NotoSansThai", "/usr/share/fonts/TTF/NotoSansThai-Regular.ttf"),
+    (
+        "NotoSansThai",
+        "/usr/share/fonts/noto/NotoSansThai-Regular.ttf",
+    ),
+    (
+        "NotoSansThai",
+        "/usr/share/fonts/TTF/NotoSansThai-Regular.ttf",
+    ),
     // Symbols (math, arrows, etc.)
-    ("NotoSansSymbols", "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf"),
-    ("NotoSansSymbols", "/usr/share/fonts/TTF/NotoSansSymbols-Regular.ttf"),
-    ("NotoSansSymbols2", "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf"),
-    ("NotoSansSymbols2", "/usr/share/fonts/TTF/NotoSansSymbols2-Regular.ttf"),
+    (
+        "NotoSansSymbols",
+        "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+    ),
+    (
+        "NotoSansSymbols",
+        "/usr/share/fonts/TTF/NotoSansSymbols-Regular.ttf",
+    ),
+    (
+        "NotoSansSymbols2",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    ),
+    (
+        "NotoSansSymbols2",
+        "/usr/share/fonts/TTF/NotoSansSymbols2-Regular.ttf",
+    ),
     // DejaVu Sans - covers warning sign (U+26A0) and other misc symbols
     ("DejaVuSans", "/usr/share/fonts/TTF/DejaVuSans.ttf"),
     ("DejaVuSans", "/usr/share/fonts/dejavu/DejaVuSans.ttf"),
-    ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    (
+        "DejaVuSans",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ),
 ];
 const MAX_WATCHER_RETRIES: u32 = 3;
 const FLASH_DURATION_MS: u64 = 600;
@@ -720,9 +780,14 @@ fn setup_fonts(ctx: &egui::Context) {
 
     if loaded_fonts.is_empty() {
         log::warn!("No system fonts loaded. Unicode characters may show as red triangles.");
-        log::warn!("Install noto-fonts, noto-fonts-cjk, and noto-fonts-emoji for full Unicode support.");
+        log::warn!(
+            "Install noto-fonts, noto-fonts-cjk, and noto-fonts-emoji for full Unicode support."
+        );
     } else {
-        log::info!("Loaded {} font fallbacks for Unicode support", loaded_fonts.len());
+        log::info!(
+            "Loaded {} font fallbacks for Unicode support",
+            loaded_fonts.len()
+        );
     }
 
     ctx.set_fonts(fonts);
@@ -1118,8 +1183,7 @@ impl MarkdownApp {
         let Some(rx) = &self.watcher_rx else {
             // Attempt recovery if watching is enabled and there's something to watch
             // Check actual tabs and explorer root, not watched_paths (which may be empty after failure)
-            let has_watchable =
-                !self.tabs.is_empty() || self.file_explorer.root.is_some();
+            let has_watchable = !self.tabs.is_empty() || self.file_explorer.root.is_some();
             if self.watch_enabled && has_watchable && self.watcher_retry_count < MAX_WATCHER_RETRIES
             {
                 log::info!(
@@ -2004,7 +2068,7 @@ impl eframe::App for MarkdownApp {
             ctx.enable_accesskit();
             self.mcp_bridge.begin_frame();
             self.mcp_bridge.store_in_context(ctx); // Enable McpUiExt methods
-            // Poll for MCP commands at reasonable rate (prevents CPU spin on virtual displays)
+                                                   // Poll for MCP commands at reasonable rate (prevents CPU spin on virtual displays)
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
