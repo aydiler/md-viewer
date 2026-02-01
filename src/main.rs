@@ -913,8 +913,9 @@ impl MarkdownApp {
     fn check_file_changes(&mut self) -> Vec<PathBuf> {
         let Some(rx) = &self.watcher_rx else {
             // Attempt recovery if watching is enabled and there's something to watch
+            // Check actual tabs and explorer root, not watched_paths (which may be empty after failure)
             let has_watchable =
-                !self.watched_paths.is_empty() || self.watched_explorer_root.is_some();
+                !self.tabs.is_empty() || self.file_explorer.root.is_some();
             if self.watch_enabled && has_watchable && self.watcher_retry_count < MAX_WATCHER_RETRIES
             {
                 log::info!(
@@ -1806,7 +1807,8 @@ impl eframe::App for MarkdownApp {
         }
 
         // Request periodic repaints when watching is enabled
-        if self.watcher.is_some() {
+        // Use watch_enabled instead of watcher.is_some() to ensure recovery can happen
+        if self.watch_enabled {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
