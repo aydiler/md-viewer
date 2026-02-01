@@ -235,6 +235,8 @@ impl Link {
         for section in &mut layout_job.sections {
             section.format.underline = egui::Stroke::new(1.0, link_color);
             section.format.color = link_color;
+            // Remove extra line height to bring underline closer to text
+            section.format.line_height = None;
         }
 
         // Use clickable label to preserve our custom underline styling
