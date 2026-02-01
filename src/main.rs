@@ -264,6 +264,32 @@ impl FileExplorer {
         self.expanded_dirs.contains(path)
     }
 
+    /// Get children for a directory by path (looks up in original tree, not clone)
+    fn get_children(&self, target_path: &PathBuf) -> Option<&Vec<FileTreeNode>> {
+        Self::find_children_in_tree(&self.tree, target_path)
+    }
+
+    /// Recursively find children for a directory in the tree
+    fn find_children_in_tree<'a>(
+        nodes: &'a [FileTreeNode],
+        target_path: &PathBuf,
+    ) -> Option<&'a Vec<FileTreeNode>> {
+        for node in nodes {
+            if let FileTreeNode::Directory { path, children, .. } = node {
+                if path == target_path {
+                    return children.as_ref();
+                }
+                // Recurse into loaded children
+                if let Some(child_nodes) = children {
+                    if let Some(found) = Self::find_children_in_tree(child_nodes, target_path) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Expand all directories in the tree (loads all children recursively)
     fn expand_all(&mut self) {
         // First, recursively load all directories
@@ -1836,7 +1862,7 @@ impl MarkdownApp {
             FileTreeNode::Directory {
                 path,
                 name,
-                children,
+                children: _,
             } => {
                 let is_expanded = self.file_explorer.is_expanded(path);
 
@@ -1912,14 +1938,16 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
 
-                // Render children if expanded (children are loaded by toggle_expanded)
+                // Render children if expanded
+                // Clone children from original tree (not the stale clone) to allow mutable self access
                 if is_expanded {
-                    if let Some(child_nodes) = children {
-                        for child in child_nodes {
-                            if let Some(path) =
+                    let child_nodes = self.file_explorer.get_children(path).cloned();
+                    if let Some(child_nodes) = child_nodes {
+                        for child in &child_nodes {
+                            if let Some(opened_path) =
                                 self.render_tree_node(ui, child, depth + 1, open_paths)
                             {
-                                file_to_open = Some(path);
+                                file_to_open = Some(opened_path);
                             }
                         }
                     }
