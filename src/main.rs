@@ -1868,13 +1868,17 @@ impl MarkdownApp {
                 name,
                 children: _,
             } => {
-                let is_expanded = self.file_explorer.is_expanded(path);
-
                 // Calculate flash intensity for this directory
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
 
-                // Render directory row and get its rect
+                // Track if we should toggle this frame (detected in closure, applied after)
+                let mut should_toggle = false;
+
+                // Get current expansion state
+                let is_expanded = self.file_explorer.is_expanded(path);
+
+                // Render directory row
                 let row_response = ui.horizontal(|ui| {
                     ui.add_space(indent as f32);
 
@@ -1887,7 +1891,7 @@ impl MarkdownApp {
                     let expand_btn = ui.small_button(indicator);
 
                     if expand_btn.clicked() {
-                        self.file_explorer.toggle_expanded(path);
+                        should_toggle = true;
                     }
 
                     // Folder icon
@@ -1925,9 +1929,14 @@ impl MarkdownApp {
 
                     // Click directory name to toggle expansion
                     if response.clicked() {
-                        self.file_explorer.toggle_expanded(path);
+                        should_toggle = true;
                     }
                 });
+
+                // Toggle AFTER rendering row but BEFORE rendering children
+                if should_toggle {
+                    self.file_explorer.toggle_expanded(path);
+                }
 
                 // Paint flash overlay on top using the row rect
                 if flash_intensity > 0.0 {
