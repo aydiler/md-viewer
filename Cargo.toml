@@ -38,6 +38,7 @@ egui_commonmark_extended = { version = "0.22.1", features = [
     "better_syntax_highlighting",
     "svg",
     "load-images",
+    "fetch",
 ] }
 
 # Image format support

@@ -85,7 +85,7 @@ cargo run -- file.md -w    # Run with file watching
 git -C ~/markdown-viewer/.bare worktree list
 
 git -C ~/markdown-viewer/.bare worktree add \
-    ~/markdown-viewer/worktrees/<name> -b feature/<name>
+    ~/markdown-viewer/worktrees/<name> -b feature/<name> main
 
 git -C ~/markdown-viewer/.bare worktree remove \
     ~/markdown-viewer/worktrees/<name>

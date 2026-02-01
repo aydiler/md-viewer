@@ -51,6 +51,10 @@ const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
     ("NotoSansSymbols", "/usr/share/fonts/TTF/NotoSansSymbols-Regular.ttf"),
     ("NotoSansSymbols2", "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf"),
     ("NotoSansSymbols2", "/usr/share/fonts/TTF/NotoSansSymbols2-Regular.ttf"),
+    // DejaVu Sans - covers warning sign (U+26A0) and other misc symbols
+    ("DejaVuSans", "/usr/share/fonts/TTF/DejaVuSans.ttf"),
+    ("DejaVuSans", "/usr/share/fonts/dejavu/DejaVuSans.ttf"),
+    ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
 ];
 const MAX_WATCHER_RETRIES: u32 = 3;
 const FLASH_DURATION_MS: u64 = 600;

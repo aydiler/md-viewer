@@ -16,12 +16,12 @@ This repo uses a bare repository setup at `~/markdown-viewer/.bare`. All worktre
 
 ## Creating a Feature Worktree
 
-When asked to implement a feature that requires a new branch, **automatically create a worktree**:
+When asked to implement a feature that requires a new branch, **automatically create a worktree from main**:
 
 ```bash
-# Create worktree
+# Create worktree from current main (ALWAYS specify main as start point)
 git -C ~/markdown-viewer/.bare worktree add \
-    ~/markdown-viewer/worktrees/<name> -b feature/<name>
+    ~/markdown-viewer/worktrees/<name> -b feature/<name> main
 
 # Change to the new worktree
 cd ~/markdown-viewer/worktrees/<name>
@@ -31,12 +31,15 @@ LAST=$(ls docs/devlog/[0-9]*.md 2>/dev/null | sort | tail -1 | grep -oP '\d{3}' 
 NEXT=$(printf "%03d" $((10#$LAST + 1)))
 cp docs/devlog/TEMPLATE.md docs/devlog/${NEXT}-<name>.md
 
-# Verify fresh base
+# Verify main is up to date with remote before branching
 git fetch origin 2>/dev/null
-git log --oneline HEAD..origin/main
+git log --oneline main..origin/main
 ```
 
-If the last command shows commits, warn about stale branch and suggest rebase.
+If the last command shows commits, main is behind remote. Update main first:
+```bash
+git -C ~/markdown-viewer/.bare fetch origin main:main
+```
 
 Devlog MUST exist before any commits. Infrastructure and "phase work" still require devlogs.
 
