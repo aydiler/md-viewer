@@ -1943,8 +1943,9 @@ impl MarkdownApp {
                 }
 
                 // Render children if expanded
+                // Re-check expansion state (may have changed from click above)
                 // Clone children from original tree (not the stale clone) to allow mutable self access
-                if is_expanded {
+                if self.file_explorer.is_expanded(path) {
                     let child_nodes = self.file_explorer.get_children(path).cloned();
                     if let Some(child_nodes) = child_nodes {
                         for child in &child_nodes {
