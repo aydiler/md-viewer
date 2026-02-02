@@ -803,9 +803,9 @@ struct Args {
     /// Markdown file to open
     file: Option<PathBuf>,
 
-    /// Enable live reload (watch for file changes)
-    #[arg(short, long)]
-    watch: bool,
+    /// Disable live reload (watching is enabled by default)
+    #[arg(long)]
+    no_watch: bool,
 }
 
 fn main() -> eframe::Result<()> {
@@ -829,7 +829,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "md-viewer",
         options,
-        Box::new(move |cc| Ok(Box::new(MarkdownApp::new(cc, args.file, args.watch)))),
+        Box::new(move |cc| Ok(Box::new(MarkdownApp::new(cc, args.file, !args.no_watch)))),
     )
 }
 

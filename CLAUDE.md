@@ -79,7 +79,7 @@ This is a **bare repository** setup. The git database lives in `.bare/` and all 
 ```bash
 # Build
 cargo build
-cargo run -- file.md -w    # Run with file watching
+cargo run -- file.md       # File watching enabled by default
 
 # Worktrees
 git -C ~/markdown-viewer/.bare worktree list
