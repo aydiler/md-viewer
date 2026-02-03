@@ -258,16 +258,14 @@ impl FileExplorer {
             let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
 
             if entry_path.is_dir() {
-                // Check if directory might contain markdown files (has any non-hidden entries)
-                // We don't recurse - just check if it's worth showing
-                if Self::dir_might_have_markdown(&entry_path) {
-                    nodes.push(FileTreeNode::Directory {
-                        path: entry_path,
-                        name,
-                        modified,
-                        children: None, // Lazy - not loaded yet
-                    });
-                }
+                // Show all directories - let users expand what they want
+                // (Avoids O(n×m) scanning during initial directory scan)
+                nodes.push(FileTreeNode::Directory {
+                    path: entry_path,
+                    name,
+                    modified,
+                    children: None, // Lazy - not loaded yet
+                });
             } else if Self::is_markdown_file(&entry_path) {
                 nodes.push(FileTreeNode::File {
                     path: entry_path,
@@ -315,20 +313,6 @@ impl FileExplorer {
                 }
             }
         });
-    }
-
-    /// Quick check if a directory might contain markdown files
-    /// Returns true if directory has any non-hidden entries (optimistic)
-    fn dir_might_have_markdown(path: &PathBuf) -> bool {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !name.starts_with('.') {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     fn is_markdown_file(path: &Path) -> bool {
@@ -459,16 +443,22 @@ impl FileExplorer {
         None
     }
 
-    /// Expand all directories in the tree (loads all children recursively)
+    /// Maximum depth for expand_all to prevent excessive recursion
+    const MAX_EXPAND_DEPTH: usize = 10;
+
+    /// Expand all directories in the tree (loads all children recursively up to MAX_EXPAND_DEPTH)
     fn expand_all(&mut self) {
-        // First, recursively load all directories
-        Self::load_all_children(&mut self.tree, self.sort_order);
+        // First, recursively load all directories (with depth limit)
+        Self::load_all_children(&mut self.tree, self.sort_order, 0);
         // Then collect all directory paths
         self.expanded_dirs = Self::collect_all_dirs(&self.tree);
     }
 
-    /// Recursively load all unloaded directories
-    fn load_all_children(nodes: &mut [FileTreeNode], sort_order: SortOrder) {
+    /// Recursively load all unloaded directories (up to MAX_EXPAND_DEPTH)
+    fn load_all_children(nodes: &mut [FileTreeNode], sort_order: SortOrder, depth: usize) {
+        if depth >= Self::MAX_EXPAND_DEPTH {
+            return;
+        }
         for node in nodes.iter_mut() {
             if let FileTreeNode::Directory { path, children, .. } = node {
                 // Load children if not yet loaded
@@ -477,7 +467,7 @@ impl FileExplorer {
                 }
                 // Recurse into children
                 if let Some(ref mut child_nodes) = children {
-                    Self::load_all_children(child_nodes, sort_order);
+                    Self::load_all_children(child_nodes, sort_order, depth + 1);
                 }
             }
         }
@@ -1045,11 +1035,8 @@ impl MarkdownApp {
             file_explorer.set_root(root);
         }
 
-        // Restore expanded directories and load their children
+        // Restore expanded directories (children will lazy-load on first render)
         if let Some(expanded) = persisted.expanded_dirs {
-            for dir_path in &expanded {
-                file_explorer.load_children(dir_path);
-            }
             file_explorer.expanded_dirs = expanded.into_iter().collect();
         }
 
@@ -2171,6 +2158,10 @@ impl MarkdownApp {
                 // Re-check expansion state (may have changed from click above)
                 // Clone children from original tree (not the stale clone) to allow mutable self access
                 if self.file_explorer.is_expanded(path) {
+                    // Lazy-load if marked expanded but not yet loaded (e.g., from session restore)
+                    if self.file_explorer.get_children(path).is_none() {
+                        self.file_explorer.load_children(path);
+                    }
                     let child_nodes = self.file_explorer.get_children(path).cloned();
                     if let Some(child_nodes) = child_nodes {
                         for child in &child_nodes {
