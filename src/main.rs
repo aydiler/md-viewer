@@ -160,6 +160,15 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
+/// Action from file explorer interaction
+#[derive(Default)]
+struct ExplorerAction {
+    /// File to open in a new tab (left-click)
+    file_to_open: Option<PathBuf>,
+    /// File to close (middle-click on open file)
+    file_to_close: Option<PathBuf>,
+}
+
 /// A node in the file explorer tree
 #[derive(Clone)]
 enum FileTreeNode {
@@ -1721,12 +1730,12 @@ impl MarkdownApp {
     }
 
     /// Render the file explorer sidebar
-    /// Returns Some(path) if a file was clicked to open
-    fn render_file_explorer(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
-        let mut file_to_open: Option<PathBuf> = None;
+    /// Returns actions for files to open or close
+    fn render_file_explorer(&mut self, ctx: &egui::Context) -> ExplorerAction {
+        let mut action = ExplorerAction::default();
 
         if !self.show_explorer {
-            return None;
+            return action;
         }
 
         egui::SidePanel::left("file_explorer")
@@ -1805,14 +1814,18 @@ impl MarkdownApp {
                         // Clone tree to avoid borrow issues
                         let tree = self.file_explorer.tree.clone();
                         for node in &tree {
-                            if let Some(path) = self.render_tree_node(ui, node, 0, &open_paths) {
-                                file_to_open = Some(path);
+                            let node_action = self.render_tree_node(ui, node, 0, &open_paths);
+                            if node_action.file_to_open.is_some() {
+                                action.file_to_open = node_action.file_to_open;
+                            }
+                            if node_action.file_to_close.is_some() {
+                                action.file_to_close = node_action.file_to_close;
                             }
                         }
                     });
             });
 
-        file_to_open
+        action
     }
 
     /// Calculate flash intensity for a path (0.0 = no flash, 1.0 = full flash)
@@ -1845,8 +1858,8 @@ impl MarkdownApp {
         node: &FileTreeNode,
         depth: usize,
         open_paths: &HashSet<PathBuf>,
-    ) -> Option<PathBuf> {
-        let mut file_to_open: Option<PathBuf> = None;
+    ) -> ExplorerAction {
+        let mut action = ExplorerAction::default();
         let indent = depth * 16;
 
         match node {
@@ -1895,7 +1908,11 @@ impl MarkdownApp {
                         response.clone().on_hover_text(name);
                     }
                     if response.clicked() {
-                        file_to_open = Some(path.clone());
+                        action.file_to_open = Some(path.clone());
+                    }
+                    // Middle-click to close tab (only if file is open)
+                    if response.middle_clicked() && is_open {
+                        action.file_to_close = Some(path.clone());
                     }
 
                     // Context menu for file actions
@@ -2025,10 +2042,13 @@ impl MarkdownApp {
                     let child_nodes = self.file_explorer.get_children(path).cloned();
                     if let Some(child_nodes) = child_nodes {
                         for child in &child_nodes {
-                            if let Some(opened_path) =
-                                self.render_tree_node(ui, child, depth + 1, open_paths)
-                            {
-                                file_to_open = Some(opened_path);
+                            let child_action =
+                                self.render_tree_node(ui, child, depth + 1, open_paths);
+                            if child_action.file_to_open.is_some() {
+                                action.file_to_open = child_action.file_to_open;
+                            }
+                            if child_action.file_to_close.is_some() {
+                                action.file_to_close = child_action.file_to_close;
                             }
                         }
                     }
@@ -2036,7 +2056,7 @@ impl MarkdownApp {
             }
         }
 
-        file_to_open
+        action
     }
 }
 
@@ -2595,11 +2615,18 @@ impl eframe::App for MarkdownApp {
         }
 
         // File explorer (left sidebar)
-        let explorer_file = self.render_file_explorer(ctx);
+        let explorer_action = self.render_file_explorer(ctx);
 
-        // Open file from explorer
-        if let Some(path) = explorer_file {
+        // Open file from explorer (left-click)
+        if let Some(path) = explorer_action.file_to_open {
             self.open_in_new_tab(path);
+        }
+
+        // Close tab from explorer (middle-click on open file)
+        if let Some(path) = explorer_action.file_to_close {
+            if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
+                self.close_tab(idx);
+            }
         }
 
         // Outline sidebar (right) - at top level for proper layout
