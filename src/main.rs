@@ -142,6 +142,7 @@ struct PersistedState {
     show_explorer: Option<bool>,
     explorer_root: Option<PathBuf>,
     expanded_dirs: Option<Vec<PathBuf>>,
+    explorer_sort_order: Option<SortOrder>,
 }
 
 /// Represents a markdown header for the outline
@@ -160,19 +161,62 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
+/// Sort order for file explorer
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+enum SortOrder {
+    #[default]
+    NameAsc,
+    NameDesc,
+    DateAsc,
+    DateDesc,
+}
+
+impl SortOrder {
+    fn label(&self) -> &'static str {
+        match self {
+            SortOrder::NameAsc => "Name A-Z",
+            SortOrder::NameDesc => "Name Z-A",
+            SortOrder::DateAsc => "Oldest First",
+            SortOrder::DateDesc => "Newest First",
+        }
+    }
+}
+
 /// A node in the file explorer tree
 #[derive(Clone)]
 enum FileTreeNode {
     File {
         path: PathBuf,
         name: String,
+        modified: Option<std::time::SystemTime>,
     },
     Directory {
         path: PathBuf,
         name: String,
+        modified: Option<std::time::SystemTime>,
         /// None = not yet loaded, Some = loaded (may be empty)
         children: Option<Vec<FileTreeNode>>,
     },
+}
+
+impl FileTreeNode {
+    fn name(&self) -> &str {
+        match self {
+            FileTreeNode::File { name, .. } => name,
+            FileTreeNode::Directory { name, .. } => name,
+        }
+    }
+
+    fn modified(&self) -> Option<std::time::SystemTime> {
+        match self {
+            FileTreeNode::File { modified, .. } => *modified,
+            FileTreeNode::Directory { modified, .. } => *modified,
+        }
+    }
+
+    fn is_directory(&self) -> bool {
+        matches!(self, FileTreeNode::Directory { .. })
+    }
 }
 
 /// File explorer state
@@ -181,30 +225,19 @@ struct FileExplorer {
     root: Option<PathBuf>,
     tree: Vec<FileTreeNode>,
     expanded_dirs: HashSet<PathBuf>,
+    sort_order: SortOrder,
 }
 
 impl FileExplorer {
     /// Scan a directory shallowly - only one level, subdirectories marked as unloaded
-    fn scan_directory_shallow(path: &PathBuf) -> Vec<FileTreeNode> {
+    fn scan_directory_shallow(path: &PathBuf, sort_order: SortOrder) -> Vec<FileTreeNode> {
         let Ok(entries) = fs::read_dir(path) else {
             return Vec::new();
         };
 
         let mut nodes: Vec<FileTreeNode> = Vec::new();
 
-        // Collect and sort entries
-        let mut entry_list: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        entry_list.sort_by(|a, b| {
-            let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            match (a_is_dir, b_is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.file_name().cmp(&b.file_name()),
-            }
-        });
-
-        for entry in entry_list {
+        for entry in entries.flatten() {
             let entry_path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
@@ -213,6 +246,8 @@ impl FileExplorer {
                 continue;
             }
 
+            let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+
             if entry_path.is_dir() {
                 // Check if directory might contain markdown files (has any non-hidden entries)
                 // We don't recurse - just check if it's worth showing
@@ -220,6 +255,7 @@ impl FileExplorer {
                     nodes.push(FileTreeNode::Directory {
                         path: entry_path,
                         name,
+                        modified,
                         children: None, // Lazy - not loaded yet
                     });
                 }
@@ -227,11 +263,49 @@ impl FileExplorer {
                 nodes.push(FileTreeNode::File {
                     path: entry_path,
                     name,
+                    modified,
                 });
             }
         }
 
+        Self::sort_nodes(&mut nodes, sort_order);
         nodes
+    }
+
+    /// Sort nodes according to the given sort order (directories always on top)
+    fn sort_nodes(nodes: &mut [FileTreeNode], sort_order: SortOrder) {
+        nodes.sort_by(|a, b| {
+            // Directories always come first
+            match (a.is_directory(), b.is_directory()) {
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+
+            // Within the same type, sort by the selected criteria
+            match sort_order {
+                SortOrder::NameAsc => a.name().cmp(b.name()),
+                SortOrder::NameDesc => b.name().cmp(a.name()),
+                SortOrder::DateAsc => {
+                    // Oldest first: None (unknown) sorts last
+                    match (a.modified(), b.modified()) {
+                        (Some(a_time), Some(b_time)) => a_time.cmp(&b_time),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.name().cmp(b.name()),
+                    }
+                }
+                SortOrder::DateDesc => {
+                    // Newest first: None (unknown) sorts last
+                    match (a.modified(), b.modified()) {
+                        (Some(a_time), Some(b_time)) => b_time.cmp(&a_time),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.name().cmp(b.name()),
+                    }
+                }
+            }
+        });
     }
 
     /// Quick check if a directory might contain markdown files
@@ -266,13 +340,13 @@ impl FileExplorer {
             path
         };
         self.root = Some(path.clone());
-        self.tree = Self::scan_directory_shallow(&path);
+        self.tree = Self::scan_directory_shallow(&path, self.sort_order);
     }
 
     /// Refresh the file tree (clears loaded state, rescans shallowly)
     fn refresh(&mut self) {
         if let Some(root) = &self.root.clone() {
-            self.tree = Self::scan_directory_shallow(root);
+            self.tree = Self::scan_directory_shallow(root, self.sort_order);
             // Re-load children for currently expanded directories
             let expanded: Vec<PathBuf> = self.expanded_dirs.iter().cloned().collect();
             for dir_path in expanded {
@@ -283,23 +357,27 @@ impl FileExplorer {
 
     /// Load children for a specific directory (lazy loading)
     fn load_children(&mut self, dir_path: &PathBuf) {
-        Self::load_children_in_tree(&mut self.tree, dir_path);
+        Self::load_children_in_tree(&mut self.tree, dir_path, self.sort_order);
     }
 
     /// Recursively find and load children for a directory in the tree
-    fn load_children_in_tree(nodes: &mut [FileTreeNode], target_path: &PathBuf) -> bool {
+    fn load_children_in_tree(
+        nodes: &mut [FileTreeNode],
+        target_path: &PathBuf,
+        sort_order: SortOrder,
+    ) -> bool {
         for node in nodes.iter_mut() {
             if let FileTreeNode::Directory { path, children, .. } = node {
                 if path == target_path {
                     // Found the target directory - load its children if not loaded
                     if children.is_none() {
-                        *children = Some(Self::scan_directory_shallow(path));
+                        *children = Some(Self::scan_directory_shallow(path, sort_order));
                     }
                     return true;
                 }
                 // Recurse into loaded children
                 if let Some(ref mut child_nodes) = children {
-                    if Self::load_children_in_tree(child_nodes, target_path) {
+                    if Self::load_children_in_tree(child_nodes, target_path, sort_order) {
                         return true;
                     }
                 }
@@ -322,6 +400,28 @@ impl FileExplorer {
     /// Check if a directory is expanded
     fn is_expanded(&self, path: &PathBuf) -> bool {
         self.expanded_dirs.contains(path)
+    }
+
+    /// Set sort order and re-sort the tree in place
+    fn set_sort_order(&mut self, order: SortOrder) {
+        if self.sort_order != order {
+            self.sort_order = order;
+            Self::resort_tree_recursive(&mut self.tree, order);
+        }
+    }
+
+    /// Recursively re-sort all nodes in the tree
+    fn resort_tree_recursive(nodes: &mut [FileTreeNode], sort_order: SortOrder) {
+        Self::sort_nodes(nodes, sort_order);
+        for node in nodes.iter_mut() {
+            if let FileTreeNode::Directory {
+                children: Some(ref mut child_nodes),
+                ..
+            } = node
+            {
+                Self::resort_tree_recursive(child_nodes, sort_order);
+            }
+        }
     }
 
     /// Get children for a directory by path (looks up in original tree, not clone)
@@ -353,22 +453,22 @@ impl FileExplorer {
     /// Expand all directories in the tree (loads all children recursively)
     fn expand_all(&mut self) {
         // First, recursively load all directories
-        Self::load_all_children(&mut self.tree);
+        Self::load_all_children(&mut self.tree, self.sort_order);
         // Then collect all directory paths
         self.expanded_dirs = Self::collect_all_dirs(&self.tree);
     }
 
     /// Recursively load all unloaded directories
-    fn load_all_children(nodes: &mut [FileTreeNode]) {
+    fn load_all_children(nodes: &mut [FileTreeNode], sort_order: SortOrder) {
         for node in nodes.iter_mut() {
             if let FileTreeNode::Directory { path, children, .. } = node {
                 // Load children if not yet loaded
                 if children.is_none() {
-                    *children = Some(Self::scan_directory_shallow(path));
+                    *children = Some(Self::scan_directory_shallow(path, sort_order));
                 }
                 // Recurse into children
                 if let Some(ref mut child_nodes) = children {
-                    Self::load_all_children(child_nodes);
+                    Self::load_all_children(child_nodes, sort_order);
                 }
             }
         }
@@ -911,6 +1011,11 @@ impl MarkdownApp {
 
         // Initialize file explorer
         let mut file_explorer = FileExplorer::default();
+
+        // Restore sort order before scanning (so initial scan uses correct order)
+        if let Some(sort_order) = persisted.explorer_sort_order {
+            file_explorer.sort_order = sort_order;
+        }
 
         // Determine explorer root:
         // 1. From CLI file path
@@ -1787,6 +1892,37 @@ impl MarkdownApp {
                     }
                 });
 
+                // Sort order dropdown
+                ui.horizontal(|ui| {
+                    ui.label("Sort:");
+                    #[allow(unused_variables)]
+                    let current_label = self.file_explorer.sort_order.label();
+                    let combo_response = egui::ComboBox::from_id_salt("explorer_sort")
+                        .selected_text(self.file_explorer.sort_order.label())
+                        .show_ui(ui, |ui| {
+                            for order in [
+                                SortOrder::NameAsc,
+                                SortOrder::NameDesc,
+                                SortOrder::DateAsc,
+                                SortOrder::DateDesc,
+                            ] {
+                                let is_selected = self.file_explorer.sort_order == order;
+                                if ui.selectable_label(is_selected, order.label()).clicked() {
+                                    self.file_explorer.set_sort_order(order);
+                                }
+                            }
+                        });
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Explorer: Sort Order",
+                        "combobox",
+                        &combo_response.response,
+                        Some(current_label),
+                    );
+                    #[cfg(not(feature = "mcp"))]
+                    let _ = combo_response;
+                });
+
                 ui.separator();
 
                 // File tree inside ScrollArea
@@ -1850,7 +1986,7 @@ impl MarkdownApp {
         let indent = depth * 16;
 
         match node {
-            FileTreeNode::File { path, name } => {
+            FileTreeNode::File { path, name, .. } => {
                 // Calculate flash intensity for this file
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -1930,11 +2066,7 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
             }
-            FileTreeNode::Directory {
-                path,
-                name,
-                children: _,
-            } => {
+            FileTreeNode::Directory { path, name, .. } => {
                 // Calculate flash intensity for this directory
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -2057,6 +2189,7 @@ impl eframe::App for MarkdownApp {
             show_explorer: Some(self.show_explorer),
             explorer_root: self.file_explorer.root.clone(),
             expanded_dirs: Some(self.file_explorer.expanded_dirs.iter().cloned().collect()),
+            explorer_sort_order: Some(self.file_explorer.sort_order),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
