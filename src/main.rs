@@ -958,6 +958,11 @@ struct MarkdownApp {
     flashing_paths: HashMap<PathBuf, Instant>,
     // True if running on virtual display (e.g., Xvfb :99) - limits frame rate
     is_virtual_display: bool,
+    // Stored context for waking egui from the watcher bridge thread
+    egui_ctx: egui::Context,
+    // Track state to avoid unconditional repaints
+    last_applied_dark_mode: Option<bool>,
+    last_window_title: String,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -967,6 +972,31 @@ impl MarkdownApp {
     fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>, watch: bool) -> Self {
         // Setup fonts with system font fallbacks for Unicode support
         setup_fonts(&cc.egui_ctx);
+
+        // Set constant styles once at init (never changes at runtime)
+        cc.egui_ctx.style_mut(|style| {
+            style.url_in_tooltip = true;
+            use egui::{FontId, TextStyle};
+            style
+                .text_styles
+                .insert(TextStyle::Body, FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(TextStyle::Heading, FontId::proportional(32.0));
+            style
+                .text_styles
+                .insert(TextStyle::Small, FontId::proportional(13.0));
+            style
+                .text_styles
+                .insert(TextStyle::Monospace, FontId::monospace(14.0));
+
+            // Smoother scroll animation
+            style.animation_time = 0.15;
+            style.scroll_animation.points_per_second = 1500.0;
+
+            // Reduce resize grab radius to prevent overlap with adjacent scrollbars
+            style.interaction.resize_grab_radius_side = 2.0;
+        });
 
         // Load persisted state
         let persisted: PersistedState = cc
@@ -1070,6 +1100,9 @@ impl MarkdownApp {
             show_explorer,
             flashing_paths: HashMap::new(),
             is_virtual_display,
+            egui_ctx: cc.egui_ctx.clone(),
+            last_applied_dark_mode: None,
+            last_window_title: String::new(),
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -1195,7 +1228,7 @@ impl MarkdownApp {
             return;
         }
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, debouncer_rx) = mpsc::channel();
 
         match new_debouncer(Duration::from_millis(200), tx) {
             Ok(mut debouncer) => {
@@ -1230,8 +1263,22 @@ impl MarkdownApp {
                         self.watched_paths.len(),
                         self.watched_explorer_root.is_some()
                     );
+
+                    // Bridge thread: forward events and wake egui on demand
+                    let (bridge_tx, bridge_rx) = mpsc::channel();
+                    let ctx = self.egui_ctx.clone();
+                    std::thread::Builder::new()
+                        .name("watcher-bridge".into())
+                        .spawn(move || {
+                            while let Ok(event) = debouncer_rx.recv() {
+                                let _ = bridge_tx.send(event);
+                                ctx.request_repaint();
+                            }
+                        })
+                        .expect("failed to spawn watcher bridge thread");
+
                     self.watcher = Some(debouncer);
-                    self.watcher_rx = Some(rx);
+                    self.watcher_rx = Some(bridge_rx);
                     self.watch_enabled = true;
                     self.watcher_retry_count = 0;
                 }
@@ -1293,6 +1340,7 @@ impl MarkdownApp {
                 );
                 self.watcher_retry_count += 1;
                 self.start_watching();
+                self.egui_ctx.request_repaint_after(Duration::from_secs(2));
             }
             return Vec::new();
         };
@@ -1322,6 +1370,7 @@ impl MarkdownApp {
                             self.watcher_retry_count
                         );
                         self.start_watching();
+                        self.egui_ctx.request_repaint_after(Duration::from_secs(2));
                     } else {
                         self.error_message = Some(format!(
                             "File watcher failed after {} retries: {}",
@@ -2234,12 +2283,6 @@ impl eframe::App for MarkdownApp {
             }
         }
 
-        // Request periodic repaints when watching is enabled
-        // Use watch_enabled instead of watcher.is_some() to ensure recovery can happen
-        if self.watch_enabled {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
-
         // Limit frame rate on virtual displays (e.g., Xvfb) which lack vsync
         // request_repaint_after alone doesn't limit actual frame rate, so we sleep
         // This prevents 500%+ CPU usage during E2E testing
@@ -2247,51 +2290,36 @@ impl eframe::App for MarkdownApp {
             std::thread::sleep(Duration::from_millis(16)); // ~60 FPS cap
         }
 
-        // Apply theme settings
-        let visuals = if self.dark_mode {
-            let mut v = egui::Visuals::dark();
-            v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
-            v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
-            v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E);
-            v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
-            v
-        } else {
-            let mut v = egui::Visuals::light();
-            v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-            v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-            v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
-            v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
-            v
-        };
-        ctx.set_visuals(visuals);
-        ctx.style_mut(|style| {
-            style.url_in_tooltip = true;
-            use egui::{FontId, TextStyle};
-            style
-                .text_styles
-                .insert(TextStyle::Body, FontId::proportional(16.0));
-            style
-                .text_styles
-                .insert(TextStyle::Heading, FontId::proportional(32.0));
-            style
-                .text_styles
-                .insert(TextStyle::Small, FontId::proportional(13.0));
-            style
-                .text_styles
-                .insert(TextStyle::Monospace, FontId::monospace(14.0));
-
-            // Smoother scroll animation
-            style.animation_time = 0.15; // Faster UI animations (default: 0.1)
-            style.scroll_animation.points_per_second = 1500.0; // Faster scroll (default: 1000)
-
-            // Reduce resize grab radius to prevent overlap with adjacent scrollbars
-            // Default is ~5.0, reducing to 2.0 prevents jitter between scrollbar and panel resize
-            style.interaction.resize_grab_radius_side = 2.0;
-        });
+        // Apply theme settings only when dark_mode changes
+        if self.last_applied_dark_mode != Some(self.dark_mode) {
+            self.last_applied_dark_mode = Some(self.dark_mode);
+            let visuals = if self.dark_mode {
+                let mut v = egui::Visuals::dark();
+                v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+                v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+                v.extreme_bg_color = egui::Color32::from_rgb(0x1E, 0x1E, 0x1E);
+                v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
+                v
+            } else {
+                let mut v = egui::Visuals::light();
+                v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
+                v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
+                v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
+                v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
+                v
+            };
+            ctx.set_visuals(visuals);
+        }
 
         // TEMP: Disable zoom for MCP testing debug
         // ctx.set_zoom_factor(self.zoom_level);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+
+        // Update window title only when it changes
+        let title = self.window_title();
+        if title != self.last_window_title {
+            self.last_window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
 
         // Handle keyboard shortcuts
         let mut open_dialog = false;
