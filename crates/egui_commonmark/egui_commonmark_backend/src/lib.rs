@@ -7,6 +7,8 @@ pub mod alerts;
 #[doc(hidden)]
 pub mod elements;
 #[doc(hidden)]
+pub mod html_table;
+#[doc(hidden)]
 pub mod misc;
 #[doc(hidden)]
 pub mod pulldown;

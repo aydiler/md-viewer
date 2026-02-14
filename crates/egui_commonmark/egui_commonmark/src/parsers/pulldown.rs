@@ -547,11 +547,8 @@ impl CommonMarkViewerInternal {
             }
 
             pulldown_cmark::Event::Html(text) => {
-                if options.html_fn.is_some() {
-                    self.html_block.push_str(&text);
-                } else {
-                    self.event_text(text, ui, options);
-                }
+                // Always accumulate HTML blocks for table detection
+                self.html_block.push_str(&text);
             }
             pulldown_cmark::Event::FootnoteReference(footnote) => {
                 footnote_start(ui, &footnote);
@@ -827,8 +824,16 @@ impl CommonMarkViewerInternal {
                 }
             }
             pulldown_cmark::TagEnd::HtmlBlock => {
-                if let Some(html_fn) = options.html_fn {
-                    html_fn(ui, &self.html_block);
+                if !self.html_block.is_empty() {
+                    if let Some(table) = egui_commonmark_backend_extended::html_table::parse_html_table(&self.html_block) {
+                        self.render_html_table(ui, &table, options, max_width);
+                    } else if let Some(html_fn) = options.html_fn {
+                        html_fn(ui, &self.html_block);
+                    } else {
+                        // Render non-table HTML as plain text (existing fallback)
+                        let text: pulldown_cmark::CowStr = std::mem::take(&mut self.html_block).into();
+                        self.event_text(text, ui, options);
+                    }
                     self.html_block.clear();
                 }
             }
@@ -853,5 +858,46 @@ impl CommonMarkViewerInternal {
             block.end(ui, cache, options, max_width);
             self.line.try_insert_end(ui);
         }
+    }
+
+    fn render_html_table(
+        &mut self,
+        ui: &mut Ui,
+        table: &egui_commonmark_backend_extended::html_table::HtmlTable,
+        options: &CommonMarkOptions,
+        max_width: f32,
+    ) {
+        let id = ui.id().with("_html_table").with(self.curr_table);
+        self.curr_table += 1;
+
+        egui::ScrollArea::horizontal()
+            .id_salt(id.with("_scroll"))
+            .max_width(max_width)
+            .show(ui, |ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    egui::Grid::new(id).striped(true).show(ui, |ui| {
+                        // Render header rows
+                        for row in &table.header {
+                            for cell in row {
+                                ui.strong(cell);
+                            }
+                            ui.end_row();
+                        }
+
+                        // Render body rows
+                        for row in &table.rows {
+                            for cell in row {
+                                let rich_text = self
+                                    .text_style
+                                    .to_richtext_with_typography(ui, cell, Some(&options.typography));
+                                ui.label(rich_text);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
+            });
+
+        self.line.try_insert_end(ui);
     }
 }
