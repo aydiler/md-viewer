@@ -1809,7 +1809,12 @@ impl MarkdownApp {
                     tab.scroll_offset = viewport.min.y;
                     tab.cache.set_scroll_offset(viewport.min.y);
 
+                    let base_uri = tab.path.parent()
+                        .map(|p| format!("file://{}/", p.display()))
+                        .unwrap_or_else(|| "file://".to_string());
+
                     CommonMarkViewer::new()
+                        .default_implicit_uri_scheme(&base_uri)
                         .max_image_width(Some(800))
                         .default_width(Some(600))
                         .indentation_spaces(2)

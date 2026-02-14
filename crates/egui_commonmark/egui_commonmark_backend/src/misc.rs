@@ -277,8 +277,11 @@ impl Image {
         let has_scheme = uri.contains("://") || uri.starts_with("data:");
         let uri = if options.use_explicit_uri_scheme || has_scheme {
             uri.to_string()
+        } else if uri.starts_with('/') {
+            // Absolute path — use file:// directly
+            format!("file://{uri}")
         } else {
-            // Assume file scheme
+            // Relative path — prepend configured base URI
             format!("{}{uri}", options.default_implicit_uri_scheme)
         };
 
