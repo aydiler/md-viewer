@@ -870,34 +870,92 @@ impl CommonMarkViewerInternal {
         let id = ui.id().with("_html_table").with(self.curr_table);
         self.curr_table += 1;
 
+        let num_cols = table
+            .header
+            .first()
+            .or(table.rows.first())
+            .map(|r| r.len())
+            .unwrap_or(0);
+
         egui::ScrollArea::horizontal()
             .id_salt(id.with("_scroll"))
             .max_width(max_width)
             .show(ui, |ui| {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    egui::Grid::new(id).striped(true).show(ui, |ui| {
-                        // Render header rows
-                        for row in &table.header {
-                            for cell in row {
-                                ui.strong(cell);
-                            }
-                            ui.end_row();
-                        }
+                    let border_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
-                        // Render body rows
-                        for row in &table.rows {
-                            for cell in row {
-                                let rich_text = self
-                                    .text_style
-                                    .to_richtext_with_typography(ui, cell, Some(&options.typography));
-                                ui.label(rich_text);
+                    let grid_response = egui::Grid::new(id)
+                        .striped(true)
+                        .min_col_width(40.0)
+                        .spacing(egui::vec2(0.0, 0.0))
+                        .show(ui, |ui| {
+                            // Render header rows
+                            for row in &table.header {
+                                for (i, cell) in row.iter().enumerate() {
+                                    egui::Frame::NONE
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .show(ui, |ui| {
+                                            ui.strong(cell);
+                                        });
+                                    if i + 1 < num_cols {
+                                        Self::paint_vertical_separator(ui, border_color);
+                                    }
+                                }
+                                ui.end_row();
                             }
-                            ui.end_row();
-                        }
-                    });
+
+                            // Render body rows
+                            for row in &table.rows {
+                                for (i, cell) in row.iter().enumerate() {
+                                    egui::Frame::NONE
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .show(ui, |ui| {
+                                            let rich_text = self
+                                                .text_style
+                                                .to_richtext_with_typography(
+                                                    ui,
+                                                    cell,
+                                                    Some(&options.typography),
+                                                );
+                                            ui.label(rich_text);
+                                        });
+                                    if i + 1 < num_cols {
+                                        Self::paint_vertical_separator(ui, border_color);
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+
+                    // Draw horizontal line between header and body
+                    if !table.header.is_empty() && !table.rows.is_empty() {
+                        let rect = grid_response.response.rect;
+                        // Estimate header height from total rows
+                        let total_rows = table.header.len() + table.rows.len();
+                        let header_fraction =
+                            table.header.len() as f32 / total_rows as f32;
+                        let separator_y = rect.top() + rect.height() * header_fraction;
+                        ui.painter().hline(
+                            rect.left()..=rect.right(),
+                            separator_y,
+                            egui::Stroke::new(1.0, border_color),
+                        );
+                    }
                 });
             });
 
         self.line.try_insert_end(ui);
+    }
+
+    fn paint_vertical_separator(ui: &mut Ui, color: egui::Color32) {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(1.0, ui.available_height()),
+            egui::Sense::hover(),
+        );
+        ui.painter().vline(
+            rect.center().x,
+            rect.top()..=rect.bottom(),
+            egui::Stroke::new(1.0, color),
+        );
     }
 }
