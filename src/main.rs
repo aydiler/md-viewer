@@ -1714,7 +1714,8 @@ impl MarkdownApp {
 
                                 // Header title
                                 let display_text = if header.title.len() > 35 {
-                                    format!("{}...", &header.title[..32])
+                                    let end = header.title.floor_char_boundary(32);
+                                    format!("{}...", &header.title[..end])
                                 } else {
                                     header.title.clone()
                                 };
