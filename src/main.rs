@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -18,6 +19,14 @@ use serde::{Deserialize, Serialize};
 use egui_mcp_bridge::{McpBridge, McpUiExt};
 
 const APP_KEY: &str = "md-viewer-state";
+
+/// Compiled regex for parsing markdown headers (lazy, compiled once)
+static HEADER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.+)$").unwrap());
+
+/// Compiled regex for parsing markdown links (lazy, compiled once)
+static LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
 /// System font paths for fallback (Arch Linux / common Linux paths)
 const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
@@ -684,7 +693,7 @@ impl Tab {
 
 /// Parse local markdown file links and anchor links from content, skipping code blocks.
 fn parse_local_links(content: &str) -> Vec<String> {
-    let link_re = Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
+    let link_re = &*LINK_RE;
     let mut links = Vec::new();
     let mut in_code_block = false;
 
@@ -733,7 +742,7 @@ fn is_local_markdown_link(destination: &str) -> bool {
 
 /// Parse markdown headers from content, skipping code blocks.
 fn parse_headers(content: &str) -> ParsedHeaders {
-    let re = Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
+    let re = &*HEADER_RE;
     let mut all_headers = Vec::new();
     let mut in_code_block = false;
 
