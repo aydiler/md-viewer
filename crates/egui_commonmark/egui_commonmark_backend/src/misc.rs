@@ -2,6 +2,7 @@ use crate::alerts::AlertBundle;
 use crate::typography::TypographyConfig;
 use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::pulldown::ScrollableCache;
 
@@ -12,6 +13,14 @@ use syntect::{
     parsing::{SyntaxDefinition, SyntaxSet},
     util::LinesWithEndings,
 };
+
+#[cfg(feature = "better_syntax_highlighting")]
+use std::sync::LazyLock;
+
+#[cfg(feature = "better_syntax_highlighting")]
+static GLOBAL_SYNTAX_SET: LazyLock<Arc<SyntaxSet>> =
+    LazyLock::new(|| Arc::new(SyntaxSet::load_defaults_newlines()));
+
 
 #[cfg(feature = "better_syntax_highlighting")]
 const DEFAULT_THEME_LIGHT: &str = "base16-ocean.light";
@@ -473,7 +482,7 @@ pub struct CommonMarkCache {
     // Everything stored in `CommonMarkCache` must take into account that
     // the cache is for multiple `CommonMarkviewer`s with different source_ids.
     #[cfg(feature = "better_syntax_highlighting")]
-    ps: SyntaxSet,
+    ps: Arc<SyntaxSet>,
 
     #[cfg(feature = "better_syntax_highlighting")]
     ts: ThemeSet,
@@ -495,7 +504,7 @@ impl Default for CommonMarkCache {
     fn default() -> Self {
         Self {
             #[cfg(feature = "better_syntax_highlighting")]
-            ps: SyntaxSet::load_defaults_newlines(),
+            ps: Arc::clone(&GLOBAL_SYNTAX_SET),
             #[cfg(feature = "better_syntax_highlighting")]
             ts: ThemeSet::load_defaults(),
             link_hooks: HashMap::new(),
@@ -510,16 +519,16 @@ impl Default for CommonMarkCache {
 impl CommonMarkCache {
     #[cfg(feature = "better_syntax_highlighting")]
     pub fn add_syntax_from_folder(&mut self, path: &str) {
-        let mut builder = self.ps.clone().into_builder();
+        let mut builder = (*self.ps).clone().into_builder();
         let _ = builder.add_from_folder(path, true);
-        self.ps = builder.build();
+        self.ps = Arc::new(builder.build());
     }
 
     #[cfg(feature = "better_syntax_highlighting")]
     pub fn add_syntax_from_str(&mut self, s: &str, fallback_name: Option<&str>) {
-        let mut builder = self.ps.clone().into_builder();
+        let mut builder = (*self.ps).clone().into_builder();
         let _ = SyntaxDefinition::load_from_str(s, true, fallback_name).map(|d| builder.add(d));
-        self.ps = builder.build();
+        self.ps = Arc::new(builder.build());
     }
 
     #[cfg(feature = "better_syntax_highlighting")]
