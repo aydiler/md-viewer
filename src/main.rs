@@ -41,20 +41,6 @@ const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
         "NotoSansCJK",
         "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
     ),
-    // Emoji
-    ("NotoEmoji", "/usr/share/fonts/noto/NotoColorEmoji.ttf"),
-    (
-        "NotoEmoji",
-        "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
-    ),
-    (
-        "NotoEmoji",
-        "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
-    ),
-    (
-        "NotoEmoji",
-        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-    ),
     // Arabic
     (
         "NotoSansArabic",
@@ -861,11 +847,8 @@ fn setup_fonts(ctx: &egui::Context) {
                     }
 
                     // Also add text fonts to monospace for code blocks with Unicode
-                    // (but not emoji - that would look weird in code)
-                    if !font_name.contains("Emoji") {
-                        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                            family.push(font_name.to_string());
-                        }
+                    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                        family.push(font_name.to_string());
                     }
 
                     loaded_fonts.insert(font_name.to_string());
@@ -880,7 +863,7 @@ fn setup_fonts(ctx: &egui::Context) {
     if loaded_fonts.is_empty() {
         log::warn!("No system fonts loaded. Unicode characters may show as red triangles.");
         log::warn!(
-            "Install noto-fonts, noto-fonts-cjk, and noto-fonts-emoji for full Unicode support."
+            "Install noto-fonts and noto-fonts-cjk for full Unicode support."
         );
     } else {
         log::info!(
