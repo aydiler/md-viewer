@@ -965,6 +965,11 @@ impl MarkdownApp {
         // Setup fonts with system font fallbacks for Unicode support
         setup_fonts(&cc.egui_ctx);
 
+        // Clear stale egui widget data loaded from disk (scroll offsets, panel sizes, etc.)
+        // We don't persist egui memory (see persist_egui_memory), but eframe always
+        // loads it if present. This purges the old blob so it doesn't waste startup time/RAM.
+        cc.egui_ctx.memory_mut(|mem| mem.data = Default::default());
+
         // Set constant styles once at init (never changes at runtime)
         cc.egui_ctx.style_mut(|style| {
             style.url_in_tooltip = true;
@@ -2235,6 +2240,11 @@ impl eframe::App for MarkdownApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.mcp_bridge.process_commands();
         self.mcp_bridge.inject_raw_input(raw_input);
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        false // Don't persist egui's internal Memory (widget states, panel sizes, etc.)
+              // Our PersistedState handles everything we need; egui's blob grows unbounded (~170KB)
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
