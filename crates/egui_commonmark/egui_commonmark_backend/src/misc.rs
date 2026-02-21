@@ -329,6 +329,7 @@ impl CodeBlock {
         cache: &mut CommonMarkCache,
         options: &CommonMarkOptions,
         max_width: f32,
+        id: egui::Id,
     ) {
         ui.scope(|ui| {
             Self::pre_syntax_highlighting(cache, options, ui);
@@ -344,9 +345,10 @@ impl CodeBlock {
                 plain_highlighting(ui, &self.content, code_line_height)
             };
 
-            job.wrap.max_width = max_width;
+            // Don't wrap code block text - use horizontal scroll instead
+            job.wrap.max_width = f32::INFINITY;
 
-            crate::elements::code_block(ui, &self.content, job);
+            crate::elements::code_block(ui, &self.content, job, max_width, id);
         });
     }
 }

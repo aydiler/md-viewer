@@ -122,19 +122,30 @@ fn width_body_space(ui: &Ui) -> f32 {
 
 /// Enhanced/specialized version of egui's code blocks. This one features copy button and borders.
 /// Uses selectable Label instead of TextEdit to allow text selection across code block boundaries.
-pub fn code_block(ui: &mut Ui, text: &str, layout_job: egui::text::LayoutJob) {
+pub fn code_block(ui: &mut Ui, text: &str, layout_job: egui::text::LayoutJob, max_width: f32, id: egui::Id) {
     let text = text.strip_suffix('\n').unwrap_or(text);
 
     // Reserve space for background drawing
     let where_to_put_background = ui.painter().add(egui::Shape::Noop);
 
-    // Use a Frame to add padding around the code block
+    // Use a Frame with horizontal scroll for wide code blocks.
+    // All code blocks use the same width with horizontal scrolling
+    // for content that exceeds it.
     let frame_response = egui::Frame::new()
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            // Use selectable Label with the pre-computed LayoutJob
-            // This integrates with egui's unified label text selection
-            ui.add(egui::Label::new(layout_job).selectable(true))
+            // Force all code blocks to fill the available width
+            ui.set_min_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt(id)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(layout_job)
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    )
+                })
+                .inner
         });
 
     let frame_rect = frame_response.response.rect;

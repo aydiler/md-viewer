@@ -72,6 +72,7 @@ struct DefinitionList {
 
 pub struct CommonMarkViewerInternal {
     curr_table: usize,
+    curr_code_block: usize,
     text_style: Style,
     list: List,
     link: Option<Link>,
@@ -103,6 +104,7 @@ impl CommonMarkViewerInternal {
     pub fn new() -> Self {
         Self {
             curr_table: 0,
+            curr_code_block: 0,
             text_style: Style::default(),
             list: List::default(),
             link: None,
@@ -855,7 +857,9 @@ impl CommonMarkViewerInternal {
         max_width: f32,
     ) {
         if let Some(block) = self.code_block.take() {
-            block.end(ui, cache, options, max_width);
+            let id = ui.id().with("_code_block").with(self.curr_code_block);
+            self.curr_code_block += 1;
+            block.end(ui, cache, options, max_width, id);
             self.line.try_insert_end(ui);
         }
     }
