@@ -72,6 +72,9 @@ fetch = ["egui_extras/http"]
 ## Currently this does not support wasm.
 embedded_image = ["egui_commonmark_backend_extended/embedded_image"]
 
+## Render mermaid diagram code blocks as SVG images
+mermaid = ["egui_commonmark_backend_extended/mermaid"]
+
 [dev-dependencies]
 eframe = { version = "0.33", default-features = false, features = [
     "default_fonts",
