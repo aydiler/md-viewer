@@ -4,6 +4,11 @@ use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "mermaid")]
+use std::collections::hash_map::DefaultHasher;
+#[cfg(feature = "mermaid")]
+use std::hash::{Hash, Hasher};
+
 use crate::pulldown::ScrollableCache;
 
 #[cfg(feature = "better_syntax_highlighting")]
@@ -331,6 +336,12 @@ impl CodeBlock {
         max_width: f32,
         id: egui::Id,
     ) {
+        #[cfg(feature = "mermaid")]
+        if self.lang.as_deref() == Some("mermaid") {
+            self.render_mermaid(ui, cache, options, max_width);
+            return;
+        }
+
         ui.scope(|ui| {
             Self::pre_syntax_highlighting(cache, options, ui);
 
@@ -350,6 +361,105 @@ impl CodeBlock {
 
             crate::elements::code_block(ui, &self.content, job, max_width, id);
         });
+    }
+}
+
+#[cfg(feature = "mermaid")]
+impl CodeBlock {
+    fn render_mermaid(
+        &self,
+        ui: &mut Ui,
+        cache: &mut CommonMarkCache,
+        options: &CommonMarkOptions,
+        max_width: f32,
+    ) {
+        let mut hasher = DefaultHasher::new();
+        self.content.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        if !cache.mermaid_svgs.contains_key(&hash) {
+            match mermaid_rs_renderer::render(&self.content) {
+                Ok(svg_string) => {
+                    let svg_string = Self::sanitize_svg_font_family(&svg_string);
+                    cache.mermaid_svgs.insert(
+                        hash,
+                        Ok(Arc::from(svg_string.into_bytes().into_boxed_slice())),
+                    );
+                }
+                Err(e) => {
+                    cache.mermaid_svgs.insert(hash, Err(e.to_string()));
+                }
+            }
+        }
+
+        match cache.mermaid_svgs.get(&hash) {
+            Some(Ok(svg_bytes)) => {
+                let uri = format!("bytes://mermaid_{hash}.svg");
+                ui.add(
+                    egui::Image::new(egui::ImageSource::Bytes {
+                        uri: uri.into(),
+                        bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
+                    })
+                    .fit_to_original_size(1.0)
+                    .max_width(options.max_width(ui).min(max_width)),
+                );
+            }
+            Some(Err(err_msg)) => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Mermaid render error: {err_msg}"),
+                );
+            }
+            None => unreachable!(),
+        }
+    }
+
+    /// Sanitize SVG font-family attributes for resvg compatibility.
+    /// mermaid-rs-renderer outputs web font stacks with unescaped quotes
+    /// (e.g. `font-family="..., "Segoe UI", ..."`) which is invalid XML,
+    /// and uses CSS keywords (system-ui, ui-sans-serif) that resvg's fontdb
+    /// can't resolve. Replace with concrete system font names.
+    fn sanitize_svg_font_family(svg: &str) -> String {
+        let needle = "font-family=\"";
+        if !svg.contains(needle) {
+            return svg.to_owned();
+        }
+
+        // resvg's fontdb resolves explicit font names but not CSS generic families
+        // like "sans-serif". Use concrete names common across Linux distributions.
+        let replacement = "font-family=\"Noto Sans, DejaVu Sans, Liberation Sans\"";
+
+        let mut result = String::with_capacity(svg.len());
+        let mut rest = svg;
+
+        while let Some(pos) = rest.find(needle) {
+            result.push_str(&rest[..pos]);
+            result.push_str(replacement);
+            let after = &rest[pos + needle.len()..];
+
+            // Skip past the original value — find the closing `"` (followed by `>`, ` `, `/`)
+            let bytes = after.as_bytes();
+            let mut close = None;
+            for i in 0..bytes.len() {
+                if bytes[i] == b'"' {
+                    match bytes.get(i + 1) {
+                        Some(b'>') | Some(b' ') | Some(b'/') | None => {
+                            close = Some(i);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            rest = if let Some(end) = close {
+                &after[end + 1..]
+            } else {
+                after
+            };
+        }
+        result.push_str(rest);
+        result
     }
 }
 
@@ -499,6 +609,10 @@ pub struct CommonMarkCache {
     header_positions: HashMap<String, f32>,
     /// Current scroll offset, set before rendering to calculate content-relative positions.
     current_scroll_offset: f32,
+
+    /// Cached mermaid diagram SVGs: content hash → rendered SVG bytes or error message
+    #[cfg(feature = "mermaid")]
+    mermaid_svgs: HashMap<u64, Result<Arc<[u8]>, String>>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -514,6 +628,8 @@ impl Default for CommonMarkCache {
             has_installed_loaders: false,
             header_positions: HashMap::new(),
             current_scroll_offset: 0.0,
+            #[cfg(feature = "mermaid")]
+            mermaid_svgs: HashMap::new(),
         }
     }
 }
