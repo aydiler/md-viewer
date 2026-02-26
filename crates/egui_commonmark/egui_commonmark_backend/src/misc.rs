@@ -400,14 +400,21 @@ impl CodeBlock {
         match cache.mermaid_svgs.get(&hash) {
             Some(Ok(svg_bytes)) => {
                 let uri = format!("bytes://mermaid_{hash}.svg");
-                ui.add(
+                let response = ui.add(
                     egui::Image::new(egui::ImageSource::Bytes {
                         uri: uri.into(),
                         bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
                     })
                     .fit_to_original_size(1.0)
-                    .max_width(options.max_width(ui).min(max_width)),
+                    .max_width(options.max_width(ui).min(max_width))
+                    .sense(egui::Sense::click()),
                 );
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if response.clicked() {
+                    cache.clicked_mermaid = Some(svg_bytes.clone());
+                }
             }
             Some(Err(err_msg)) => {
                 ui.colored_label(
@@ -571,64 +578,98 @@ impl CodeBlock {
         result
     }
 
-    /// Process a single fallback `<g>` group, wrapping long tspan text.
+    /// Process a single fallback `<g>` group: wrap long tspan text, then
+    /// recalculate all dy values so visual lines are evenly spaced and centered.
+    ///
+    /// Each visual line is emitted as its own `<text>` element with a single
+    /// `<tspan dy="...">` so that dy is always relative to the text element's
+    /// base y (not to a previous tspan).
     fn wrap_tspans_in_group(group: &str, max_chars: usize) -> String {
-        let mut result = String::with_capacity(group.len() + 256);
+        const LINE_SPACING: f32 = 16.0; // matches font-size 16px
+
+        // --- Pass 1: collect <text> elements and wrap their tspan content ---
+
+        // We need: the open tag template (for style/attrs), x value, and visual lines.
+        let mut open_tag_template = String::new();
+        let mut x_val = String::new();
+        let mut all_visual_lines: Vec<String> = Vec::new();
+
         let mut remaining = group;
 
-        while let Some(tspan_start) = remaining.find("<tspan") {
-            // Copy up to the tspan
-            result.push_str(&remaining[..tspan_start]);
+        // Prefix: everything before the first <text
+        let prefix = if let Some(pos) = remaining.find("<text") {
+            let p = remaining[..pos].to_string();
+            remaining = &remaining[pos..];
+            p
+        } else {
+            return group.to_owned();
+        };
 
-            let tspan_rest = &remaining[tspan_start..];
-            if let Some(close) = tspan_rest.find("</tspan>") {
-                let full_tspan = &tspan_rest[..close + 8];
+        while let Some(text_start) = remaining.find("<text") {
+            let text_rest = &remaining[text_start..];
+            let Some(open_end) = text_rest.find('>') else { break };
 
-                // Extract x attribute and text content
-                let x_val = Self::extract_attr(full_tspan, "x");
-                let content_start = full_tspan.find('>').map(|p| p + 1).unwrap_or(0);
-                let content = &full_tspan[content_start..close];
+            // Capture the first <text ...> tag as template (all share same attrs)
+            if open_tag_template.is_empty() {
+                open_tag_template = text_rest[..=open_end].to_string();
+            }
 
-                let orig_dy = Self::extract_attr(full_tspan, "dy");
-                let orig_dy_val: f32 = orig_dy.parse().unwrap_or(0.0);
+            let inner = &text_rest[open_end + 1..];
+            let Some(close_pos) = inner.find("</text>") else { break };
+            let inner_content = &inner[..close_pos];
 
-                if content.trim().len() > max_chars {
-                    let lines = Self::word_wrap(content.trim(), max_chars);
-                    let n = lines.len();
-                    let line_spacing = 16.0; // matches font-size 16px
+            // Extract tspan content
+            let mut tspan_remaining = inner_content;
+            while let Some(ts) = tspan_remaining.find("<tspan") {
+                let ts_rest = &tspan_remaining[ts..];
+                let Some(ts_close) = ts_rest.find("</tspan>") else { break };
+                let full_tspan = &ts_rest[..ts_close + 8];
 
-                    for (i, line) in lines.iter().enumerate() {
-                        let dy = if i == 0 {
-                            if orig_dy_val == 0.0 && n > 1 {
-                                // Single-line node: center the wrapped block
-                                format!("{}", -(n as f32 - 1.0) * line_spacing * 0.5)
-                            } else if orig_dy_val < 0.0 && n > 1 {
-                                // Multi-line node, top line: shift further up
-                                // so sub-lines don't overlap with lower lines
-                                format!("{}", orig_dy_val - (n as f32 - 1.0) * line_spacing)
-                            } else {
-                                // Positive dy or single line: keep original
-                                orig_dy.to_string()
-                            }
-                        } else {
-                            format!("{line_spacing}")
-                        };
-                        result.push_str(&format!(
-                            "<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
-                            x_val, dy, line
-                        ));
-                    }
-                } else {
-                    result.push_str(full_tspan);
+                if x_val.is_empty() {
+                    x_val = Self::extract_attr(full_tspan, "x").to_string();
                 }
 
-                remaining = &tspan_rest[close + 8..];
-            } else {
-                result.push_str(tspan_rest);
-                remaining = "";
+                let content_start = full_tspan.find('>').map(|p| p + 1).unwrap_or(0);
+                let content = &full_tspan[content_start..ts_close];
+
+                if content.trim().len() > max_chars {
+                    all_visual_lines.extend(Self::word_wrap(content.trim(), max_chars));
+                } else {
+                    all_visual_lines.push(content.to_string());
+                }
+
+                tspan_remaining = &ts_rest[ts_close + 8..];
             }
+
+            // Advance past </text>
+            remaining = &remaining[text_start + open_end + 1 + close_pos + 7..];
         }
-        result.push_str(remaining);
+
+        let suffix = remaining;
+
+        if all_visual_lines.is_empty() {
+            return group.to_owned();
+        }
+
+        // --- Pass 2: emit one <text> per visual line with centered dy ---
+        let total = all_visual_lines.len();
+        let mut result = String::with_capacity(group.len() + 512);
+        result.push_str(&prefix);
+
+        for (i, line) in all_visual_lines.iter().enumerate() {
+            let dy = if total <= 1 {
+                0.0
+            } else {
+                -(total as f32 - 1.0) * LINE_SPACING * 0.5 + i as f32 * LINE_SPACING
+            };
+            result.push_str(&open_tag_template);
+            result.push_str(&format!(
+                "<tspan x=\"{}\" dy=\"{}\">{}</tspan></text>",
+                x_val, dy, line
+            ));
+        }
+
+        result.push_str(suffix);
         result
     }
 
@@ -820,6 +861,10 @@ pub struct CommonMarkCache {
     /// Mermaid renderer instance (reused across renders)
     #[cfg(feature = "mermaid")]
     mermaid_renderer: merman::render::HeadlessRenderer,
+
+    /// Set when a mermaid diagram is clicked (consumed by the app for lightbox display)
+    #[cfg(feature = "mermaid")]
+    clicked_mermaid: Option<Arc<[u8]>>,
 }
 
 impl std::fmt::Debug for CommonMarkCache {
@@ -832,6 +877,8 @@ impl std::fmt::Debug for CommonMarkCache {
             .field("current_scroll_offset", &self.current_scroll_offset);
         #[cfg(feature = "mermaid")]
         s.field("mermaid_svgs", &self.mermaid_svgs);
+        #[cfg(feature = "mermaid")]
+        s.field("clicked_mermaid", &self.clicked_mermaid.is_some());
         s.finish()
     }
 }
@@ -855,10 +902,13 @@ impl Default for CommonMarkCache {
             mermaid_renderer: merman::render::HeadlessRenderer::new()
                 .with_text_measurer(Arc::new(merman::render::DeterministicTextMeasurer {
                     // Wider than default (0.55) to accommodate Noto Sans/DejaVu Sans
-                    // which are wider than the vendored Trebuchet MS metrics
-                    char_width_factor: 0.60,
+                    // which are wider than the vendored Trebuchet MS metrics.
+                    // 0.65 prevents text overlap in complex flowcharts with long labels.
+                    char_width_factor: 0.65,
                     line_height_factor: 0.0, // use internal default
                 })),
+            #[cfg(feature = "mermaid")]
+            clicked_mermaid: None,
         }
     }
 }
@@ -903,6 +953,12 @@ impl CommonMarkCache {
             .themes
             .insert(name.into(), ThemeSet::load_from_reader(&mut cursor)?);
         Ok(())
+    }
+
+    /// Take the clicked mermaid SVG bytes (if any). Returns `Some` once per click.
+    #[cfg(feature = "mermaid")]
+    pub fn take_clicked_mermaid(&mut self) -> Option<Arc<[u8]>> {
+        self.clicked_mermaid.take()
     }
 
     /// Clear the cache for all scrollable elements

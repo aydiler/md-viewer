@@ -31,7 +31,7 @@ eframe = { version = "0.33", default-features = false, features = [
 egui = { version = "0.33", features = ["accesskit"] }
 
 # MCP bridge for E2E testing (optional, local dev only - not on crates.io)
-egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
+# egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
 
 # Markdown rendering with syntax highlighting (fork with typography support)
 egui_commonmark_extended = { version = "0.22.1", features = [
@@ -55,6 +55,9 @@ clap = { version = "4", features = ["derive"] }
 # Performance
 mimalloc = "0.1"
 
+# SVG rasterization for lightbox (pre-render once, zoom via GPU texture scaling)
+resvg = "0.45"
+
 # Serialization for persistence
 serde = { version = "1", features = ["derive"] }
 
@@ -65,7 +68,7 @@ regex = "1.12.2"
 
 [features]
 default = []
-mcp = ["dep:egui-mcp-bridge"]
+# mcp = ["dep:egui-mcp-bridge"]
 
 [profile.release]
 opt-level = "z"
@@ -73,6 +76,12 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.release-dev]
+inherits = "release"
+opt-level = 2
+lto = "thin"
+codegen-units = 4
 
 [patch.crates-io]
 egui_commonmark_extended = { path = "crates/egui_commonmark/egui_commonmark" }

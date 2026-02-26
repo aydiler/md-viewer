@@ -924,6 +924,84 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+struct LightboxState {
+    /// Pre-rasterized texture (GPU-resident). Zoom just scales this — instant.
+    texture: egui::TextureHandle,
+    /// Original rasterized pixel dimensions (before any zoom)
+    base_size: egui::Vec2,
+    zoom: f32,
+    /// Unique ID per open — prevents stale egui Area/ScrollArea state between opens
+    open_id: u64,
+}
+
+impl LightboxState {
+    /// Rasterize SVG once at high resolution and upload as GPU texture.
+    fn new(ctx: &egui::Context, svg_bytes: &[u8], open_id: u64) -> Option<Self> {
+        use std::sync::Arc;
+
+        // Cache the font database — loading system fonts is expensive (~50ms)
+        static FONTDB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            Arc::new(db)
+        });
+
+        let opts = resvg::usvg::Options {
+            fontdb: Arc::clone(&FONTDB),
+            ..Default::default()
+        };
+        let tree = resvg::usvg::Tree::from_data(svg_bytes, &opts).ok()?;
+        let svg_size = tree.size();
+
+        // Rasterize at 2x the SVG's native size for crisp zooming up to ~200%
+        let scale = 2.0_f32;
+        let w = (svg_size.width() * scale) as u32;
+        let h = (svg_size.height() * scale) as u32;
+        if w == 0 || h == 0 {
+            return None;
+        }
+
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+
+        // Convert premultiplied RGBA → straight RGBA for egui
+        let pixels = pixmap.data();
+        let mut rgba = Vec::with_capacity(pixels.len());
+        for chunk in pixels.chunks_exact(4) {
+            let a = chunk[3] as f32 / 255.0;
+            if a > 0.0 {
+                rgba.push((chunk[0] as f32 / a).min(255.0) as u8);
+                rgba.push((chunk[1] as f32 / a).min(255.0) as u8);
+                rgba.push((chunk[2] as f32 / a).min(255.0) as u8);
+            } else {
+                rgba.push(0);
+                rgba.push(0);
+                rgba.push(0);
+            }
+            rgba.push(chunk[3]);
+        }
+
+        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+        let texture = ctx.load_texture(
+            format!("lightbox_{open_id}"),
+            image,
+            egui::TextureOptions::LINEAR, // smooth scaling
+        );
+
+        let base_size = egui::vec2(svg_size.width(), svg_size.height());
+        Some(Self {
+            texture,
+            base_size,
+            zoom: 1.0,
+            open_id,
+        })
+    }
+}
+
 struct MarkdownApp {
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -955,6 +1033,12 @@ struct MarkdownApp {
     // Track state to avoid unconditional repaints
     last_applied_dark_mode: Option<bool>,
     last_window_title: String,
+    // Lightbox overlay for enlarged mermaid diagrams
+    lightbox: Option<LightboxState>,
+    // Scroll delta captured from raw_input_hook for lightbox zoom (stripped from RawInput)
+    lightbox_scroll: f32,
+    // Counter for unique lightbox IDs (prevents stale egui state between opens)
+    lightbox_open_count: u64,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -969,6 +1053,9 @@ impl MarkdownApp {
         // We don't persist egui memory (see persist_egui_memory), but eframe always
         // loads it if present. This purges the old blob so it doesn't waste startup time/RAM.
         cc.egui_ctx.memory_mut(|mem| mem.data = Default::default());
+
+        // Disable egui's built-in Ctrl+/- zoom — we handle zoom ourselves
+        cc.egui_ctx.options_mut(|opt| opt.zoom_with_keyboard = false);
 
         // Set constant styles once at init (never changes at runtime)
         cc.egui_ctx.style_mut(|style| {
@@ -1100,6 +1187,9 @@ impl MarkdownApp {
             egui_ctx: cc.egui_ctx.clone(),
             last_applied_dark_mode: None,
             last_window_title: String::new(),
+            lightbox: None,
+            lightbox_scroll: 0.0,
+            lightbox_open_count: 0,
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -2233,13 +2323,211 @@ impl MarkdownApp {
 
         action
     }
+
+    fn render_lightbox(&mut self, ctx: &egui::Context) {
+        let Some(lightbox) = &mut self.lightbox else {
+            return;
+        };
+
+        let screen_rect = ctx.available_rect();
+        let mut should_close = false;
+
+        // 1. Semi-transparent backdrop (visual only, drawn below Tooltip layers)
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("lightbox_backdrop"),
+        ))
+        .rect_filled(
+            screen_rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+        );
+
+        // 2. Full-screen input sink at Tooltip order — blocks all input to lower layers.
+        //    Clicking on the sink (outside image/close) closes the lightbox.
+        let oid = lightbox.open_id;
+        egui::Area::new(egui::Id::new("lightbox_sink").with(oid))
+            .order(egui::Order::Tooltip)
+            .movable(false)
+            .fixed_pos(screen_rect.min)
+            .show(ctx, |ui| {
+                let r = ui.allocate_response(screen_rect.size(), egui::Sense::click());
+                if r.clicked() {
+                    should_close = true;
+                }
+            });
+
+        // 3. Apply scroll-wheel zoom (proportional to scroll amount for smooth feel)
+        if self.lightbox_scroll != 0.0 {
+            // ~10% per scroll notch, smooth with proportional delta
+            let factor = (1.0_f32 + self.lightbox_scroll * 0.08).clamp(0.5, 2.0);
+            lightbox.zoom = (lightbox.zoom * factor).clamp(0.1, 10.0);
+        }
+
+        // 4. Image — GPU texture scaling, no re-rasterization
+        let padding = 40.0;
+        let area_rect = screen_rect.shrink(padding);
+        let area_size = area_rect.size();
+        let zoom = lightbox.zoom;
+        let display_size = lightbox.base_size * zoom;
+        let tex_id = lightbox.texture.id();
+        let tex_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
+        // Use fixed_pos instead of anchor to avoid position jitter when content
+        // size changes (anchor recalculates position based on laid-out size,
+        // causing a one-frame shift when scrollbars appear/disappear).
+        let area_pos = egui::pos2(
+            screen_rect.center().x - area_size.x / 2.0,
+            screen_rect.center().y - area_size.y / 2.0,
+        );
+
+        egui::Area::new(egui::Id::new("lightbox_image").with(oid))
+            .order(egui::Order::Tooltip)
+            .movable(false)
+            .fixed_pos(area_pos)
+            .show(ctx, |ui| {
+                ui.set_min_size(area_size);
+                ui.set_max_size(area_size);
+
+                egui::ScrollArea::both()
+                    .id_salt(egui::Id::new("lightbox_scroll").with(oid))
+                    .max_width(area_size.x)
+                    .max_height(area_size.y)
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                    )
+                    .drag_to_scroll(true)
+                    .show(ui, |ui| {
+                        // Center the image when it's smaller than the viewport
+                        let pad_x =
+                            ((area_size.x - display_size.x) / 2.0).max(0.0);
+                        let pad_y =
+                            ((area_size.y - display_size.y) / 2.0).max(0.0);
+                        if pad_x > 0.0 || pad_y > 0.0 {
+                            ui.add_space(0.0); // ensure layout cursor is active
+                            let content_size = egui::vec2(
+                                display_size.x + pad_x * 2.0,
+                                display_size.y + pad_y * 2.0,
+                            )
+                            .max(area_size);
+                            ui.allocate_ui_at_rect(
+                                egui::Rect::from_min_size(
+                                    ui.cursor().min + egui::vec2(pad_x, pad_y),
+                                    display_size,
+                                ),
+                                |ui| {
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        display_size,
+                                        egui::Sense::click(),
+                                    );
+                                    if ui.is_rect_visible(rect) {
+                                        let mut mesh =
+                                            egui::Mesh::with_texture(tex_id);
+                                        mesh.add_rect_with_uv(
+                                            rect,
+                                            tex_uv,
+                                            egui::Color32::WHITE,
+                                        );
+                                        ui.painter()
+                                            .add(egui::Shape::mesh(mesh));
+                                    }
+                                    if response.double_clicked() {
+                                        lightbox.zoom = 1.0;
+                                    }
+                                },
+                            );
+                            // Reserve the full content area so ScrollArea
+                            // knows the true extent for panning.
+                            ui.allocate_space(content_size);
+                            return;
+                        }
+
+                        let (rect, response) =
+                            ui.allocate_exact_size(display_size, egui::Sense::click());
+                        if ui.is_rect_visible(rect) {
+                            let mut mesh = egui::Mesh::with_texture(tex_id);
+                            mesh.add_rect_with_uv(rect, tex_uv, egui::Color32::WHITE);
+                            ui.painter().add(egui::Shape::mesh(mesh));
+                        }
+                        if response.double_clicked() {
+                            lightbox.zoom = 1.0;
+                        }
+                    });
+            });
+
+        // 5. Close button (top-right)
+        egui::Area::new(egui::Id::new("lightbox_close").with(oid))
+            .order(egui::Order::Tooltip)
+            .movable(false)
+            .fixed_pos(egui::pos2(screen_rect.right() - 48.0, screen_rect.top() + 8.0))
+            .show(ctx, |ui| {
+                let btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("\u{2715}")
+                            .size(20.0)
+                            .color(egui::Color32::from_gray(200)),
+                    )
+                    .frame(false),
+                );
+                if btn.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if btn.clicked() {
+                    should_close = true;
+                }
+            });
+
+        // 6. Zoom indicator (bottom-center) when zoom ≠ 100%
+        let zoom_pct = (lightbox.zoom * 100.0).round() as i32;
+        if zoom_pct != 100 {
+            ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("lightbox_zoom_indicator").with(oid),
+            ))
+            .text(
+                egui::pos2(screen_rect.center().x, screen_rect.bottom() - 24.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{zoom_pct}%"),
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_gray(180),
+            );
+        }
+
+        // 7. Escape to close
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                should_close = true;
+            }
+        });
+
+        if should_close {
+            self.lightbox = None;
+        }
+    }
 }
 
 impl eframe::App for MarkdownApp {
-    #[cfg(feature = "mcp")]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        self.mcp_bridge.process_commands();
-        self.mcp_bridge.inject_raw_input(raw_input);
+        #[cfg(feature = "mcp")]
+        {
+            self.mcp_bridge.process_commands();
+            self.mcp_bridge.inject_raw_input(raw_input);
+        }
+
+        // When lightbox is open, intercept scroll events before they reach InputState.
+        // This prevents the document's ScrollArea from scrolling while letting us
+        // use the captured delta for lightbox zoom.
+        self.lightbox_scroll = 0.0;
+        if self.lightbox.is_some() {
+            for event in &raw_input.events {
+                if let egui::Event::MouseWheel { delta, .. } = event {
+                    self.lightbox_scroll += delta.y;
+                }
+            }
+            raw_input
+                .events
+                .retain(|e| !matches!(e, egui::Event::MouseWheel { .. }));
+        }
     }
 
     fn persist_egui_memory(&self) -> bool {
@@ -2329,7 +2617,7 @@ impl eframe::App for MarkdownApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
 
-        // Handle keyboard shortcuts
+        // Handle keyboard shortcuts (suppressed when lightbox is open)
         let mut open_dialog = false;
         let mut toggle_watch = false;
         let mut toggle_dark = false;
@@ -2345,6 +2633,40 @@ impl eframe::App for MarkdownApp {
         let mut prev_tab = false;
         let mut focus_tab: Option<usize> = None;
 
+        // Ctrl+/- zoom: applies to lightbox when open, document otherwise
+        ctx.input(|i| {
+            if i.modifiers.ctrl
+                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+            {
+                zoom_delta = 0.1;
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
+                zoom_delta = -0.1;
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::Num0) {
+                if self.lightbox.is_some() {
+                    // Reset lightbox zoom
+                    zoom_delta = 0.0;
+                    if let Some(lb) = &mut self.lightbox {
+                        lb.zoom = 1.0;
+                    }
+                } else {
+                    zoom_delta = 1.0 - self.zoom_level;
+                }
+            }
+        });
+
+        // Apply zoom to lightbox or document
+        if zoom_delta != 0.0 {
+            if let Some(lb) = &mut self.lightbox {
+                let factor = if zoom_delta > 0.0 { 1.25 } else { 1.0 / 1.25 };
+                lb.zoom = (lb.zoom * factor).clamp(0.1, 10.0);
+            } else {
+                self.zoom_level = (self.zoom_level + zoom_delta).clamp(0.5, 3.0);
+            }
+        }
+
+        if self.lightbox.is_none() {
         ctx.input(|i| {
             // Ctrl+O: Open file
             if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::O) {
@@ -2409,38 +2731,16 @@ impl eframe::App for MarkdownApp {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
                 quit_app = true;
             }
-            // Ctrl+Plus or Ctrl+=: Zoom in
-            if i.modifiers.ctrl
-                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
-            {
-                zoom_delta = 0.1;
-            }
-            // Ctrl+Minus: Zoom out
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
-                zoom_delta = -0.1;
-            }
-            // Ctrl+0: Reset zoom
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::Num0) {
-                zoom_delta = 1.0 - self.zoom_level;
-            }
             // Ctrl + scroll wheel for zoom
             if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
-                zoom_delta = if i.raw_scroll_delta.y > 0.0 {
-                    0.1
-                } else {
-                    -0.1
-                };
+                self.zoom_level = (self.zoom_level + if i.raw_scroll_delta.y > 0.0 { 0.1 } else { -0.1 }).clamp(0.5, 3.0);
             }
             // F5: Toggle file watching
             if i.key_pressed(egui::Key::F5) {
                 toggle_watch = true;
             }
         });
-
-        // Apply zoom changes
-        if zoom_delta != 0.0 {
-            self.zoom_level = (self.zoom_level + zoom_delta).clamp(0.5, 3.0);
-        }
+        } // end lightbox guard
 
         if open_dialog || new_tab {
             self.open_file_dialog();
@@ -2804,6 +3104,18 @@ impl eframe::App for MarkdownApp {
         if let Some(path) = open_in_new_tab {
             self.open_in_new_tab(path);
         }
+
+        // Check if a mermaid diagram was clicked → open lightbox
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if let Some(svg_bytes) = tab.cache.take_clicked_mermaid() {
+                self.lightbox_open_count += 1;
+                self.lightbox =
+                    LightboxState::new(ctx, &svg_bytes, self.lightbox_open_count);
+            }
+        }
+
+        // Lightbox overlay for enlarged mermaid diagrams
+        self.render_lightbox(ctx);
 
         // Drag and drop overlay
         if self.is_dragging {
