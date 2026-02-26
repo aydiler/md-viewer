@@ -1329,6 +1329,7 @@ dependencies = [
  "egui_extras",
  "merman",
  "pulldown-cmark 0.13.0",
+ "resvg",
  "syntect",
 ]
 
@@ -2706,7 +2707,6 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "regex",
- "resvg",
  "rfd",
  "serde",
 ]
