@@ -378,13 +378,18 @@ impl CodeBlock {
         let hash = hasher.finish();
 
         if !cache.mermaid_svgs.contains_key(&hash) {
-            match mermaid_rs_renderer::render(&self.content) {
-                Ok(svg_string) => {
+            match cache.mermaid_renderer.render_svg_readable_sync(&self.content) {
+                Ok(Some(svg_string)) => {
                     let svg_string = Self::sanitize_svg_font_family(&svg_string);
+                    let svg_string = Self::strip_stroke_text(&svg_string);
+                    let svg_string = Self::wrap_fallback_text(&svg_string);
                     cache.mermaid_svgs.insert(
                         hash,
                         Ok(Arc::from(svg_string.into_bytes().into_boxed_slice())),
                     );
+                }
+                Ok(None) => {
+                    cache.mermaid_svgs.insert(hash, Err("Unknown diagram type".into()));
                 }
                 Err(e) => {
                     cache.mermaid_svgs.insert(hash, Err(e.to_string()));
@@ -414,52 +419,251 @@ impl CodeBlock {
         }
     }
 
-    /// Sanitize SVG font-family attributes for resvg compatibility.
-    /// mermaid-rs-renderer outputs web font stacks with unescaped quotes
-    /// (e.g. `font-family="..., "Segoe UI", ..."`) which is invalid XML,
-    /// and uses CSS keywords (system-ui, ui-sans-serif) that resvg's fontdb
-    /// can't resolve. Replace with concrete system font names.
+    /// Sanitize SVG font-family values for resvg compatibility.
+    /// Handles both XML attributes (`font-family="..."`) and CSS properties
+    /// (`font-family: ...;`) since merman outputs fonts in CSS format.
+    /// Replaces web fonts (Arial, Trebuchet MS, etc.) that may not be installed
+    /// with concrete system font names common on Linux. Also sets a default
+    /// font-family on the root `<svg>` element for text that lacks one
+    /// (e.g. sequence diagram labels).
     fn sanitize_svg_font_family(svg: &str) -> String {
-        let needle = "font-family=\"";
-        if !svg.contains(needle) {
+        // DejaVu Sans first — it has the widest Unicode coverage (including →, ←, etc.)
+        // which prevents resvg from falling back to a monospace/bold font for missing glyphs.
+        let safe_attr = "DejaVu Sans, Noto Sans, Liberation Sans";
+        // Use single quotes — double quotes would break style="..." XML attributes
+        let safe_css = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', sans-serif";
+
+        let mut result = String::with_capacity(svg.len());
+        let mut remaining = svg;
+
+        while let Some(pos) = remaining.find("font-family") {
+            result.push_str(&remaining[..pos]);
+            let after = &remaining[pos + "font-family".len()..];
+
+            if let Some(after_eq) = after.strip_prefix("=\"") {
+                // XML attribute: font-family="..."
+                result.push_str("font-family=\"");
+                result.push_str(safe_attr);
+                result.push('"');
+                // Skip old value — find closing `"` (followed by `>`, ` `, `/`, or EOF)
+                let bytes = after_eq.as_bytes();
+                let mut end = after_eq.len();
+                for i in 0..bytes.len() {
+                    if bytes[i] == b'"' {
+                        match bytes.get(i + 1) {
+                            Some(b'>') | Some(b' ') | Some(b'/') | None => {
+                                end = i + 1;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                remaining = &after_eq[end..];
+            } else if after.starts_with(':') {
+                // CSS property: font-family: ...; or font-family:...;
+                result.push_str("font-family: ");
+                result.push_str(safe_css);
+                // Skip colon, optional whitespace, and value until ; or }
+                let after_colon = &after[1..];
+                let trimmed = after_colon.trim_start();
+                if let Some(end) = trimmed.find(|c: char| c == ';' || c == '}') {
+                    remaining = &trimmed[end..];
+                } else {
+                    remaining = "";
+                }
+            } else {
+                // Not a font-family declaration we recognize
+                result.push_str("font-family");
+                remaining = after;
+            }
+        }
+        result.push_str(remaining);
+
+        // Set default font-family on root <svg> so text without explicit
+        // font-family (e.g. sequence diagram labels) inherits a consistent font.
+        if let Some(svg_pos) = result.find("<svg ") {
+            if !result[svg_pos..].starts_with(&format!("<svg font-family")) {
+                let insert_pos = svg_pos + 5; // after "<svg "
+                result.insert_str(insert_pos, &format!("font-family=\"{}\" ", safe_attr));
+            }
+        }
+
+        result
+    }
+
+    /// Remove stroke-outline `<text>` elements from fallback groups.
+    /// merman duplicates each label with `stroke="#fff" stroke-width="3"` for
+    /// readability on colored backgrounds, but this makes text look bold/fat
+    /// when rendered by resvg on white node backgrounds.
+    fn strip_stroke_text(svg: &str) -> String {
+        if !svg.contains("stroke=\"#fff\"") {
+            return svg.to_owned();
+        }
+        let mut result = String::with_capacity(svg.len());
+        let mut remaining = svg;
+
+        while let Some(pos) = remaining.find("<text ") {
+            let tag_end = remaining[pos..].find('>').map(|p| pos + p + 1);
+            let Some(tag_end) = tag_end else {
+                break;
+            };
+            let tag = &remaining[pos..tag_end];
+
+            if tag.contains("stroke=\"#fff\"") {
+                // Copy everything before this <text>, skip the element entirely
+                result.push_str(&remaining[..pos]);
+                if let Some(close) = remaining[pos..].find("</text>") {
+                    remaining = &remaining[pos + close + 7..];
+                } else {
+                    remaining = &remaining[tag_end..];
+                }
+            } else {
+                // Keep this text element — copy up to and including the tag
+                result.push_str(&remaining[..tag_end]);
+                remaining = &remaining[tag_end..];
+            }
+        }
+        result.push_str(remaining);
+        result
+    }
+
+    /// Word-wrap long fallback text in merman's readable SVG output.
+    /// merman places all node label text on a single line in the fallback `<text>` elements,
+    /// but the node rects are sized for wrapped text. This causes overflow when text is long.
+    /// We split long labels into multiple `<tspan>` lines to fit within nodes.
+    fn wrap_fallback_text(svg: &str) -> String {
+        const FALLBACK_MARKER: &str = "data-merman-foreignobject=\"fallback\"";
+        if !svg.contains(FALLBACK_MARKER) {
             return svg.to_owned();
         }
 
-        // resvg's fontdb resolves explicit font names but not CSS generic families
-        // like "sans-serif". Use concrete names common across Linux distributions.
-        let replacement = "font-family=\"Noto Sans, DejaVu Sans, Liberation Sans\"";
+        // Average char width at 16px for Noto Sans ≈ 8.5px; node rects cap at ~260px
+        // Use ~28 chars as the wrap threshold
+        const MAX_CHARS: usize = 28;
 
-        let mut result = String::with_capacity(svg.len());
-        let mut rest = svg;
+        let mut result = String::with_capacity(svg.len() + 512);
+        let mut remaining = svg;
 
-        while let Some(pos) = rest.find(needle) {
-            result.push_str(&rest[..pos]);
-            result.push_str(replacement);
-            let after = &rest[pos + needle.len()..];
+        while let Some(marker_pos) = remaining.find(FALLBACK_MARKER) {
+            // Find the <g that starts this fallback group
+            let g_start = remaining[..marker_pos].rfind('<').unwrap_or(marker_pos);
+            // Copy everything before this group
+            result.push_str(&remaining[..g_start]);
 
-            // Skip past the original value — find the closing `"` (followed by `>`, ` `, `/`)
-            let bytes = after.as_bytes();
-            let mut close = None;
-            for i in 0..bytes.len() {
-                if bytes[i] == b'"' {
-                    match bytes.get(i + 1) {
-                        Some(b'>') | Some(b' ') | Some(b'/') | None => {
-                            close = Some(i);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            // Find </g> end
+            let after_marker = &remaining[marker_pos..];
+            if let Some(g_end_rel) = after_marker.find("</g>") {
+                let g_end = marker_pos + g_end_rel + 4;
+                let group = &remaining[g_start..g_end];
 
-            rest = if let Some(end) = close {
-                &after[end + 1..]
+                // Process: find <tspan ...>TEXT</tspan> patterns and wrap long ones
+                let processed = Self::wrap_tspans_in_group(group, MAX_CHARS);
+                result.push_str(&processed);
+
+                remaining = &remaining[g_end..];
             } else {
-                after
-            };
+                result.push_str(&remaining[g_start..]);
+                remaining = "";
+            }
         }
-        result.push_str(rest);
+        result.push_str(remaining);
         result
+    }
+
+    /// Process a single fallback `<g>` group, wrapping long tspan text.
+    fn wrap_tspans_in_group(group: &str, max_chars: usize) -> String {
+        let mut result = String::with_capacity(group.len() + 256);
+        let mut remaining = group;
+
+        while let Some(tspan_start) = remaining.find("<tspan") {
+            // Copy up to the tspan
+            result.push_str(&remaining[..tspan_start]);
+
+            let tspan_rest = &remaining[tspan_start..];
+            if let Some(close) = tspan_rest.find("</tspan>") {
+                let full_tspan = &tspan_rest[..close + 8];
+
+                // Extract x attribute and text content
+                let x_val = Self::extract_attr(full_tspan, "x");
+                let content_start = full_tspan.find('>').map(|p| p + 1).unwrap_or(0);
+                let content = &full_tspan[content_start..close];
+
+                let orig_dy = Self::extract_attr(full_tspan, "dy");
+                let orig_dy_val: f32 = orig_dy.parse().unwrap_or(0.0);
+
+                if content.trim().len() > max_chars {
+                    let lines = Self::word_wrap(content.trim(), max_chars);
+                    let n = lines.len();
+                    let line_spacing = 16.0; // matches font-size 16px
+
+                    for (i, line) in lines.iter().enumerate() {
+                        let dy = if i == 0 {
+                            if orig_dy_val == 0.0 && n > 1 {
+                                // Single-line node: center the wrapped block
+                                format!("{}", -(n as f32 - 1.0) * line_spacing * 0.5)
+                            } else if orig_dy_val < 0.0 && n > 1 {
+                                // Multi-line node, top line: shift further up
+                                // so sub-lines don't overlap with lower lines
+                                format!("{}", orig_dy_val - (n as f32 - 1.0) * line_spacing)
+                            } else {
+                                // Positive dy or single line: keep original
+                                orig_dy.to_string()
+                            }
+                        } else {
+                            format!("{line_spacing}")
+                        };
+                        result.push_str(&format!(
+                            "<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
+                            x_val, dy, line
+                        ));
+                    }
+                } else {
+                    result.push_str(full_tspan);
+                }
+
+                remaining = &tspan_rest[close + 8..];
+            } else {
+                result.push_str(tspan_rest);
+                remaining = "";
+            }
+        }
+        result.push_str(remaining);
+        result
+    }
+
+    /// Extract an XML attribute value by name.
+    fn extract_attr<'a>(tag: &'a str, name: &str) -> &'a str {
+        let needle = format!("{}=\"", name);
+        if let Some(start) = tag.find(&needle) {
+            let val = &tag[start + needle.len()..];
+            if let Some(end) = val.find('"') {
+                return &val[..end];
+            }
+        }
+        ""
+    }
+
+    /// Word-wrap text at word boundaries, keeping lines under max_chars.
+    fn word_wrap(text: &str, max_chars: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut current_line = String::new();
+
+        for word in text.split_whitespace() {
+            if current_line.is_empty() {
+                current_line = word.to_string();
+            } else if current_line.len() + 1 + word.len() <= max_chars {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current_line));
+                current_line = word.to_string();
+            }
+        }
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+        lines
     }
 }
 
@@ -589,7 +793,6 @@ fn default_theme(ui: &Ui) -> &str {
 }
 
 /// A cache used for storing content such as images.
-#[derive(Debug)]
 pub struct CommonMarkCache {
     // Everything stored in `CommonMarkCache` must take into account that
     // the cache is for multiple `CommonMarkviewer`s with different source_ids.
@@ -613,6 +816,24 @@ pub struct CommonMarkCache {
     /// Cached mermaid diagram SVGs: content hash → rendered SVG bytes or error message
     #[cfg(feature = "mermaid")]
     mermaid_svgs: HashMap<u64, Result<Arc<[u8]>, String>>,
+
+    /// Mermaid renderer instance (reused across renders)
+    #[cfg(feature = "mermaid")]
+    mermaid_renderer: merman::render::HeadlessRenderer,
+}
+
+impl std::fmt::Debug for CommonMarkCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("CommonMarkCache");
+        s.field("link_hooks", &self.link_hooks)
+            .field("scroll", &self.scroll)
+            .field("has_installed_loaders", &self.has_installed_loaders)
+            .field("header_positions", &self.header_positions)
+            .field("current_scroll_offset", &self.current_scroll_offset);
+        #[cfg(feature = "mermaid")]
+        s.field("mermaid_svgs", &self.mermaid_svgs);
+        s.finish()
+    }
 }
 
 #[allow(clippy::derivable_impls)]
@@ -630,6 +851,14 @@ impl Default for CommonMarkCache {
             current_scroll_offset: 0.0,
             #[cfg(feature = "mermaid")]
             mermaid_svgs: HashMap::new(),
+            #[cfg(feature = "mermaid")]
+            mermaid_renderer: merman::render::HeadlessRenderer::new()
+                .with_text_measurer(Arc::new(merman::render::DeterministicTextMeasurer {
+                    // Wider than default (0.55) to accommodate Noto Sans/DejaVu Sans
+                    // which are wider than the vendored Trebuchet MS metrics
+                    char_width_factor: 0.60,
+                    line_height_factor: 0.0, // use internal default
+                })),
         }
     }
 }
