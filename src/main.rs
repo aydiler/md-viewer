@@ -3005,10 +3005,13 @@ impl eframe::App for MarkdownApp {
                     // Show current file path from active tab
                     if let Some(tab) = self.tabs.get(self.active_tab) {
                         if tab.path.exists() {
-                            ui.label(
-                                egui::RichText::new(tab.path.display().to_string())
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(tab.path.display().to_string())
+                                        .small()
+                                        .color(ui.visuals().weak_text_color()),
+                                )
+                                .truncate(),
                             );
                         }
                     }
