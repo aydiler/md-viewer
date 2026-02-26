@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::collections::hash_map::DefaultHasher;
 #[cfg(feature = "mermaid")]
 use std::hash::{Hash, Hasher};
+#[cfg(feature = "mermaid")]
+use std::sync::mpsc;
 
 use crate::pulldown::ScrollableCache;
 
@@ -19,7 +21,7 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-#[cfg(feature = "better_syntax_highlighting")]
+#[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid"))]
 use std::sync::LazyLock;
 
 #[cfg(feature = "better_syntax_highlighting")]
@@ -365,6 +367,84 @@ impl CodeBlock {
 }
 
 #[cfg(feature = "mermaid")]
+enum MermaidState {
+    /// Background thread is rendering this diagram
+    Rendering,
+    /// Rendered and ready to display (texture is 2x for crisp lightbox zoom)
+    Ready {
+        texture: egui::TextureHandle,
+        size: egui::Vec2,
+    },
+    /// Rendering failed
+    Error(String),
+}
+
+#[cfg(feature = "mermaid")]
+struct MermaidRenderResult {
+    hash: u64,
+    result: Result<MermaidRendered, String>,
+}
+
+#[cfg(feature = "mermaid")]
+struct MermaidRendered {
+    image: egui::ColorImage,
+    size: egui::Vec2,
+}
+
+#[cfg(feature = "mermaid")]
+static MERMAID_FONTDB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
+    let mut db = resvg::usvg::fontdb::Database::new();
+    db.load_system_fonts();
+    Arc::new(db)
+});
+
+#[cfg(feature = "mermaid")]
+fn rasterize_mermaid_svg(svg_bytes: &[u8]) -> Option<(egui::ColorImage, egui::Vec2)> {
+    let opts = resvg::usvg::Options {
+        fontdb: Arc::clone(&MERMAID_FONTDB),
+        ..Default::default()
+    };
+    let tree = resvg::usvg::Tree::from_data(svg_bytes, &opts).ok()?;
+    let svg_size = tree.size();
+
+    // Rasterize at 2x for crisp lightbox zoom (matches LightboxState::new)
+    let scale = 2.0_f32;
+    let w = (svg_size.width() * scale) as u32;
+    let h = (svg_size.height() * scale) as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    // Convert premultiplied RGBA → straight RGBA for egui
+    let pixels = pixmap.data();
+    let mut rgba = Vec::with_capacity(pixels.len());
+    for chunk in pixels.chunks_exact(4) {
+        let a = chunk[3] as f32 / 255.0;
+        if a > 0.0 {
+            rgba.push((chunk[0] as f32 / a).min(255.0) as u8);
+            rgba.push((chunk[1] as f32 / a).min(255.0) as u8);
+            rgba.push((chunk[2] as f32 / a).min(255.0) as u8);
+        } else {
+            rgba.push(0);
+            rgba.push(0);
+            rgba.push(0);
+        }
+        rgba.push(chunk[3]);
+    }
+
+    let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+    let size = egui::vec2(svg_size.width(), svg_size.height());
+    Some((image, size))
+}
+
+#[cfg(feature = "mermaid")]
 impl CodeBlock {
     fn render_mermaid(
         &self,
@@ -377,46 +457,90 @@ impl CodeBlock {
         self.content.hash(&mut hasher);
         let hash = hasher.finish();
 
-        if !cache.mermaid_svgs.contains_key(&hash) {
-            match cache.mermaid_renderer.render_svg_readable_sync(&self.content) {
-                Ok(Some(svg_string)) => {
-                    let svg_string = Self::sanitize_svg_font_family(&svg_string);
-                    let svg_string = Self::strip_stroke_text(&svg_string);
-                    let svg_string = Self::wrap_fallback_text(&svg_string);
-                    cache.mermaid_svgs.insert(
-                        hash,
-                        Ok(Arc::from(svg_string.into_bytes().into_boxed_slice())),
+        // Poll for completed background renders
+        while let Ok(result) = cache.mermaid_rx.try_recv() {
+            // Clear the rendering slot if this result is from the active thread
+            if cache.mermaid_rendering == Some(result.hash) {
+                cache.mermaid_rendering = None;
+            }
+            match result.result {
+                Ok(rendered) => {
+                    let texture = ui.ctx().load_texture(
+                        format!("mermaid_{}", result.hash),
+                        rendered.image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    cache.mermaid_states.insert(
+                        result.hash,
+                        MermaidState::Ready {
+                            texture,
+                            size: rendered.size,
+                        },
                     );
                 }
-                Ok(None) => {
-                    cache.mermaid_svgs.insert(hash, Err("Unknown diagram type".into()));
-                }
-                Err(e) => {
-                    cache.mermaid_svgs.insert(hash, Err(e.to_string()));
+                Err(err) => {
+                    cache.mermaid_states.insert(result.hash, MermaidState::Error(err));
                 }
             }
         }
 
-        match cache.mermaid_svgs.get(&hash) {
-            Some(Ok(svg_bytes)) => {
-                let uri = format!("bytes://mermaid_{hash}.svg");
+        // First encounter: insert as Rendering placeholder, spawn only if slot is free
+        if !cache.mermaid_states.contains_key(&hash) {
+            cache.mermaid_states.insert(hash, MermaidState::Rendering);
+
+            if cache.mermaid_rendering.is_none() {
+                Self::spawn_mermaid_render(hash, &self.content, cache);
+            }
+        }
+
+        // Promote: if this diagram is waiting and no thread is active, spawn now.
+        // Since egui processes blocks in document order, the first Rendering block
+        // encountered after the slot clears is always the topmost waiting one.
+        if matches!(cache.mermaid_states.get(&hash), Some(MermaidState::Rendering))
+            && cache.mermaid_rendering.is_none()
+        {
+            Self::spawn_mermaid_render(hash, &self.content, cache);
+        }
+
+        // Display based on current state
+        let mut clicked: Option<(egui::TextureHandle, egui::Vec2)> = None;
+
+        match cache.mermaid_states.get(&hash) {
+            Some(MermaidState::Rendering) => {
+                // Placeholder with loading text
+                let w = max_width.min(options.max_width(ui));
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(w, 200.0), egui::Sense::hover());
+                if ui.is_rect_visible(rect) {
+                    ui.painter()
+                        .rect_filled(rect, 4.0, ui.visuals().faint_bg_color);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Rendering diagram\u{2026}",
+                        egui::FontId::proportional(14.0),
+                        ui.visuals().text_color().gamma_multiply(0.5),
+                    );
+                }
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Some(MermaidState::Ready { texture, size }) => {
+                let sized_texture = egui::load::SizedTexture::new(texture.id(), *size);
                 let response = ui.add(
-                    egui::Image::new(egui::ImageSource::Bytes {
-                        uri: uri.into(),
-                        bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
-                    })
-                    .fit_to_original_size(1.0)
-                    .max_width(options.max_width(ui).min(max_width))
-                    .sense(egui::Sense::click()),
+                    egui::Image::new(egui::ImageSource::Texture(sized_texture))
+                        .fit_to_original_size(1.0)
+                        .max_width(options.max_width(ui).min(max_width))
+                        .sense(egui::Sense::click()),
                 );
                 if response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 if response.clicked() {
-                    cache.clicked_mermaid = Some(svg_bytes.clone());
+                    clicked = Some((texture.clone(), *size));
                 }
             }
-            Some(Err(err_msg)) => {
+            Some(MermaidState::Error(err_msg)) => {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
                     format!("Mermaid render error: {err_msg}"),
@@ -424,6 +548,37 @@ impl CodeBlock {
             }
             None => unreachable!(),
         }
+
+        if let Some(data) = clicked {
+            cache.clicked_mermaid = Some(data);
+        }
+    }
+
+    /// Spawn a background thread to render a mermaid diagram and mark it as active.
+    fn spawn_mermaid_render(hash: u64, content: &str, cache: &mut CommonMarkCache) {
+        cache.mermaid_rendering = Some(hash);
+        let content = content.to_owned();
+        let tx = cache.mermaid_tx.clone();
+        let renderer = cache.mermaid_renderer.clone();
+
+        std::thread::spawn(move || {
+            let result = match renderer.render_svg_readable_sync(&content) {
+                Ok(Some(svg_string)) => {
+                    let svg_string = CodeBlock::sanitize_svg_font_family(&svg_string);
+                    let svg_string = CodeBlock::strip_stroke_text(&svg_string);
+                    let svg_string = CodeBlock::wrap_fallback_text(&svg_string);
+                    let svg_bytes = svg_string.into_bytes();
+
+                    match rasterize_mermaid_svg(&svg_bytes) {
+                        Some((image, size)) => Ok(MermaidRendered { image, size }),
+                        None => Err("Failed to rasterize SVG".to_string()),
+                    }
+                }
+                Ok(None) => Err("Unknown diagram type".to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(MermaidRenderResult { hash, result });
+        });
     }
 
     /// Sanitize SVG font-family values for resvg compatibility.
@@ -854,17 +1009,30 @@ pub struct CommonMarkCache {
     /// Current scroll offset, set before rendering to calculate content-relative positions.
     current_scroll_offset: f32,
 
-    /// Cached mermaid diagram SVGs: content hash → rendered SVG bytes or error message
+    /// Mermaid diagram render states: content hash → rendering/ready/error
     #[cfg(feature = "mermaid")]
-    mermaid_svgs: HashMap<u64, Result<Arc<[u8]>, String>>,
+    mermaid_states: HashMap<u64, MermaidState>,
+
+    /// Channel sender for background mermaid render results
+    #[cfg(feature = "mermaid")]
+    mermaid_tx: mpsc::Sender<MermaidRenderResult>,
+
+    /// Channel receiver for background mermaid render results
+    #[cfg(feature = "mermaid")]
+    mermaid_rx: mpsc::Receiver<MermaidRenderResult>,
 
     /// Mermaid renderer instance (reused across renders)
     #[cfg(feature = "mermaid")]
     mermaid_renderer: merman::render::HeadlessRenderer,
 
-    /// Set when a mermaid diagram is clicked (consumed by the app for lightbox display)
+    /// Set when a mermaid diagram is clicked (texture + logical size for lightbox)
     #[cfg(feature = "mermaid")]
-    clicked_mermaid: Option<Arc<[u8]>>,
+    clicked_mermaid: Option<(egui::TextureHandle, egui::Vec2)>,
+
+    /// Hash of the diagram that currently has an active background thread.
+    /// Only one diagram renders at a time so they appear top-to-bottom.
+    #[cfg(feature = "mermaid")]
+    mermaid_rendering: Option<u64>,
 }
 
 impl std::fmt::Debug for CommonMarkCache {
@@ -876,7 +1044,7 @@ impl std::fmt::Debug for CommonMarkCache {
             .field("header_positions", &self.header_positions)
             .field("current_scroll_offset", &self.current_scroll_offset);
         #[cfg(feature = "mermaid")]
-        s.field("mermaid_svgs", &self.mermaid_svgs);
+        s.field("mermaid_states_count", &self.mermaid_states.len());
         #[cfg(feature = "mermaid")]
         s.field("clicked_mermaid", &self.clicked_mermaid.is_some());
         s.finish()
@@ -886,6 +1054,9 @@ impl std::fmt::Debug for CommonMarkCache {
 #[allow(clippy::derivable_impls)]
 impl Default for CommonMarkCache {
     fn default() -> Self {
+        #[cfg(feature = "mermaid")]
+        let (mermaid_tx, mermaid_rx) = mpsc::channel();
+
         Self {
             #[cfg(feature = "better_syntax_highlighting")]
             ps: Arc::clone(&GLOBAL_SYNTAX_SET),
@@ -897,7 +1068,11 @@ impl Default for CommonMarkCache {
             header_positions: HashMap::new(),
             current_scroll_offset: 0.0,
             #[cfg(feature = "mermaid")]
-            mermaid_svgs: HashMap::new(),
+            mermaid_states: HashMap::new(),
+            #[cfg(feature = "mermaid")]
+            mermaid_tx,
+            #[cfg(feature = "mermaid")]
+            mermaid_rx,
             #[cfg(feature = "mermaid")]
             mermaid_renderer: merman::render::HeadlessRenderer::new()
                 .with_text_measurer(Arc::new(merman::render::DeterministicTextMeasurer {
@@ -909,6 +1084,8 @@ impl Default for CommonMarkCache {
                 })),
             #[cfg(feature = "mermaid")]
             clicked_mermaid: None,
+            #[cfg(feature = "mermaid")]
+            mermaid_rendering: None,
         }
     }
 }
@@ -955,9 +1132,10 @@ impl CommonMarkCache {
         Ok(())
     }
 
-    /// Take the clicked mermaid SVG bytes (if any). Returns `Some` once per click.
+    /// Take the clicked mermaid texture and size (if any). Returns `Some` once per click.
+    /// The texture is pre-rasterized at 2x resolution for crisp lightbox zoom.
     #[cfg(feature = "mermaid")]
-    pub fn take_clicked_mermaid(&mut self) -> Option<Arc<[u8]>> {
+    pub fn take_clicked_mermaid(&mut self) -> Option<(egui::TextureHandle, egui::Vec2)> {
         self.clicked_mermaid.take()
     }
 

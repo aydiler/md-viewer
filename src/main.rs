@@ -932,75 +932,13 @@ struct LightboxState {
     zoom: f32,
     /// Unique ID per open — prevents stale egui Area/ScrollArea state between opens
     open_id: u64,
+    /// Tracks scroll offset for zoom-to-cursor (we maintain our own copy because
+    /// egui's ScrollArea may clamp the old offset when content size changes mid-zoom)
+    scroll_offset: egui::Vec2,
 }
 
-impl LightboxState {
-    /// Rasterize SVG once at high resolution and upload as GPU texture.
-    fn new(ctx: &egui::Context, svg_bytes: &[u8], open_id: u64) -> Option<Self> {
-        use std::sync::Arc;
-
-        // Cache the font database — loading system fonts is expensive (~50ms)
-        static FONTDB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
-            let mut db = resvg::usvg::fontdb::Database::new();
-            db.load_system_fonts();
-            Arc::new(db)
-        });
-
-        let opts = resvg::usvg::Options {
-            fontdb: Arc::clone(&FONTDB),
-            ..Default::default()
-        };
-        let tree = resvg::usvg::Tree::from_data(svg_bytes, &opts).ok()?;
-        let svg_size = tree.size();
-
-        // Rasterize at 2x the SVG's native size for crisp zooming up to ~200%
-        let scale = 2.0_f32;
-        let w = (svg_size.width() * scale) as u32;
-        let h = (svg_size.height() * scale) as u32;
-        if w == 0 || h == 0 {
-            return None;
-        }
-
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::from_scale(scale, scale),
-            &mut pixmap.as_mut(),
-        );
-
-        // Convert premultiplied RGBA → straight RGBA for egui
-        let pixels = pixmap.data();
-        let mut rgba = Vec::with_capacity(pixels.len());
-        for chunk in pixels.chunks_exact(4) {
-            let a = chunk[3] as f32 / 255.0;
-            if a > 0.0 {
-                rgba.push((chunk[0] as f32 / a).min(255.0) as u8);
-                rgba.push((chunk[1] as f32 / a).min(255.0) as u8);
-                rgba.push((chunk[2] as f32 / a).min(255.0) as u8);
-            } else {
-                rgba.push(0);
-                rgba.push(0);
-                rgba.push(0);
-            }
-            rgba.push(chunk[3]);
-        }
-
-        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-        let texture = ctx.load_texture(
-            format!("lightbox_{open_id}"),
-            image,
-            egui::TextureOptions::LINEAR, // smooth scaling
-        );
-
-        let base_size = egui::vec2(svg_size.width(), svg_size.height());
-        Some(Self {
-            texture,
-            base_size,
-            zoom: 1.0,
-            open_id,
-        })
-    }
-}
+// LightboxState is constructed directly from pre-rasterized mermaid textures
+// (see take_clicked_mermaid in CommonMarkCache)
 
 struct MarkdownApp {
     tabs: Vec<Tab>,
@@ -2358,18 +2296,21 @@ impl MarkdownApp {
             });
 
         // 3. Apply scroll-wheel zoom (proportional to scroll amount for smooth feel)
+        let old_zoom = lightbox.zoom;
         if self.lightbox_scroll != 0.0 {
             // ~10% per scroll notch, smooth with proportional delta
             let factor = (1.0_f32 + self.lightbox_scroll * 0.08).clamp(0.5, 2.0);
             lightbox.zoom = (lightbox.zoom * factor).clamp(0.1, 10.0);
         }
+        let zoom_changed = (lightbox.zoom - old_zoom).abs() > f32::EPSILON;
 
         // 4. Image — GPU texture scaling, no re-rasterization
         let padding = 40.0;
         let area_rect = screen_rect.shrink(padding);
         let area_size = area_rect.size();
         let zoom = lightbox.zoom;
-        let display_size = lightbox.base_size * zoom;
+        let base_size = lightbox.base_size;
+        let display_size = base_size * zoom;
         let tex_id = lightbox.texture.id();
         let tex_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
@@ -2381,6 +2322,51 @@ impl MarkdownApp {
             screen_rect.center().y - area_size.y / 2.0,
         );
 
+        // Pre-compute zoom-to-cursor offset BEFORE ScrollArea renders,
+        // so it uses the correct offset on the same frame (no one-frame jitter).
+        let pre_offset: Option<egui::Vec2> = if zoom_changed {
+            ctx.input(|i| i.pointer.latest_pos()).map(|mouse_pos| {
+                // area_pos ≈ viewport origin (no scrollbar/frame margins)
+                let mouse_in_vp = mouse_pos - area_pos;
+
+                let old_display = base_size * old_zoom;
+                let new_display = display_size;
+
+                let old_content = egui::vec2(
+                    old_display.x.max(area_size.x),
+                    old_display.y.max(area_size.y),
+                );
+                let new_content = egui::vec2(
+                    new_display.x.max(area_size.x),
+                    new_display.y.max(area_size.y),
+                );
+
+                let old_pad = (old_content - old_display) * 0.5;
+                let new_pad = (new_content - new_display) * 0.5;
+
+                let frac = (mouse_in_vp + lightbox.scroll_offset - old_pad)
+                    / old_display;
+
+                let new_offset = frac * new_display + new_pad - mouse_in_vp;
+
+                let max_offset = egui::vec2(
+                    (new_content.x - area_size.x).max(0.0),
+                    (new_content.y - area_size.y).max(0.0),
+                );
+
+                egui::vec2(
+                    new_offset.x.clamp(0.0, max_offset.x),
+                    new_offset.y.clamp(0.0, max_offset.y),
+                )
+            })
+        } else {
+            None
+        };
+
+        if let Some(offset) = pre_offset {
+            lightbox.scroll_offset = offset;
+        }
+
         egui::Area::new(egui::Id::new("lightbox_image").with(oid))
             .order(egui::Order::Tooltip)
             .movable(false)
@@ -2389,70 +2375,70 @@ impl MarkdownApp {
                 ui.set_min_size(area_size);
                 ui.set_max_size(area_size);
 
-                egui::ScrollArea::both()
+                // Only enable scroll/drag on axes where image overflows the viewport
+                let mut scroll_area = egui::ScrollArea::new([
+                    display_size.x > area_size.x,
+                    display_size.y > area_size.y,
+                ])
                     .id_salt(egui::Id::new("lightbox_scroll").with(oid))
                     .max_width(area_size.x)
                     .max_height(area_size.y)
                     .scroll_bar_visibility(
                         egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                     )
-                    .drag_to_scroll(true)
-                    .show(ui, |ui| {
-                        // Center the image when it's smaller than the viewport
-                        let pad_x =
-                            ((area_size.x - display_size.x) / 2.0).max(0.0);
-                        let pad_y =
-                            ((area_size.y - display_size.y) / 2.0).max(0.0);
-                        if pad_x > 0.0 || pad_y > 0.0 {
-                            ui.add_space(0.0); // ensure layout cursor is active
-                            let content_size = egui::vec2(
-                                display_size.x + pad_x * 2.0,
-                                display_size.y + pad_y * 2.0,
-                            )
-                            .max(area_size);
-                            ui.allocate_ui_at_rect(
-                                egui::Rect::from_min_size(
-                                    ui.cursor().min + egui::vec2(pad_x, pad_y),
-                                    display_size,
-                                ),
-                                |ui| {
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        display_size,
-                                        egui::Sense::click(),
-                                    );
-                                    if ui.is_rect_visible(rect) {
-                                        let mut mesh =
-                                            egui::Mesh::with_texture(tex_id);
-                                        mesh.add_rect_with_uv(
-                                            rect,
-                                            tex_uv,
-                                            egui::Color32::WHITE,
-                                        );
-                                        ui.painter()
-                                            .add(egui::Shape::mesh(mesh));
-                                    }
-                                    if response.double_clicked() {
-                                        lightbox.zoom = 1.0;
-                                    }
-                                },
-                            );
-                            // Reserve the full content area so ScrollArea
-                            // knows the true extent for panning.
-                            ui.allocate_space(content_size);
-                            return;
-                        }
+                    .drag_to_scroll(true);
 
-                        let (rect, response) =
-                            ui.allocate_exact_size(display_size, egui::Sense::click());
-                        if ui.is_rect_visible(rect) {
+                // Set the pre-computed offset so ScrollArea renders at the
+                // correct position on this frame (avoids one-frame lag).
+                if let Some(offset) = pre_offset {
+                    scroll_area = scroll_area
+                        .horizontal_scroll_offset(offset.x)
+                        .vertical_scroll_offset(offset.y);
+                }
+
+                let scroll_output = scroll_area.show(ui, |ui| {
+                        // Allocate content: at least area_size for centering,
+                        // larger when image overflows (for scroll panning)
+                        let content_size = egui::vec2(
+                            display_size.x.max(area_size.x),
+                            display_size.y.max(area_size.y),
+                        );
+                        let (content_rect, response) = ui.allocate_exact_size(
+                            content_size,
+                            egui::Sense::click(),
+                        );
+                        // Draw image centered within the content rect
+                        let image_rect = egui::Rect::from_center_size(
+                            content_rect.center(),
+                            display_size,
+                        );
+                        if ui.is_rect_visible(image_rect) {
                             let mut mesh = egui::Mesh::with_texture(tex_id);
-                            mesh.add_rect_with_uv(rect, tex_uv, egui::Color32::WHITE);
+                            mesh.add_rect_with_uv(
+                                image_rect,
+                                tex_uv,
+                                egui::Color32::WHITE,
+                            );
                             ui.painter().add(egui::Shape::mesh(mesh));
                         }
                         if response.double_clicked() {
                             lightbox.zoom = 1.0;
+                            lightbox.scroll_offset = egui::Vec2::ZERO;
+                        }
+                        // Click outside image area → close lightbox
+                        if response.clicked() {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                if !image_rect.contains(pos) {
+                                    should_close = true;
+                                }
+                            }
                         }
                     });
+
+                // Sync tracking: captures drag-to-scroll changes on non-zoom frames
+                if pre_offset.is_none() {
+                    lightbox.scroll_offset = scroll_output.state.offset;
+                }
             });
 
         // 5. Close button (top-right)
@@ -3106,11 +3092,17 @@ impl eframe::App for MarkdownApp {
         }
 
         // Check if a mermaid diagram was clicked → open lightbox
+        // Texture is pre-rasterized at 2x by background thread — no work on click
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            if let Some(svg_bytes) = tab.cache.take_clicked_mermaid() {
+            if let Some((texture, base_size)) = tab.cache.take_clicked_mermaid() {
                 self.lightbox_open_count += 1;
-                self.lightbox =
-                    LightboxState::new(ctx, &svg_bytes, self.lightbox_open_count);
+                self.lightbox = Some(LightboxState {
+                    texture,
+                    base_size,
+                    zoom: 1.0,
+                    open_id: self.lightbox_open_count,
+                    scroll_offset: egui::Vec2::ZERO,
+                });
             }
         }
 

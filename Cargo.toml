@@ -55,9 +55,6 @@ clap = { version = "4", features = ["derive"] }
 # Performance
 mimalloc = "0.1"
 
-# SVG rasterization for lightbox (pre-render once, zoom via GPU texture scaling)
-resvg = "0.45"
-
 # Serialization for persistence
 serde = { version = "1", features = ["derive"] }
 
