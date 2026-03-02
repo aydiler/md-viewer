@@ -2593,8 +2593,7 @@ impl eframe::App for MarkdownApp {
             ctx.set_visuals(visuals);
         }
 
-        // TEMP: Disable zoom for MCP testing debug
-        // ctx.set_zoom_factor(self.zoom_level);
+        ctx.set_zoom_factor(self.zoom_level);
 
         // Update window title only when it changes
         let title = self.window_title();
