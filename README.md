@@ -15,6 +15,8 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ### Rendering
 - **GitHub Flavored Markdown** - Full GFM support including tables, task lists, and footnotes
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
+- **Mermaid Diagrams** - Flowcharts, sequence diagrams, and more rendered natively via [merman](https://github.com/Latias94/merman) (click to enlarge)
+- **HTML Tables** - Rendered as formatted grids with proper cell padding
 - **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
 - **Unicode Support** - System font fallbacks (Noto, DejaVu) for emojis, CJK, and non-Latin scripts
 - **60 FPS Rendering** - Smooth scrolling with viewport-based lazy rendering
@@ -22,7 +24,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ### Navigation
 - **Tab System** - Open multiple documents with tab bar (Ctrl+Click links to open in new tab)
-- **File Explorer** - Hierarchical sidebar with lazy-loading directories, right-click to copy file contents
+- **File Explorer** - Hierarchical sidebar with lazy-loading directories and sorting options
 - **Outline Sidebar** - Click-to-navigate table of contents from document headers
 - **Navigation Buttons** - Back/forward buttons in title bar for quick history navigation
 - **Per-Tab History** - Independent back/forward navigation within each tab (Alt+Left/Right)
@@ -31,7 +33,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ### View
 - **Dark & Light Themes** - Toggle with Ctrl+D
 - **Zoom** - 50% to 300% zoom (Ctrl++/-/0 or Ctrl+Scroll)
-- **Live Reload** - Auto-refresh on file changes when watching is enabled
+- **Live Reload** - Auto-refresh on file changes (enabled by default)
 
 ### Usability
 - **Drag and Drop** - Drop markdown files onto the window to open
@@ -42,7 +44,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ## Screenshots
 
 ### Dark Mode
-*File explorer, document outline, and Rust syntax highlighting*
+*File explorer, mermaid diagrams, and document outline*
 
 ![Dark Mode](screenshots/dark-mode.png)
 
@@ -55,6 +57,11 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 *200+ languages with semantic coloring for keywords, types, and comments*
 
 ![Syntax Highlighting](screenshots/syntax-highlighting.png)
+
+### Tables
+*Markdown tables and HTML tables rendered as formatted grids*
+
+![Tables](screenshots/tables.png)
 
 ## Keyboard Shortcuts
 
@@ -148,12 +155,11 @@ sudo pacman -S --needed \
 ## Usage
 
 ```bash
-# Open a file
+# Open a file (live reload is enabled by default)
 md-viewer README.md
 
-# Open with live reload (auto-refresh on file changes)
-md-viewer README.md --watch
-md-viewer README.md -w
+# Disable live reload
+md-viewer README.md --no-watch
 ```
 
 ## Technical Details
@@ -168,6 +174,7 @@ md-viewer README.md -w
 
 - [eframe/egui](https://github.com/emilk/egui) - Immediate mode GUI framework
 - [egui_commonmark](https://github.com/lampsitter/egui_commonmark) - Markdown rendering (vendored fork with typography improvements)
+- [merman](https://github.com/Latias94/merman) - Mermaid diagram rendering
 - [syntect](https://github.com/trishume/syntect) - Syntax highlighting
 - [notify](https://github.com/notify-rs/notify) - File watching
 - [rfd](https://github.com/PolyMeilex/rfd) - Native file dialogs
