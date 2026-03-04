@@ -1736,7 +1736,10 @@ impl MarkdownApp {
 
                                 // Header title
                                 let display_text = if header.title.len() > 35 {
-                                    let end = header.title.floor_char_boundary(32);
+                                    let mut end = 32.min(header.title.len());
+                                    while end > 0 && !header.title.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
                                     format!("{}...", &header.title[..end])
                                 } else {
                                     header.title.clone()
@@ -2382,7 +2385,10 @@ impl MarkdownApp {
                 .max_width(area_size.x)
                 .max_height(area_size.y)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .drag_to_scroll(true);
+                .scroll_source(egui::scroll_area::ScrollSource {
+                    drag: true,
+                    ..Default::default()
+                });
 
                 // Set the pre-computed offset so ScrollArea renders at the
                 // correct position on this frame (avoids one-frame lag).

@@ -2,7 +2,7 @@
 name = "md-viewer"
 version = "0.1.2"
 edition = "2021"
-rust-version = "1.76"
+rust-version = "1.80"
 description = "Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload"
 license = "MIT"
 repository = "https://github.com/aydiler/md-viewer"
@@ -66,6 +66,9 @@ regex = "1.12.2"
 [features]
 default = []
 # mcp = ["dep:egui-mcp-bridge"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("mcp"))'] }
 
 [profile.release]
 opt-level = "z"
