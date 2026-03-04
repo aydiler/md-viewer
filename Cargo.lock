@@ -1189,9 +1189,9 @@ dependencies = [
 
 [[package]]
 name = "dugong"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4077ba5f1c35786f54d4d79ab42157faccd73299379c85d876e563c14df00752"
+checksum = "4f556979da2846f6d06c65845edd1fa8493a2ede41bdb9cf1f86c4863bf9014f"
 dependencies = [
  "dugong-graphlib",
  "rustc-hash 2.1.1",
@@ -1201,9 +1201,9 @@ dependencies = [
 
 [[package]]
 name = "dugong-graphlib"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b72288e0abadd71001daa437b990705d22139c4955d5ec8d506fae2b5fbeb888"
+checksum = "acb5f0d6bce4db8166f3c6beeae7d785061c3b7b7758ed8106ab0bd5c725f26c"
 dependencies = [
  "hashbrown 0.16.1",
  "rustc-hash 2.1.1",
@@ -2672,9 +2672,9 @@ dependencies = [
 
 [[package]]
 name = "manatee"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06a60659280bfe4c896104ddf874f0b55b8b7a56ccc408febe901d959aa2bba3"
+checksum = "5580c9d30889244c7f243a08875caf2df57fc5b47a1fad75fa9f55b571e5e8d6"
 dependencies = [
  "indexmap",
  "nalgebra",
@@ -2737,9 +2737,9 @@ dependencies = [
 
 [[package]]
 name = "merman"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "117a4117f1d40d7671cb5ae1a7040ca13273593373ca865083284fe90f90af99"
+checksum = "f6a65ee6f8257b6f574f50daff0a5bbecb6f45161d7c33f01840a86fe0f47dd1"
 dependencies = [
  "merman-core",
  "merman-render",
@@ -2748,9 +2748,9 @@ dependencies = [
 
 [[package]]
 name = "merman-core"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "107f1557a039e9ec9ba306d967f23fd00fe0ac1a02b5b1cabc4df52686b7d820"
+checksum = "1674ddf393f80c1a495066493753b6addb2de3fbd6cf913db747042c60f7290c"
 dependencies = [
  "chrono",
  "euclid",
@@ -2775,9 +2775,9 @@ dependencies = [
 
 [[package]]
 name = "merman-render"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfb79389760a5dd2c49e49825f135530bd97d4167a53436c51f82093145096c6"
+checksum = "dca3da9cf1f29f8811705b4f0877d1f11cf3d1ea9ac31dc3dd8d01cb6941839e"
 dependencies = [
  "base64",
  "chrono",
