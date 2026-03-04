@@ -21,12 +21,10 @@ use egui_mcp_bridge::{McpBridge, McpUiExt};
 const APP_KEY: &str = "md-viewer-state";
 
 /// Compiled regex for parsing markdown headers (lazy, compiled once)
-static HEADER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.+)$").unwrap());
+static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.+)$").unwrap());
 
 /// Compiled regex for parsing markdown links (lazy, compiled once)
-static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
+static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
 /// System font paths for fallback (Arch Linux / common Linux paths)
 const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
@@ -871,9 +869,7 @@ fn setup_fonts(ctx: &egui::Context) {
 
     if loaded_fonts.is_empty() {
         log::warn!("No system fonts loaded. Unicode characters may show as red triangles.");
-        log::warn!(
-            "Install noto-fonts and noto-fonts-cjk for full Unicode support."
-        );
+        log::warn!("Install noto-fonts and noto-fonts-cjk for full Unicode support.");
     } else {
         log::info!(
             "Loaded {} font fallbacks for Unicode support",
@@ -993,7 +989,8 @@ impl MarkdownApp {
         cc.egui_ctx.memory_mut(|mem| mem.data = Default::default());
 
         // Disable egui's built-in Ctrl+/- zoom — we handle zoom ourselves
-        cc.egui_ctx.options_mut(|opt| opt.zoom_with_keyboard = false);
+        cc.egui_ctx
+            .options_mut(|opt| opt.zoom_with_keyboard = false);
 
         // Set constant styles once at init (never changes at runtime)
         cc.egui_ctx.style_mut(|style| {
@@ -1834,7 +1831,9 @@ impl MarkdownApp {
                     tab.scroll_offset = viewport.min.y;
                     tab.cache.set_scroll_offset(viewport.min.y);
 
-                    let base_uri = tab.path.parent()
+                    let base_uri = tab
+                        .path
+                        .parent()
                         .map(|p| format!("file://{}/", p.display()))
                         .unwrap_or_else(|| "file://".to_string());
 
@@ -2344,8 +2343,7 @@ impl MarkdownApp {
                 let old_pad = (old_content - old_display) * 0.5;
                 let new_pad = (new_content - new_display) * 0.5;
 
-                let frac = (mouse_in_vp + lightbox.scroll_offset - old_pad)
-                    / old_display;
+                let frac = (mouse_in_vp + lightbox.scroll_offset - old_pad) / old_display;
 
                 let new_offset = frac * new_display + new_pad - mouse_in_vp;
 
@@ -2380,13 +2378,11 @@ impl MarkdownApp {
                     display_size.x > area_size.x,
                     display_size.y > area_size.y,
                 ])
-                    .id_salt(egui::Id::new("lightbox_scroll").with(oid))
-                    .max_width(area_size.x)
-                    .max_height(area_size.y)
-                    .scroll_bar_visibility(
-                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                    )
-                    .drag_to_scroll(true);
+                .id_salt(egui::Id::new("lightbox_scroll").with(oid))
+                .max_width(area_size.x)
+                .max_height(area_size.y)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .drag_to_scroll(true);
 
                 // Set the pre-computed offset so ScrollArea renders at the
                 // correct position on this frame (avoids one-frame lag).
@@ -2397,43 +2393,35 @@ impl MarkdownApp {
                 }
 
                 let scroll_output = scroll_area.show(ui, |ui| {
-                        // Allocate content: at least area_size for centering,
-                        // larger when image overflows (for scroll panning)
-                        let content_size = egui::vec2(
-                            display_size.x.max(area_size.x),
-                            display_size.y.max(area_size.y),
-                        );
-                        let (content_rect, response) = ui.allocate_exact_size(
-                            content_size,
-                            egui::Sense::click(),
-                        );
-                        // Draw image centered within the content rect
-                        let image_rect = egui::Rect::from_center_size(
-                            content_rect.center(),
-                            display_size,
-                        );
-                        if ui.is_rect_visible(image_rect) {
-                            let mut mesh = egui::Mesh::with_texture(tex_id);
-                            mesh.add_rect_with_uv(
-                                image_rect,
-                                tex_uv,
-                                egui::Color32::WHITE,
-                            );
-                            ui.painter().add(egui::Shape::mesh(mesh));
-                        }
-                        if response.double_clicked() {
-                            lightbox.zoom = 1.0;
-                            lightbox.scroll_offset = egui::Vec2::ZERO;
-                        }
-                        // Click outside image area → close lightbox
-                        if response.clicked() {
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                if !image_rect.contains(pos) {
-                                    should_close = true;
-                                }
+                    // Allocate content: at least area_size for centering,
+                    // larger when image overflows (for scroll panning)
+                    let content_size = egui::vec2(
+                        display_size.x.max(area_size.x),
+                        display_size.y.max(area_size.y),
+                    );
+                    let (content_rect, response) =
+                        ui.allocate_exact_size(content_size, egui::Sense::click());
+                    // Draw image centered within the content rect
+                    let image_rect =
+                        egui::Rect::from_center_size(content_rect.center(), display_size);
+                    if ui.is_rect_visible(image_rect) {
+                        let mut mesh = egui::Mesh::with_texture(tex_id);
+                        mesh.add_rect_with_uv(image_rect, tex_uv, egui::Color32::WHITE);
+                        ui.painter().add(egui::Shape::mesh(mesh));
+                    }
+                    if response.double_clicked() {
+                        lightbox.zoom = 1.0;
+                        lightbox.scroll_offset = egui::Vec2::ZERO;
+                    }
+                    // Click outside image area → close lightbox
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            if !image_rect.contains(pos) {
+                                should_close = true;
                             }
                         }
-                    });
+                    }
+                });
 
                 // Sync tracking: captures drag-to-scroll changes on non-zoom frames
                 if pre_offset.is_none() {
@@ -2445,7 +2433,10 @@ impl MarkdownApp {
         egui::Area::new(egui::Id::new("lightbox_close").with(oid))
             .order(egui::Order::Tooltip)
             .movable(false)
-            .fixed_pos(egui::pos2(screen_rect.right() - 48.0, screen_rect.top() + 8.0))
+            .fixed_pos(egui::pos2(
+                screen_rect.right() - 48.0,
+                screen_rect.top() + 8.0,
+            ))
             .show(ctx, |ui| {
                 let btn = ui.add(
                     egui::Button::new(
@@ -2652,79 +2643,85 @@ impl eframe::App for MarkdownApp {
         }
 
         if self.lightbox.is_none() {
-        ctx.input(|i| {
-            // Ctrl+O: Open file
-            if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::O) {
-                open_dialog = true;
-            }
-            // Ctrl+Shift+O: Toggle outline
-            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
-                toggle_outline = true;
-            }
-            // Ctrl+Shift+E: Toggle file explorer
-            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
-                toggle_explorer = true;
-            }
-            // Ctrl+W: Close current tab
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
-                close_tab = true;
-            }
-            // Ctrl+T: New tab (open file dialog)
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::T) {
-                new_tab = true;
-            }
-            // Ctrl+Tab: Next tab
-            if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Tab) {
-                next_tab = true;
-            }
-            // Ctrl+Shift+Tab: Previous tab
-            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Tab) {
-                prev_tab = true;
-            }
-            // Ctrl+1-9: Focus tab by index
-            for (idx, key) in [
-                egui::Key::Num1,
-                egui::Key::Num2,
-                egui::Key::Num3,
-                egui::Key::Num4,
-                egui::Key::Num5,
-                egui::Key::Num6,
-                egui::Key::Num7,
-                egui::Key::Num8,
-                egui::Key::Num9,
-            ]
-            .iter()
-            .enumerate()
-            {
-                if i.modifiers.ctrl && i.key_pressed(*key) {
-                    focus_tab = Some(idx);
+            ctx.input(|i| {
+                // Ctrl+O: Open file
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::O) {
+                    open_dialog = true;
                 }
-            }
-            // Alt+Left: Go back in history
-            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
-                go_back = true;
-            }
-            // Alt+Right: Go forward in history
-            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight) {
-                go_forward = true;
-            }
-            // Ctrl+D: Toggle dark mode
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::D) {
-                toggle_dark = true;
-            }
-            // Ctrl+Q: Quit
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
-                quit_app = true;
-            }
-            // Ctrl + scroll wheel for zoom
-            if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
-                self.zoom_level = (self.zoom_level + if i.raw_scroll_delta.y > 0.0 { 0.1 } else { -0.1 }).clamp(0.5, 3.0);
-            }
-            // F5: Toggle file watching
-            if i.key_pressed(egui::Key::F5) {
-                toggle_watch = true;
-            }
-        });
+                // Ctrl+Shift+O: Toggle outline
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
+                    toggle_outline = true;
+                }
+                // Ctrl+Shift+E: Toggle file explorer
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
+                    toggle_explorer = true;
+                }
+                // Ctrl+W: Close current tab
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
+                    close_tab = true;
+                }
+                // Ctrl+T: New tab (open file dialog)
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::T) {
+                    new_tab = true;
+                }
+                // Ctrl+Tab: Next tab
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Tab) {
+                    next_tab = true;
+                }
+                // Ctrl+Shift+Tab: Previous tab
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Tab) {
+                    prev_tab = true;
+                }
+                // Ctrl+1-9: Focus tab by index
+                for (idx, key) in [
+                    egui::Key::Num1,
+                    egui::Key::Num2,
+                    egui::Key::Num3,
+                    egui::Key::Num4,
+                    egui::Key::Num5,
+                    egui::Key::Num6,
+                    egui::Key::Num7,
+                    egui::Key::Num8,
+                    egui::Key::Num9,
+                ]
+                .iter()
+                .enumerate()
+                {
+                    if i.modifiers.ctrl && i.key_pressed(*key) {
+                        focus_tab = Some(idx);
+                    }
+                }
+                // Alt+Left: Go back in history
+                if i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft) {
+                    go_back = true;
+                }
+                // Alt+Right: Go forward in history
+                if i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight) {
+                    go_forward = true;
+                }
+                // Ctrl+D: Toggle dark mode
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::D) {
+                    toggle_dark = true;
+                }
+                // Ctrl+Q: Quit
+                if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
+                    quit_app = true;
+                }
+                // Ctrl + scroll wheel for zoom
+                if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
+                    self.zoom_level = (self.zoom_level
+                        + if i.raw_scroll_delta.y > 0.0 {
+                            0.1
+                        } else {
+                            -0.1
+                        })
+                    .clamp(0.5, 3.0);
+                }
+                // F5: Toggle file watching
+                if i.key_pressed(egui::Key::F5) {
+                    toggle_watch = true;
+                }
+            });
         } // end lightbox guard
 
         if open_dialog || new_tab {
