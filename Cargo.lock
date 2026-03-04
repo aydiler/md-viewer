@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_backend_extended"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "egui",
  "egui_extras",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_extended"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "egui",
  "egui_commonmark_backend_extended",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "md-viewer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "eframe",
@@ -6321,3 +6321,7 @@ dependencies = [
  "syn 2.0.114",
  "winnow",
 ]
+
+[[patch.unused]]
+name = "egui_commonmark_macros_extended"
+version = "0.22.2"

@@ -397,6 +397,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -749,9 +755,9 @@ dependencies = [
 
 [[package]]
 name = "dugong"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4077ba5f1c35786f54d4d79ab42157faccd73299379c85d876e563c14df00752"
+checksum = "4f556979da2846f6d06c65845edd1fa8493a2ede41bdb9cf1f86c4863bf9014f"
 dependencies = [
  "dugong-graphlib",
  "rustc-hash 2.1.1",
@@ -761,9 +767,9 @@ dependencies = [
 
 [[package]]
 name = "dugong-graphlib"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b72288e0abadd71001daa437b990705d22139c4955d5ec8d506fae2b5fbeb888"
+checksum = "acb5f0d6bce4db8166f3c6beeae7d785061c3b7b7758ed8106ab0bd5c725f26c"
 dependencies = [
  "hashbrown",
  "rustc-hash 2.1.1",
@@ -874,19 +880,20 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_backend_extended"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "data-url",
  "egui",
  "egui_extras",
  "merman",
  "pulldown-cmark 0.13.0",
+ "resvg",
  "syntect",
 ]
 
 [[package]]
 name = "egui_commonmark_extended"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "document-features",
  "eframe",
@@ -900,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_macros_extended"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "document-features",
  "egui",
@@ -1158,6 +1165,7 @@ checksum = "457e789b3d1202543297a350643cf459f836cade38934e7a4cf6a39e7cde2905"
 dependencies = [
  "fontconfig-parser",
  "log",
+ "memmap2",
  "slotmap",
  "tinyvec",
  "ttf-parser",
@@ -1274,6 +1282,16 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "gif"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
+dependencies = [
+ "color_quant",
+ "weezl",
 ]
 
 [[package]]
@@ -1698,6 +1716,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "image-webp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e031e8e3d94711a9ccb5d6ea357439ef3dcbed361798bd4071dc4d9793fbe22f"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
+]
+
+[[package]]
 name = "imagesize"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1984,9 +2012,9 @@ dependencies = [
 
 [[package]]
 name = "manatee"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06a60659280bfe4c896104ddf874f0b55b8b7a56ccc408febe901d959aa2bba3"
+checksum = "5580c9d30889244c7f243a08875caf2df57fc5b47a1fad75fa9f55b571e5e8d6"
 dependencies = [
  "indexmap",
  "nalgebra",
@@ -2030,9 +2058,9 @@ dependencies = [
 
 [[package]]
 name = "merman"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "117a4117f1d40d7671cb5ae1a7040ca13273593373ca865083284fe90f90af99"
+checksum = "f6a65ee6f8257b6f574f50daff0a5bbecb6f45161d7c33f01840a86fe0f47dd1"
 dependencies = [
  "merman-core",
  "merman-render",
@@ -2041,9 +2069,9 @@ dependencies = [
 
 [[package]]
 name = "merman-core"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "107f1557a039e9ec9ba306d967f23fd00fe0ac1a02b5b1cabc4df52686b7d820"
+checksum = "1674ddf393f80c1a495066493753b6addb2de3fbd6cf913db747042c60f7290c"
 dependencies = [
  "chrono",
  "euclid",
@@ -2068,9 +2096,9 @@ dependencies = [
 
 [[package]]
 name = "merman-render"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfb79389760a5dd2c49e49825f135530bd97d4167a53436c51f82093145096c6"
+checksum = "dca3da9cf1f29f8811705b4f0877d1f11cf3d1ea9ac31dc3dd8d01cb6941839e"
 dependencies = [
  "base64",
  "chrono",
@@ -3002,6 +3030,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
 name = "quick-xml"
 version = "0.38.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3146,12 +3180,15 @@ version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8928798c0a55e03c9ca6c4c6846f76377427d2c1e1f7e6de3c06ae57942df43"
 dependencies = [
+ "gif",
+ "image-webp",
  "log",
  "pico-args",
  "rgb",
  "svgtypes 0.15.3",
  "tiny-skia",
  "usvg",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -5081,3 +5118,18 @@ name = "zmij"
 version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfcd145825aace48cff44a8844de64bf75feec3080e0aa5cdbde72961ae51a65"
+
+[[package]]
+name = "zune-core"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f423a2c17029964870cfaabb1f13dfab7d092a62a29a89264f4d36990ca414a"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.4.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
+dependencies = [
+ "zune-core",
+]
