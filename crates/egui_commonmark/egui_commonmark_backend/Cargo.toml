@@ -26,8 +26,14 @@ syntect = { version = "5.0.0", optional = true, default-features = false, featur
 ] }
 merman = { version = "0.1", features = ["render"], optional = true }
 resvg = { version = "0.45", optional = true }
+mitex = { version = "0.2", optional = true }
+typst-as-lib = { version = "0.15", features = ["typst-kit-fonts"], optional = true }
+typst-svg = { version = "0.14", optional = true }
+typst-render = { version = "0.14", optional = true }
+typst = { version = "0.14", optional = true }
 
 [features]
 better_syntax_highlighting = ["dep:syntect"]
 embedded_image = ["dep:data-url"]
 mermaid = ["dep:merman", "dep:resvg"]
+math = ["dep:mitex", "dep:typst-as-lib", "dep:typst-render", "dep:typst"]
