@@ -41,6 +41,7 @@ egui_commonmark_extended = { version = "0.22.2", features = [
     "load-images",
     "fetch",
     "mermaid",
+    "math",
 ] }
 
 # Image format support

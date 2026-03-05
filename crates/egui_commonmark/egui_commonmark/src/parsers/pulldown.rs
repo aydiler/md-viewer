@@ -151,9 +151,11 @@ impl CommonMarkViewerInternal {
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
 
+            let math_enabled = options.math_fn.is_some()
+                || cfg!(feature = "math");
             let mut events = pulldown_cmark::Parser::new_ext(
                 text,
-                parser_options_math(options.math_fn.is_some()),
+                parser_options_math(math_enabled),
             )
             .into_offset_iter()
             .enumerate()
@@ -579,11 +581,21 @@ impl CommonMarkViewerInternal {
                 }
             }
             pulldown_cmark::Event::InlineMath(tex) => {
+                #[cfg(feature = "math")]
+                {
+                    crate::render_math(ui, cache, &tex, true);
+                }
+                #[cfg(not(feature = "math"))]
                 if let Some(math_fn) = options.math_fn {
                     math_fn(ui, &tex, true);
                 }
             }
             pulldown_cmark::Event::DisplayMath(tex) => {
+                #[cfg(feature = "math")]
+                {
+                    crate::render_math(ui, cache, &tex, false);
+                }
+                #[cfg(not(feature = "math"))]
                 if let Some(math_fn) = options.math_fn {
                     math_fn(ui, &tex, false);
                 }

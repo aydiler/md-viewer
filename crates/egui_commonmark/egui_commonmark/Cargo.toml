@@ -75,6 +75,9 @@ embedded_image = ["egui_commonmark_backend_extended/embedded_image"]
 ## Render mermaid diagram code blocks as SVG images
 mermaid = ["egui_commonmark_backend_extended/mermaid"]
 
+## Render LaTeX math formulas via typst+mitex
+math = ["egui_commonmark_backend_extended/math"]
+
 [dev-dependencies]
 eframe = { version = "0.33", default-features = false, features = [
     "default_fonts",

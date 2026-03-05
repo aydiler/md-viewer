@@ -4,11 +4,11 @@ use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(feature = "mermaid")]
+#[cfg(any(feature = "mermaid", feature = "math"))]
 use std::collections::hash_map::DefaultHasher;
-#[cfg(feature = "mermaid")]
+#[cfg(any(feature = "mermaid", feature = "math"))]
 use std::hash::{Hash, Hasher};
-#[cfg(feature = "mermaid")]
+#[cfg(any(feature = "mermaid", feature = "math"))]
 use std::sync::mpsc;
 
 use crate::pulldown::ScrollableCache;
@@ -21,7 +21,7 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-#[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid"))]
+#[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid", feature = "math"))]
 use std::sync::LazyLock;
 
 #[cfg(feature = "better_syntax_highlighting")]
@@ -863,6 +863,305 @@ impl CodeBlock {
     }
 }
 
+// ── Math rendering (LaTeX → typst+mitex → SVG → rasterize) ─────────────────
+
+#[cfg(feature = "math")]
+enum MathState {
+    /// Background thread is rendering this formula
+    Rendering,
+    /// Rendered and ready to display
+    Ready {
+        texture: egui::TextureHandle,
+        size: egui::Vec2,
+    },
+    /// Rendering failed - show styled fallback
+    Error(String),
+}
+
+#[cfg(feature = "math")]
+struct MathRenderResult {
+    hash: u64,
+    result: Result<MathRendered, String>,
+}
+
+#[cfg(feature = "math")]
+struct MathRendered {
+    image: egui::ColorImage,
+    size: egui::Vec2,
+}
+
+/// Typst preamble defining mitex helper functions needed to compile mitex output.
+/// These map mitex's custom function names to standard Typst math functions.
+#[cfg(feature = "math")]
+const MITEX_PREAMBLE: &str = r#"
+#let mitexmathbf(it) = math.bold(math.upright(it))
+#let mitexsqrt(..args) = {
+  if args.pos().len() == 1 { $sqrt(#args.pos().at(0))$ }
+  else if args.pos().len() == 2 { $root(#args.pos().at(0), #args.pos().at(1))$ }
+}
+#let mitexdisplay(it) = math.display(it)
+#let mitexinline(it) = math.inline(it)
+#let mitexscript(it) = math.script(it)
+#let mitexsscript(it) = math.sscript(it)
+#let mitexbold(it) = math.bold(math.upright(it))
+#let mitexupright(it) = math.upright(it)
+#let mitexitalic(it) = math.italic(it)
+#let mitexsans(it) = math.sans(it)
+#let mitexnot(it) = math.cancel(angle: 20deg, it)
+#let mitexlabel(it) = none
+#let mitexcaption(it) = none
+#let pmatrix = math.mat.with(delim: "(")
+#let bmatrix = math.mat.with(delim: "[")
+#let Bmatrix = math.mat.with(delim: "{")
+#let vmatrix = math.mat.with(delim: "|")
+#let Vmatrix = math.mat.with(delim: "||")
+#let aligned(..args) = args.pos().first()
+#let gathered(..args) = args.pos().first()
+#let mitexunderbrace(it) = math.underbrace(it)
+#let mitexoverbrace(it) = math.overbrace(it)
+#let stackrel(top, base) = math.attach(base, t: top)
+#let overset(top, base) = math.attach(base, t: top)
+#let textmath(it) = text(it)
+#let textbf(it) = text(weight: "bold", it)
+#let textit(it) = text(style: "italic", it)
+#let textrm(it) = text(it)
+"#;
+
+/// Render a LaTeX math formula: convert via mitex, compile via typst, rasterize directly.
+#[cfg(feature = "math")]
+fn render_math_formula(
+    latex: &str,
+    is_inline: bool,
+    fg: egui::Color32,
+    bg: egui::Color32,
+) -> Result<MathRendered, String> {
+    // 0. Decode common HTML entities that OCR/conversion tools may leave in math
+    let latex = latex
+        .replace("&#x26;", "&")
+        .replace("&#38;", "&")
+        .replace("&#x3C;", "<")
+        .replace("&#60;", "<")
+        .replace("&#x3E;", ">")
+        .replace("&#62;", ">")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+
+    // 1. Convert LaTeX → Typst math via mitex
+    let typst_math = mitex::convert_math(&latex, None).map_err(|e| format!("mitex: {e}"))?;
+
+    // 2. Build Typst source — render with transparent background so we get a clean
+    // alpha mask, then composite with egui colors in the pixel loop below.
+    let margin = if is_inline { "(x: 2pt, y: 2pt)" } else { "(x: 8pt, y: 6pt)" };
+
+    let source = format!(
+        r#"{preamble}
+#set page(width: auto, height: auto, margin: {margin}, fill: none)
+#set text(size: 16pt, fill: black)
+$ {math} $"#,
+        preamble = MITEX_PREAMBLE,
+        margin = margin,
+        math = typst_math,
+    );
+
+    // 3. Compile with typst
+    let engine = typst_as_lib::TypstEngine::builder()
+        .main_file(source)
+        .search_fonts_with(Default::default())
+        .build();
+
+    let result = engine.compile::<typst::layout::PagedDocument>();
+    let doc = result.output.map_err(|e| format!("typst: {e}"))?;
+
+    let page = doc.pages.first().ok_or("typst: no pages")?;
+
+    // 4. Render directly to pixels via typst-render (no SVG intermediary)
+    let pixel_per_pt = 3.0_f32;
+    let pixmap = typst_render::render(page, pixel_per_pt);
+
+    let w = pixmap.width() as usize;
+    let h = pixmap.height() as usize;
+    if w == 0 || h == 0 {
+        return Err("Empty render".into());
+    }
+
+    // Transparent background: typst-render outputs premultiplied RGBA.
+    // The alpha channel cleanly separates "ink" from "no ink".
+    // We boost alpha via pow(0.6) so thin strokes (like numerals) appear
+    // more solid, then composite fg over bg using the boosted alpha.
+    let pixels = pixmap.data();
+    let colors: Vec<egui::Color32> = pixels
+        .chunks_exact(4)
+        .map(|c| {
+            let a = c[3] as f32 / 255.0;
+            if a < 0.01 {
+                bg
+            } else {
+                // Boost alpha: pow < 1 pushes mid-alpha toward opaque,
+                // making thin anti-aliased strokes bolder.
+                let boosted = a.powf(0.6).min(1.0);
+                let inv = 1.0 - boosted;
+                let r = (fg.r() as f32 * boosted + bg.r() as f32 * inv) as u8;
+                let g = (fg.g() as f32 * boosted + bg.g() as f32 * inv) as u8;
+                let b = (fg.b() as f32 * boosted + bg.b() as f32 * inv) as u8;
+                egui::Color32::from_rgb(r, g, b)
+            }
+        })
+        .collect();
+
+    let image = egui::ColorImage {
+        size: [w, h],
+        pixels: colors,
+        source_size: egui::Vec2::new(w as f32, h as f32),
+    };
+    // Size in logical points (divide pixel size by scale)
+    let size = egui::vec2(w as f32 / pixel_per_pt, h as f32 / pixel_per_pt);
+    Ok(MathRendered { image, size })
+}
+
+/// Public function to render math from the callback. Called from the `render_math_fn` closure.
+/// Handles caching and background rendering following the mermaid pattern.
+#[cfg(feature = "math")]
+pub fn render_math(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    is_inline: bool,
+) {
+    let is_dark = ui.style().visuals.dark_mode;
+    let bg = ui.visuals().panel_fill;
+    let fg = ui.visuals().text_color();
+
+    // Hash content + theme for cache key
+    let mut hasher = DefaultHasher::new();
+    latex.hash(&mut hasher);
+    is_inline.hash(&mut hasher);
+    is_dark.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    // Poll for completed background renders
+    while let Ok(result) = cache.math_rx.try_recv() {
+        if cache.math_rendering == Some(result.hash) {
+            cache.math_rendering = None;
+        }
+        match result.result {
+            Ok(rendered) => {
+                let texture = ui.ctx().load_texture(
+                    format!("math_{}", result.hash),
+                    rendered.image,
+                    egui::TextureOptions::LINEAR,
+                );
+                cache.math_states.insert(
+                    result.hash,
+                    MathState::Ready {
+                        texture,
+                        size: rendered.size,
+                    },
+                );
+            }
+            Err(err) => {
+                cache.math_states.insert(result.hash, MathState::Error(err));
+            }
+        }
+    }
+
+    // First encounter: insert placeholder, spawn if slot is free
+    if !cache.math_states.contains_key(&hash) {
+        cache.math_states.insert(hash, MathState::Rendering);
+        if cache.math_rendering.is_none() {
+            spawn_math_render(hash, latex, is_inline, fg, bg, cache);
+        }
+    }
+
+    // Promote: if this formula is waiting and no thread is active, spawn now
+    if matches!(cache.math_states.get(&hash), Some(MathState::Rendering))
+        && cache.math_rendering.is_none()
+    {
+        spawn_math_render(hash, latex, is_inline, fg, bg, cache);
+    }
+
+    // Display based on current state
+    match cache.math_states.get(&hash) {
+        Some(MathState::Rendering) => {
+            if is_inline {
+                // Inline: small placeholder
+                ui.spinner();
+            } else {
+                // Display: placeholder box
+                let w = ui.available_width().min(400.0);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::hover());
+                if ui.is_rect_visible(rect) {
+                    ui.painter()
+                        .rect_filled(rect, 4.0, ui.visuals().faint_bg_color);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Rendering formula\u{2026}",
+                        egui::FontId::proportional(12.0),
+                        ui.visuals().text_color().gamma_multiply(0.5),
+                    );
+                }
+            }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        Some(MathState::Ready { texture, size }) => {
+            let sized_texture = egui::load::SizedTexture::new(texture.id(), *size);
+            if is_inline {
+                ui.add(
+                    egui::Image::new(egui::ImageSource::Texture(sized_texture))
+                        .fit_to_original_size(1.0),
+                );
+            } else {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        egui::Image::new(egui::ImageSource::Texture(sized_texture))
+                            .fit_to_original_size(1.0)
+                            .max_width(ui.available_width()),
+                    );
+                });
+                ui.add_space(8.0);
+            }
+        }
+        Some(MathState::Error(err_msg)) => {
+            // Styled fallback: show LaTeX source in a colored box
+            let frame = egui::Frame::new()
+                .inner_margin(4.0)
+                .corner_radius(2.0)
+                .fill(ui.visuals().faint_bg_color);
+            frame.show(ui, |ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("LaTeX error: {err_msg}"),
+                );
+                ui.monospace(latex);
+            });
+        }
+        None => unreachable!(),
+    }
+}
+
+#[cfg(feature = "math")]
+fn spawn_math_render(
+    hash: u64,
+    latex: &str,
+    is_inline: bool,
+    fg: egui::Color32,
+    bg: egui::Color32,
+    cache: &mut CommonMarkCache,
+) {
+    cache.math_rendering = Some(hash);
+    let latex = latex.to_owned();
+    let tx = cache.math_tx.clone();
+
+    std::thread::spawn(move || {
+        let result = render_math_formula(&latex, is_inline, fg, bg);
+        let _ = tx.send(MathRenderResult { hash, result });
+    });
+}
+
 #[cfg(not(feature = "better_syntax_highlighting"))]
 impl CodeBlock {
     fn pre_syntax_highlighting(
@@ -1033,6 +1332,22 @@ pub struct CommonMarkCache {
     /// Only one diagram renders at a time so they appear top-to-bottom.
     #[cfg(feature = "mermaid")]
     mermaid_rendering: Option<u64>,
+
+    /// Math formula render states: content hash → rendering/ready/error
+    #[cfg(feature = "math")]
+    math_states: HashMap<u64, MathState>,
+
+    /// Channel sender for background math render results
+    #[cfg(feature = "math")]
+    math_tx: mpsc::Sender<MathRenderResult>,
+
+    /// Channel receiver for background math render results
+    #[cfg(feature = "math")]
+    math_rx: mpsc::Receiver<MathRenderResult>,
+
+    /// Hash of the formula that currently has an active background thread
+    #[cfg(feature = "math")]
+    math_rendering: Option<u64>,
 }
 
 impl std::fmt::Debug for CommonMarkCache {
@@ -1047,6 +1362,8 @@ impl std::fmt::Debug for CommonMarkCache {
         s.field("mermaid_states_count", &self.mermaid_states.len());
         #[cfg(feature = "mermaid")]
         s.field("clicked_mermaid", &self.clicked_mermaid.is_some());
+        #[cfg(feature = "math")]
+        s.field("math_states_count", &self.math_states.len());
         s.finish()
     }
 }
@@ -1056,6 +1373,8 @@ impl Default for CommonMarkCache {
     fn default() -> Self {
         #[cfg(feature = "mermaid")]
         let (mermaid_tx, mermaid_rx) = mpsc::channel();
+        #[cfg(feature = "math")]
+        let (math_tx, math_rx) = mpsc::channel();
 
         Self {
             #[cfg(feature = "better_syntax_highlighting")]
@@ -1086,6 +1405,14 @@ impl Default for CommonMarkCache {
             clicked_mermaid: None,
             #[cfg(feature = "mermaid")]
             mermaid_rendering: None,
+            #[cfg(feature = "math")]
+            math_states: HashMap::new(),
+            #[cfg(feature = "math")]
+            math_tx,
+            #[cfg(feature = "math")]
+            math_rx,
+            #[cfg(feature = "math")]
+            math_rendering: None,
         }
     }
 }
