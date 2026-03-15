@@ -1302,11 +1302,17 @@ pub struct CommonMarkCache {
     scroll: HashMap<egui::Id, ScrollableCache>,
     pub(self) has_installed_loaders: bool,
 
-    /// Stores the y-position of each header (by normalized title) for scroll navigation.
+    /// Stores the y-position of each header (by key "title#occurrence") for scroll navigation.
     /// Populated during rendering, cleared on content change.
     header_positions: HashMap<String, f32>,
-    /// Current scroll offset, set before rendering to calculate content-relative positions.
+    /// Tracks how many times each normalized title has been seen during rendering,
+    /// so duplicate headers get distinct keys ("title#0", "title#1", etc.).
+    header_occurrence_counts: HashMap<String, usize>,
+    /// Current scroll offset (content coordinates), set before rendering.
     current_scroll_offset: f32,
+    /// Screen Y of the top of the scroll area, set before rendering.
+    /// Used to convert cursor screen coordinates to content coordinates.
+    scroll_area_screen_top: f32,
 
     /// Mermaid diagram render states: content hash → rendering/ready/error
     #[cfg(feature = "mermaid")]
@@ -1385,7 +1391,9 @@ impl Default for CommonMarkCache {
             scroll: Default::default(),
             has_installed_loaders: false,
             header_positions: HashMap::new(),
+            header_occurrence_counts: HashMap::new(),
             current_scroll_offset: 0.0,
+            scroll_area_screen_top: 0.0,
             #[cfg(feature = "mermaid")]
             mermaid_states: HashMap::new(),
             #[cfg(feature = "mermaid")]
@@ -1546,28 +1554,34 @@ impl CommonMarkCache {
             .unwrap_or_else(|| &self.ts.themes[default_theme(ui)])
     }
 
-    /// Set the current scroll offset before rendering.
-    /// This is used to calculate content-relative header positions.
-    pub fn set_scroll_offset(&mut self, offset: f32) {
+    /// Set the current scroll offset and screen area top before rendering.
+    /// `offset` is the content scroll offset (viewport.min.y).
+    /// `screen_top` is the screen Y of the top of the scroll area.
+    /// Also resets occurrence counts for the new render pass.
+    pub fn set_scroll_offset(&mut self, offset: f32, screen_top: f32) {
         self.current_scroll_offset = offset;
+        self.scroll_area_screen_top = screen_top;
+        self.header_occurrence_counts.clear();
     }
 
     /// Record the y-position of a header for scroll navigation.
-    /// Converts viewport-relative position to content-relative using scroll offset.
-    /// Only records if not already recorded (first render captures correct position).
-    pub fn record_header_position(&mut self, title: &str, viewport_y: f32) {
-        let key = title.trim().to_lowercase();
-        // Only record on first encounter to avoid position jumping
-        if !self.header_positions.contains_key(&key) {
-            let content_y = self.current_scroll_offset + viewport_y;
-            self.header_positions.insert(key, content_y);
-        }
+    /// `cursor_y` is the screen-space Y from `ui.cursor().top()` inside `show_viewport`.
+    /// Converts to content coordinates: content_y = scroll_offset + (cursor_y - screen_area_top).
+    /// Uses occurrence counting so duplicate titles get distinct keys ("title#0", "title#1").
+    /// Always updates so unstable first-frame positions get corrected on re-render.
+    pub fn record_header_position(&mut self, title: &str, cursor_y: f32) {
+        let normalized = title.trim().to_lowercase();
+        let occurrence = self.header_occurrence_counts.entry(normalized.clone()).or_insert(0);
+        let key = format!("{}#{}", normalized, occurrence);
+        *occurrence += 1;
+        let content_y = self.current_scroll_offset + (cursor_y - self.scroll_area_screen_top);
+        self.header_positions.insert(key, content_y);
     }
 
-    /// Get the y-position of a header by its title (content-relative).
+    /// Get the y-position of a header by its title and occurrence index (content-relative).
     /// Returns None if the header hasn't been rendered yet.
-    pub fn get_header_position(&self, title: &str) -> Option<f32> {
-        let key = title.trim().to_lowercase();
+    pub fn get_header_position(&self, title: &str, occurrence: usize) -> Option<f32> {
+        let key = format!("{}#{}", title.trim().to_lowercase(), occurrence);
         self.header_positions.get(&key).copied()
     }
 
@@ -1575,6 +1589,7 @@ impl CommonMarkCache {
     /// Should be called when content changes.
     pub fn clear_header_positions(&mut self) {
         self.header_positions.clear();
+        self.header_occurrence_counts.clear();
     }
 }
 

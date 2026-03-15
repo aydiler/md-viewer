@@ -144,6 +144,9 @@ struct Header {
     level: u8,
     title: String,
     line_number: usize,
+    /// Occurrence index for headers with the same title (0-based).
+    /// Used to disambiguate duplicate headers when looking up scroll positions.
+    occurrence: usize,
 }
 
 /// Result of parsing markdown headers
@@ -743,6 +746,7 @@ fn parse_headers(content: &str) -> ParsedHeaders {
     let re = &*HEADER_RE;
     let mut all_headers = Vec::new();
     let mut in_code_block = false;
+    let mut occurrence_counts: HashMap<String, usize> = HashMap::new();
 
     for (line_number, line) in content.lines().enumerate() {
         if line.trim_start().starts_with("```") {
@@ -755,11 +759,16 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         }
 
         if let Some(caps) = re.captures(line) {
+            let title = caps[2].trim().to_string();
+            let key = title.to_lowercase();
+            let occurrence = occurrence_counts.entry(key).or_insert(0);
             all_headers.push(Header {
                 level: caps[1].len() as u8,
-                title: caps[2].trim().to_string(),
+                title,
                 line_number,
+                occurrence: *occurrence,
             });
+            *occurrence += 1;
         }
     }
 
@@ -1783,7 +1792,7 @@ impl MarkdownApp {
         if let Some(idx) = clicked_header_index {
             if let Some(header) = tab.outline_headers.get(idx) {
                 // Try to get actual rendered position from cache first
-                if let Some(y_pos) = tab.cache.get_header_position(&header.title) {
+                if let Some(y_pos) = tab.cache.get_header_position(&header.title, header.occurrence) {
                     // Use exact position if available (header has been rendered)
                     tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
                 } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
@@ -1831,8 +1840,10 @@ impl MarkdownApp {
                 }
 
                 let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
+                    // Capture screen Y of the scroll area top before rendering any content.
+                    let screen_top = ui.cursor().top() + viewport.min.y;
                     tab.scroll_offset = viewport.min.y;
-                    tab.cache.set_scroll_offset(viewport.min.y);
+                    tab.cache.set_scroll_offset(viewport.min.y, screen_top);
 
                     let base_uri = tab
                         .path
@@ -1856,7 +1867,13 @@ impl MarkdownApp {
                         .show(ui, &mut tab.cache, &tab.content);
                 });
 
-                tab.last_content_height = scroll_output.content_size.y;
+                // If content height changed, layout reflowed (e.g. first frames are unstable).
+                // Clear cached header positions so they're re-recorded from the stable layout.
+                let new_content_height = scroll_output.content_size.y;
+                if (new_content_height - tab.last_content_height).abs() > 1.0 {
+                    tab.cache.clear_header_positions();
+                }
+                tab.last_content_height = new_content_height;
 
                 // Manual scroll handling for mouse wheel during text selection
                 let pointer_over_content = ui.ctx().input(|i| {
