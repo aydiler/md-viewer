@@ -132,6 +132,36 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
     }
 }
 
+/// Detect if text parsed as inline math (`$...$`) is actually NOT a real LaTeX
+/// formula. Returns true for currency amounts and other false positives like:
+/// - `$17.57` → parsed as InlineMath("17.57")
+/// - `$3,000–$4,000` → parsed as InlineMath("3,000–")
+///
+/// The approach: real LaTeX math ALWAYS contains structural syntax (backslash
+/// commands, superscripts, subscripts, braces, or known math operators).
+/// Anything without these markers is almost certainly a misparse.
+fn is_likely_currency(tex: &str) -> bool {
+    let trimmed = tex.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Real math indicators — if ANY of these are present, it's actual LaTeX
+    let has_math_syntax = trimmed.contains('\\')  // \frac, \sum, \int, etc.
+        || trimmed.contains('^')                   // superscript
+        || trimmed.contains('_')                   // subscript
+        || trimmed.contains('{')                   // grouping
+        || trimmed.contains('}');                   // grouping
+
+    // If it has math syntax, trust the parser — it's real math
+    if has_math_syntax {
+        return false;
+    }
+
+    // No math syntax found — this is almost certainly a currency/misparse
+    true
+}
+
 impl CommonMarkViewerInternal {
     /// Be aware that this acquires egui::Context internally.
     /// If split Id is provided then split points will be populated
@@ -581,13 +611,19 @@ impl CommonMarkViewerInternal {
                 }
             }
             pulldown_cmark::Event::InlineMath(tex) => {
-                #[cfg(feature = "math")]
-                {
-                    crate::render_math(ui, cache, &tex, true);
-                }
-                #[cfg(not(feature = "math"))]
-                if let Some(math_fn) = options.math_fn {
-                    math_fn(ui, &tex, true);
+                if is_likely_currency(&tex) {
+                    // Render as plain text with $ prefix instead of math
+                    let text: CowStr = format!("${tex}").into();
+                    self.event_text(text, ui, options);
+                } else {
+                    #[cfg(feature = "math")]
+                    {
+                        crate::render_math(ui, cache, &tex, true);
+                    }
+                    #[cfg(not(feature = "math"))]
+                    if let Some(math_fn) = options.math_fn {
+                        math_fn(ui, &tex, true);
+                    }
                 }
             }
             pulldown_cmark::Event::DisplayMath(tex) => {
