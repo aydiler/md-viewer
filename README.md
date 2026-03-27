@@ -44,22 +44,22 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ## Screenshots
 
 ### Dark Mode
-*File explorer, mermaid diagrams, and document outline*
+*Mermaid flowchart, tech stack table, file explorer, and outline sidebar*
 
 ![Dark Mode](screenshots/dark-mode.png)
 
-### Light Mode
-*Clean light theme with the same powerful features*
-
-![Light Mode](screenshots/light-mode.png)
-
 ### Syntax Highlighting
-*200+ languages with semantic coloring for keywords, types, and comments*
+*Rust and YAML code blocks with semantic coloring, sequence diagram below*
 
 ![Syntax Highlighting](screenshots/syntax-highlighting.png)
 
-### Tables
-*Markdown tables and HTML tables rendered as formatted grids*
+### Light Mode
+*Same features in clean light theme -- mermaid diagram and table rendering*
+
+![Light Mode](screenshots/light-mode.png)
+
+### Sequence Diagrams & Blockquotes
+*Mermaid sequence diagram, blockquote, and bullet list rendering*
 
 ![Tables](screenshots/tables.png)
 
@@ -164,7 +164,7 @@ md-viewer README.md --no-watch
 
 ## Technical Details
 
-- **Binary size**: ~8.7 MB (includes syntax highlighting, image support, X11+Wayland)
+- **Binary size**: ~35 MB (includes syntax highlighting, mermaid renderer, math rendering, image support, X11+Wayland). ~7 MB as snap.
 - **Startup time**: < 200ms
 - **Rendering**: 60 FPS with viewport-based clipping
 - **Memory**: Uses mimalloc for improved allocation performance
