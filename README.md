@@ -48,18 +48,23 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ![Dark Mode](screenshots/dark-mode.png)
 
-### Syntax Highlighting
-*Rust and YAML code blocks with semantic coloring, sequence diagram below*
+### Dark Mode -- Syntax Highlighting
+*Rust and YAML code blocks with semantic coloring, mermaid sequence diagram*
 
 ![Syntax Highlighting](screenshots/syntax-highlighting.png)
 
 ### Light Mode
-*Same features in clean light theme -- mermaid diagram and table rendering*
+*Documentation with bullet lists, blockquotes, inline code, and bash code blocks*
 
 ![Light Mode](screenshots/light-mode.png)
 
-### Sequence Diagrams & Blockquotes
-*Mermaid sequence diagram, blockquote, and bullet list rendering*
+### Light Mode -- API Docs
+*JSON syntax highlighting, inline code rendering, and outline navigation*
+
+![Syntax Highlighting Light](screenshots/syntax-highlighting-light.png)
+
+### Light Mode -- Tables & Lists
+*Troubleshooting table with inline code, ordered lists, and hyperlinks*
 
 ![Tables](screenshots/tables.png)
 
