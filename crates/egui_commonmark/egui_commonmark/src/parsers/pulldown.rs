@@ -163,6 +163,14 @@ fn is_likely_currency(tex: &str) -> bool {
 }
 
 impl CommonMarkViewerInternal {
+    /// Compute a hash of the text content for event cache lookup.
+    fn hash_content(text: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Be aware that this acquires egui::Context internally.
     /// If split Id is provided then split points will be populated
     pub(crate) fn show(
@@ -176,20 +184,32 @@ impl CommonMarkViewerInternal {
         let max_width = options.max_width(ui);
         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
 
+        // Compute content hash and ensure events are cached
+        let content_hash = Self::hash_content(text);
+        if cache.get_cached_events(content_hash).is_none() {
+            let math_enabled = options.math_fn.is_some() || cfg!(feature = "math");
+            let owned_events: Vec<(pulldown_cmark::Event<'static>, Range<usize>)> =
+                pulldown_cmark::Parser::new_ext(text, parser_options_math(math_enabled))
+                    .into_offset_iter()
+                    .map(|(event, range)| (event.into_static(), range))
+                    .collect();
+            cache.set_cached_events(content_hash, owned_events);
+        }
+
         let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
 
-            let math_enabled = options.math_fn.is_some()
-                || cfg!(feature = "math");
-            let mut events = pulldown_cmark::Parser::new_ext(
-                text,
-                parser_options_math(math_enabled),
-            )
-            .into_offset_iter()
-            .enumerate()
-            .peekable();
+            // Use cached events — clone the Vec reference data for iteration
+            // (events are 'static so this is cheap pointer copies, not re-parsing)
+            let events_data = cache.get_cached_events(content_hash)
+                .expect("events just cached")
+                .to_vec();
+            let mut events = events_data
+                .into_iter()
+                .enumerate()
+                .peekable();
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
@@ -811,10 +831,11 @@ impl CommonMarkViewerInternal {
                         }
                     });
                 }
-                // Record header position for scroll navigation
+                // Record header position for scroll navigation (use normalized key)
                 if let Some(y) = self.current_heading_y.take() {
                     if !self.current_heading_text.is_empty() {
-                        cache.record_header_position(&self.current_heading_text, y);
+                        let normalized = self.current_heading_text.trim().to_lowercase();
+                        cache.record_header_position(&normalized, y);
                     }
                 }
                 self.current_heading_text.clear();

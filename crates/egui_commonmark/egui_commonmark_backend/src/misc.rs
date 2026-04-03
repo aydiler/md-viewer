@@ -1300,6 +1300,10 @@ pub struct CommonMarkCache {
     link_hooks: HashMap<String, bool>,
 
     scroll: HashMap<egui::Id, ScrollableCache>,
+
+    /// Cached parsed markdown events to avoid re-parsing every frame.
+    /// Keyed by a hash of the source text. Cleared when cache is reset.
+    cached_events: Option<(u64, Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>)>,
     pub(self) has_installed_loaders: bool,
 
     /// Stores the y-position of each header (by normalized title) for scroll navigation.
@@ -1413,6 +1417,7 @@ impl Default for CommonMarkCache {
             math_rx,
             #[cfg(feature = "math")]
             math_rendering: None,
+            cached_events: None,
         }
     }
 }
@@ -1555,26 +1560,42 @@ impl CommonMarkCache {
     /// Record the y-position of a header for scroll navigation.
     /// Converts viewport-relative position to content-relative using scroll offset.
     /// Only records if not already recorded (first render captures correct position).
-    pub fn record_header_position(&mut self, title: &str, viewport_y: f32) {
-        let key = title.trim().to_lowercase();
+    /// The `normalized_key` should be a pre-computed lowercase key for the header title.
+    pub fn record_header_position(&mut self, normalized_key: &str, viewport_y: f32) {
         // Only record on first encounter to avoid position jumping
-        if !self.header_positions.contains_key(&key) {
+        if !self.header_positions.contains_key(normalized_key) {
             let content_y = self.current_scroll_offset + viewport_y;
-            self.header_positions.insert(key, content_y);
+            self.header_positions.insert(normalized_key.to_string(), content_y);
         }
     }
 
-    /// Get the y-position of a header by its title (content-relative).
+    /// Get the y-position of a header by its normalized title (content-relative).
     /// Returns None if the header hasn't been rendered yet.
-    pub fn get_header_position(&self, title: &str) -> Option<f32> {
-        let key = title.trim().to_lowercase();
-        self.header_positions.get(&key).copied()
+    /// The `normalized_key` should be a pre-computed lowercase key for the header title.
+    pub fn get_header_position(&self, normalized_key: &str) -> Option<f32> {
+        self.header_positions.get(normalized_key).copied()
     }
 
     /// Clear all recorded header positions.
     /// Should be called when content changes.
     pub fn clear_header_positions(&mut self) {
         self.header_positions.clear();
+    }
+
+    /// Get cached parsed events if the content hash matches.
+    pub fn get_cached_events(&self, content_hash: u64) -> Option<&[(pulldown_cmark::Event<'static>, std::ops::Range<usize>)]> {
+        self.cached_events.as_ref().and_then(|(hash, events)| {
+            if *hash == content_hash {
+                Some(events.as_slice())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Store parsed events in the cache.
+    pub fn set_cached_events(&mut self, content_hash: u64, events: Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>) {
+        self.cached_events = Some((content_hash, events));
     }
 }
 

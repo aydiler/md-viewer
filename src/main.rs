@@ -143,6 +143,10 @@ struct PersistedState {
 struct Header {
     level: u8,
     title: String,
+    /// Pre-computed truncated display title for outline sidebar
+    display_title: String,
+    /// Pre-computed lowercase key for header position cache lookups
+    normalized_title: String,
     line_number: usize,
 }
 
@@ -161,6 +165,8 @@ struct ExplorerAction {
     file_to_open: Option<PathBuf>,
     /// File to close (middle-click on open file)
     file_to_close: Option<PathBuf>,
+    /// Directory to toggle expansion (deferred to avoid clone)
+    dir_to_toggle: Option<PathBuf>,
 }
 
 /// Sort order for file explorer
@@ -190,11 +196,13 @@ enum FileTreeNode {
     File {
         path: PathBuf,
         name: String,
+        display_name: String,
         modified: Option<std::time::SystemTime>,
     },
     Directory {
         path: PathBuf,
         name: String,
+        display_name: String,
         modified: Option<std::time::SystemTime>,
         /// None = not yet loaded, Some = loaded (may be empty)
         children: Option<Vec<FileTreeNode>>,
@@ -253,16 +261,20 @@ impl FileExplorer {
             if entry_path.is_dir() {
                 // Show all directories - let users expand what they want
                 // (Avoids O(n×m) scanning during initial directory scan)
+                let display_name = truncate_display_name(&name, 22);
                 nodes.push(FileTreeNode::Directory {
                     path: entry_path,
                     name,
+                    display_name,
                     modified,
                     children: None, // Lazy - not loaded yet
                 });
             } else if Self::is_markdown_file(&entry_path) {
+                let display_name = truncate_display_name(&name, 25);
                 nodes.push(FileTreeNode::File {
                     path: entry_path,
                     name,
+                    display_name,
                     modified,
                 });
             }
@@ -502,11 +514,19 @@ struct Tab {
     last_content_height: f32,
     content_lines: usize,
     local_links: Vec<String>,
+    /// Cached base URI for markdown image/link resolution (e.g. "file:///path/to/dir/")
+    base_uri: String,
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
 }
 
 impl Tab {
+    fn compute_base_uri(path: &std::path::Path) -> String {
+        path.parent()
+            .map(|p| format!("file://{}/", p.display()))
+            .unwrap_or_else(|| "file://".to_string())
+    }
+
     fn new(path: PathBuf) -> Self {
         // Canonicalize path for consistent comparison with watcher events
         let path = path.canonicalize().unwrap_or(path);
@@ -514,6 +534,7 @@ impl Tab {
         let parsed = parse_headers(&content);
         let local_links = parse_local_links(&content);
         let content_lines = content.lines().count();
+        let base_uri = Self::compute_base_uri(&path);
 
         let mut cache = CommonMarkCache::default();
         for link in &local_links {
@@ -533,6 +554,7 @@ impl Tab {
             last_content_height: 0.0,
             content_lines,
             local_links,
+            base_uri,
             history_back: Vec::new(),
             history_forward: Vec::new(),
         }
@@ -549,9 +571,11 @@ impl Tab {
             cache.add_link_hook(link);
         }
 
+        let sample_path = PathBuf::from("Welcome");
         Self {
             id: egui::Id::new("sample"),
-            path: PathBuf::from("Welcome"),
+            base_uri: Self::compute_base_uri(&sample_path),
+            path: sample_path,
             content,
             cache,
             document_title: parsed.document_title,
@@ -584,6 +608,7 @@ impl Tab {
             self.content_lines = content.lines().count();
             self.content = content.into_owned();
             self.cache = CommonMarkCache::default();
+            self.base_uri = Self::compute_base_uri(&self.path);
 
             let parsed = parse_headers(&self.content);
             self.document_title = parsed.document_title;
@@ -611,6 +636,7 @@ impl Tab {
             self.cache = CommonMarkCache::default();
             self.scroll_offset = 0.0;
             self.pending_scroll_offset = None;
+            self.base_uri = Self::compute_base_uri(&self.path);
 
             let parsed = parse_headers(&self.content);
             self.document_title = parsed.document_title;
@@ -738,6 +764,20 @@ fn is_local_markdown_link(destination: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Truncate a string for display, adding "..." if it exceeds max_len.
+/// Respects char boundaries for UTF-8 safety.
+fn truncate_display_name(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        let mut end = (max_len - 3).min(s.len());
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    } else {
+        s.to_string()
+    }
+}
+
 /// Parse markdown headers from content, skipping code blocks.
 fn parse_headers(content: &str) -> ParsedHeaders {
     let re = &*HEADER_RE;
@@ -755,9 +795,14 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         }
 
         if let Some(caps) = re.captures(line) {
+            let title = caps[2].trim().to_string();
+            let normalized_title = title.to_lowercase();
+            let display_title = truncate_display_name(&title, 35);
             all_headers.push(Header {
                 level: caps[1].len() as u8,
-                title: caps[2].trim().to_string(),
+                title,
+                display_title,
+                normalized_title,
                 line_number,
             });
         }
@@ -967,6 +1012,9 @@ struct MarkdownApp {
     // Track state to avoid unconditional repaints
     last_applied_dark_mode: Option<bool>,
     last_window_title: String,
+    title_dirty: bool,
+    /// Cached set of open tab paths for file explorer highlighting (avoids per-frame syscalls)
+    open_tab_paths: HashSet<PathBuf>,
     // Lightbox overlay for enlarged mermaid diagrams
     lightbox: Option<LightboxState>,
     // Scroll delta captured from raw_input_hook for lightbox zoom (stripped from RawInput)
@@ -1122,12 +1170,16 @@ impl MarkdownApp {
             egui_ctx: cc.egui_ctx.clone(),
             last_applied_dark_mode: None,
             last_window_title: String::new(),
+            title_dirty: true,
+            open_tab_paths: HashSet::new(),
             lightbox: None,
             lightbox_scroll: 0.0,
             lightbox_open_count: 0,
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
+
+        app.refresh_open_tab_paths();
 
         if watch {
             app.start_watching();
@@ -1170,6 +1222,7 @@ impl MarkdownApp {
         // Check if already open
         if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
             self.active_tab = idx;
+            self.title_dirty = true;
             return;
         }
 
@@ -1177,6 +1230,8 @@ impl MarkdownApp {
         let tab = Tab::new(path);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        self.title_dirty = true;
+        self.refresh_open_tab_paths();
 
         // Update watcher if enabled
         if self.watch_enabled {
@@ -1191,6 +1246,8 @@ impl MarkdownApp {
         }
 
         self.tabs.remove(idx);
+        self.title_dirty = true;
+        self.refresh_open_tab_paths();
 
         // Adjust active tab index
         if self.active_tab >= self.tabs.len() {
@@ -1212,6 +1269,7 @@ impl MarkdownApp {
     fn next_tab(&mut self) {
         if self.tabs.len() > 1 {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.title_dirty = true;
         }
     }
 
@@ -1222,12 +1280,14 @@ impl MarkdownApp {
             } else {
                 self.active_tab - 1
             };
+            self.title_dirty = true;
         }
     }
 
     fn focus_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.active_tab = idx;
+            self.title_dirty = true;
         }
     }
 
@@ -1237,6 +1297,14 @@ impl MarkdownApp {
             .filter(|t| t.path.exists())
             .map(|t| t.path.clone())
             .collect()
+    }
+
+    /// Rebuild the cached open_tab_paths set (call after tab open/close/navigate)
+    fn refresh_open_tab_paths(&mut self) {
+        self.open_tab_paths.clear();
+        for tab in &self.tabs {
+            self.open_tab_paths.insert(tab.path.clone());
+        }
     }
 
     fn start_watching(&mut self) {
@@ -1413,8 +1481,9 @@ impl MarkdownApp {
         let mut refresh_tree = false;
 
         for path in changed_paths {
-            // Trigger flash effect for the changed file
-            self.flashing_paths.insert(path.clone(), now);
+            // Trigger flash effect for the changed file (use canonical path for consistent lookup)
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            self.flashing_paths.insert(canonical, now);
 
             // Also flash parent directories up to the explorer root
             if let Some(root) = &self.file_explorer.root {
@@ -1426,7 +1495,8 @@ impl MarkdownApp {
                 let mut current = path.parent();
                 while let Some(parent) = current {
                     if parent.starts_with(root) || parent == root {
-                        self.flashing_paths.insert(parent.to_path_buf(), now);
+                        self.flashing_paths
+                            .insert(parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()), now);
                     }
                     if parent == root {
                         break;
@@ -1576,6 +1646,7 @@ impl MarkdownApp {
         // Apply new active tab
         if let Some(idx) = new_active {
             self.active_tab = idx;
+            self.title_dirty = true;
         }
 
         // Handle close others
@@ -1584,6 +1655,8 @@ impl MarkdownApp {
             self.tabs.clear();
             self.tabs.push(kept);
             self.active_tab = 0;
+            self.title_dirty = true;
+            self.refresh_open_tab_paths();
             if self.watch_enabled {
                 self.update_watched_paths();
             }
@@ -1734,18 +1807,8 @@ impl MarkdownApp {
                                     }
                                 }
 
-                                // Header title
-                                let display_text = if header.title.len() > 35 {
-                                    let mut end = 32.min(header.title.len());
-                                    while end > 0 && !header.title.is_char_boundary(end) {
-                                        end -= 1;
-                                    }
-                                    format!("{}...", &header.title[..end])
-                                } else {
-                                    header.title.clone()
-                                };
-
-                                let response = ui.selectable_label(false, &display_text);
+                                // Header title (pre-computed truncation)
+                                let response = ui.selectable_label(false, &header.display_title);
 
                                 // Collect header for MCP
                                 #[cfg(feature = "mcp")]
@@ -1783,7 +1846,7 @@ impl MarkdownApp {
         if let Some(idx) = clicked_header_index {
             if let Some(header) = tab.outline_headers.get(idx) {
                 // Try to get actual rendered position from cache first
-                if let Some(y_pos) = tab.cache.get_header_position(&header.title) {
+                if let Some(y_pos) = tab.cache.get_header_position(&header.normalized_title) {
                     // Use exact position if available (header has been rendered)
                     tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
                 } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
@@ -1834,14 +1897,8 @@ impl MarkdownApp {
                     tab.scroll_offset = viewport.min.y;
                     tab.cache.set_scroll_offset(viewport.min.y);
 
-                    let base_uri = tab
-                        .path
-                        .parent()
-                        .map(|p| format!("file://{}/", p.display()))
-                        .unwrap_or_else(|| "file://".to_string());
-
                     CommonMarkViewer::new()
-                        .default_implicit_uri_scheme(&base_uri)
+                        .default_implicit_uri_scheme(&tab.base_uri)
                         .max_image_width(Some(800))
                         .default_width(Some(600))
                         .indentation_spaces(2)
@@ -2003,21 +2060,24 @@ impl MarkdownApp {
 
                 ui.separator();
 
+                // Pre-load children for all expanded dirs to avoid mutation during render
+                for dir in self.file_explorer.expanded_dirs.iter().cloned().collect::<Vec<_>>() {
+                    if self.file_explorer.get_children(&dir).is_none() {
+                        self.file_explorer.load_children(&dir);
+                    }
+                }
+
+                // Take tree to iterate without cloning, then put it back
+                let tree = std::mem::take(&mut self.file_explorer.tree);
+                // Clone the small set of open tab paths (avoids borrow conflict with &mut self)
+                let open_paths = self.open_tab_paths.clone();
+
                 // File tree inside ScrollArea
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .id_salt("file_explorer")
                     .show(ui, |ui| {
-                        // Collect open tab paths for highlighting
-                        let open_paths: HashSet<PathBuf> = self
-                            .tabs
-                            .iter()
-                            .filter(|t| t.path.exists())
-                            .map(|t| t.path.clone())
-                            .collect();
 
-                        // Clone tree to avoid borrow issues
-                        let tree = self.file_explorer.tree.clone();
                         for node in &tree {
                             let node_action = self.render_tree_node(ui, node, 0, &open_paths);
                             if node_action.file_to_open.is_some() {
@@ -2026,8 +2086,17 @@ impl MarkdownApp {
                             if node_action.file_to_close.is_some() {
                                 action.file_to_close = node_action.file_to_close;
                             }
+                            if node_action.dir_to_toggle.is_some() {
+                                action.dir_to_toggle = node_action.dir_to_toggle;
+                            }
                         }
                     });
+
+                // Put tree back and apply deferred toggle
+                self.file_explorer.tree = tree;
+                if let Some(ref dir_path) = action.dir_to_toggle {
+                    self.file_explorer.toggle_expanded(dir_path);
+                }
             });
 
         action
@@ -2035,15 +2104,11 @@ impl MarkdownApp {
 
     /// Calculate flash intensity for a path (0.0 = no flash, 1.0 = full flash)
     fn get_flash_intensity(&self, path: &PathBuf) -> f32 {
-        // Try the path directly first
-        let start_time = self.flashing_paths.get(path).or_else(|| {
-            // Try canonical path if direct lookup fails
-            path.canonicalize()
-                .ok()
-                .and_then(|canonical| self.flashing_paths.get(&canonical))
-        });
+        if self.flashing_paths.is_empty() {
+            return 0.0;
+        }
 
-        if let Some(start_time) = start_time {
+        if let Some(start_time) = self.flashing_paths.get(path) {
             let elapsed = start_time.elapsed().as_millis() as u64;
             if elapsed < FLASH_DURATION_MS {
                 // Fade out: 1.0 -> 0.0 over the duration
@@ -2068,7 +2133,7 @@ impl MarkdownApp {
         let indent = depth * 16;
 
         match node {
-            FileTreeNode::File { path, name, .. } => {
+            FileTreeNode::File { path, name, display_name, .. } => {
                 // Calculate flash intensity for this file
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -2080,20 +2145,12 @@ impl MarkdownApp {
                     // File icon
                     ui.label("📄");
 
-                    // Truncate long filenames
-                    let max_len = 25;
-                    let display_name = if name.len() > max_len {
-                        format!("{}...", &name[..max_len])
-                    } else {
-                        name.clone()
-                    };
-
                     // Highlight if file is open in a tab
                     let is_open = open_paths.contains(path);
                     let text = if is_open {
-                        egui::RichText::new(&display_name).strong()
+                        egui::RichText::new(display_name.as_str()).strong()
                     } else {
-                        egui::RichText::new(&display_name)
+                        egui::RichText::new(display_name.as_str())
                     };
 
                     let response = ui.selectable_label(is_open, text);
@@ -2109,7 +2166,7 @@ impl MarkdownApp {
                     }
 
                     // Show full name on hover if truncated
-                    if name.len() > max_len {
+                    if display_name.len() != name.len() {
                         response.clone().on_hover_text(name);
                     }
                     if response.clicked() {
@@ -2152,7 +2209,7 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
             }
-            FileTreeNode::Directory { path, name, .. } => {
+            FileTreeNode::Directory { path, name, display_name, .. } => {
                 // Calculate flash intensity for this directory
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -2183,16 +2240,8 @@ impl MarkdownApp {
                     let folder_icon = if is_expanded { "📂" } else { "📁" };
                     ui.label(folder_icon);
 
-                    // Truncate long folder names
-                    let max_len = 22;
-                    let display_name = if name.len() > max_len {
-                        format!("{}...", &name[..max_len])
-                    } else {
-                        name.clone()
-                    };
-
                     let response = ui.add(
-                        egui::Label::new(&display_name)
+                        egui::Label::new(display_name.as_str())
                             .selectable(false)
                             .sense(egui::Sense::click()),
                     );
@@ -2208,7 +2257,7 @@ impl MarkdownApp {
                     }
 
                     // Show full name on hover if truncated
-                    if name.len() > max_len {
+                    if display_name.len() != name.len() {
                         response.clone().on_hover_text(name);
                     }
 
@@ -2218,9 +2267,9 @@ impl MarkdownApp {
                     }
                 });
 
-                // Toggle AFTER rendering row but BEFORE rendering children
+                // Defer toggle to after tree is restored (avoids clone)
                 if should_toggle {
-                    self.file_explorer.toggle_expanded(path);
+                    action.dir_to_toggle = Some(path.clone());
                 }
 
                 // Paint flash overlay on top using the row rect
@@ -2236,17 +2285,10 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
 
-                // Render children if expanded
-                // Re-check expansion state (may have changed from click above)
-                // Clone children from original tree (not the stale clone) to allow mutable self access
+                // Render children if expanded (read from node directly, no clone needed)
                 if self.file_explorer.is_expanded(path) {
-                    // Lazy-load if marked expanded but not yet loaded (e.g., from session restore)
-                    if self.file_explorer.get_children(path).is_none() {
-                        self.file_explorer.load_children(path);
-                    }
-                    let child_nodes = self.file_explorer.get_children(path).cloned();
-                    if let Some(child_nodes) = child_nodes {
-                        for child in &child_nodes {
+                    if let FileTreeNode::Directory { children: Some(ref child_nodes), .. } = node {
+                        for child in child_nodes {
                             let child_action =
                                 self.render_tree_node(ui, child, depth + 1, open_paths);
                             if child_action.file_to_open.is_some() {
@@ -2254,6 +2296,9 @@ impl MarkdownApp {
                             }
                             if child_action.file_to_close.is_some() {
                                 action.file_to_close = child_action.file_to_close;
+                            }
+                            if child_action.dir_to_toggle.is_some() {
+                                action.dir_to_toggle = child_action.dir_to_toggle;
                             }
                         }
                     }
@@ -2592,11 +2637,16 @@ impl eframe::App for MarkdownApp {
 
         ctx.set_zoom_factor(self.zoom_level);
 
-        // Update window title only when it changes
-        let title = self.window_title();
-        if title != self.last_window_title {
-            self.last_window_title = title.clone();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        // Update window title only when dirty
+        if self.title_dirty {
+            self.title_dirty = false;
+            let title = self.window_title();
+            if title != self.last_window_title {
+                self.last_window_title = title;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                    self.last_window_title.clone(),
+                ));
+            }
         }
 
         // Handle keyboard shortcuts (suppressed when lightbox is open)
