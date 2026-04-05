@@ -236,6 +236,8 @@ struct FileExplorer {
     tree: Vec<FileTreeNode>,
     expanded_dirs: HashSet<PathBuf>,
     sort_order: SortOrder,
+    /// Receiver for async directory scan results (GVFS paths scan in background)
+    pending_scan: Option<Receiver<Vec<FileTreeNode>>>,
 }
 
 impl FileExplorer {
@@ -329,7 +331,8 @@ impl FileExplorer {
             .unwrap_or(false)
     }
 
-    /// Set root directory and rescan (shallow)
+    /// Set root directory and rescan (shallow).
+    /// For GVFS paths, scan runs in a background thread to avoid blocking the UI.
     fn set_root(&mut self, path: PathBuf) {
         // Convert empty path to current directory
         let path = if path.as_os_str().is_empty() {
@@ -338,12 +341,54 @@ impl FileExplorer {
             path
         };
         self.root = Some(path.clone());
-        self.tree = Self::scan_directory_shallow(&path, self.sort_order);
+        if is_gvfs_path(&path) {
+            // Scan in background thread — tree populates when ready
+            let sort_order = self.sort_order;
+            let (tx, rx) = mpsc::channel();
+            std::thread::Builder::new()
+                .name("gvfs-scan".into())
+                .spawn(move || {
+                    let tree = Self::scan_directory_shallow(&path, sort_order);
+                    let _ = tx.send(tree);
+                })
+                .expect("failed to spawn GVFS scan thread");
+            self.pending_scan = Some(rx);
+        } else {
+            self.tree = Self::scan_directory_shallow(&path, self.sort_order);
+        }
     }
 
-    /// Refresh the file tree (clears loaded state, rescans shallowly)
+    /// Check if a background scan completed and apply results
+    fn poll_pending_scan(&mut self) -> bool {
+        if let Some(rx) = &self.pending_scan {
+            if let Ok(tree) = rx.try_recv() {
+                self.tree = tree;
+                self.pending_scan = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Refresh the file tree (clears loaded state, rescans shallowly).
+    /// For GVFS paths, runs in background to avoid blocking the UI thread.
     fn refresh(&mut self) {
         if let Some(root) = &self.root.clone() {
+            if is_gvfs_path(root) {
+                // Re-scan in background
+                let sort_order = self.sort_order;
+                let root = root.clone();
+                let (tx, rx) = mpsc::channel();
+                std::thread::Builder::new()
+                    .name("gvfs-refresh".into())
+                    .spawn(move || {
+                        let tree = Self::scan_directory_shallow(&root, sort_order);
+                        let _ = tx.send(tree);
+                    })
+                    .expect("failed to spawn GVFS refresh thread");
+                self.pending_scan = Some(rx);
+                return;
+            }
             self.tree = Self::scan_directory_shallow(root, self.sort_order);
             // Re-load children for currently expanded directories
             let expanded: Vec<PathBuf> = self.expanded_dirs.iter().cloned().collect();
@@ -1159,8 +1204,8 @@ impl MarkdownApp {
             })
             .or_else(|| std::env::current_dir().ok());
 
-        if let Some(root) = explorer_root {
-            file_explorer.set_root(root);
+        if let Some(ref root) = explorer_root {
+            file_explorer.set_root(root.clone());
         }
 
         // Restore expanded directories (children will lazy-load on first render)
@@ -2710,6 +2755,14 @@ impl eframe::App for MarkdownApp {
         let changed_paths = self.check_file_changes();
         if !changed_paths.is_empty() {
             self.reload_changed_tabs(changed_paths);
+        }
+
+        // Poll for async GVFS directory scan completion
+        if self.file_explorer.pending_scan.is_some() {
+            if self.file_explorer.poll_pending_scan() {
+                log::info!("GVFS directory scan completed");
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         // Clean up expired flash effects and request repaints while animating
