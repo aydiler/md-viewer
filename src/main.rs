@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use eframe::egui;
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
-use notify::RecommendedWatcher;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
+use notify::{PollWatcher, RecommendedWatcher};
+use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -981,6 +981,37 @@ struct LightboxState {
 // LightboxState is constructed directly from pre-rasterized mermaid textures
 // (see take_clicked_mermaid in CommonMarkCache)
 
+/// Check if a path is on a GVFS FUSE mount (e.g., SFTP via Thunar/Nautilus).
+fn is_gvfs_path(path: &Path) -> bool {
+    path.starts_with("/run/user/") && path.components().any(|c| c.as_os_str() == "gvfs")
+}
+
+/// Wrapper for file watchers that supports both inotify (local) and poll (GVFS/remote).
+enum FileWatcher {
+    Inotify(Debouncer<RecommendedWatcher>),
+    Poll(Debouncer<PollWatcher>),
+    Dual {
+        inotify: Debouncer<RecommendedWatcher>,
+        poll: Debouncer<PollWatcher>,
+    },
+}
+
+impl FileWatcher {
+    fn inotify_watcher(&mut self) -> Option<&mut dyn notify::Watcher> {
+        match self {
+            FileWatcher::Inotify(d) | FileWatcher::Dual { inotify: d, .. } => Some(d.watcher()),
+            FileWatcher::Poll(_) => None,
+        }
+    }
+
+    fn poll_watcher(&mut self) -> Option<&mut dyn notify::Watcher> {
+        match self {
+            FileWatcher::Poll(d) | FileWatcher::Dual { poll: d, .. } => Some(d.watcher()),
+            FileWatcher::Inotify(_) => None,
+        }
+    }
+}
+
 struct MarkdownApp {
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -990,8 +1021,8 @@ struct MarkdownApp {
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
-    // File watcher state
-    watcher: Option<Debouncer<RecommendedWatcher>>,
+    // File watcher state (inotify for local, poll for GVFS/remote)
+    watcher: Option<FileWatcher>,
     watcher_rx: Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
     watcher_retry_count: u32,
     // Set of paths being watched (individual tab files)
@@ -1318,65 +1349,137 @@ impl MarkdownApp {
             return;
         }
 
+        // Partition tab paths into local (inotify) and GVFS (poll)
+        let (gvfs_paths, local_paths): (Vec<_>, Vec<_>) =
+            tab_paths.iter().partition(|p| is_gvfs_path(p));
+        let explorer_is_gvfs = explorer_root.as_ref().is_some_and(|r| is_gvfs_path(r));
+        let has_local = !local_paths.is_empty() || (explorer_root.is_some() && !explorer_is_gvfs);
+        let has_gvfs = !gvfs_paths.is_empty() || explorer_is_gvfs;
+
+        // Both debouncers send to the same channel
         let (tx, debouncer_rx) = mpsc::channel();
 
-        match new_debouncer(Duration::from_millis(200), tx) {
-            Ok(mut debouncer) => {
-                // Watch individual tab files (non-recursive)
-                for path in &tab_paths {
-                    if let Err(e) = debouncer
-                        .watcher()
-                        .watch(path, notify::RecursiveMode::NonRecursive)
-                    {
-                        log::error!("Failed to watch file {:?}: {}", path, e);
-                    } else {
-                        self.watched_paths.insert(path.clone());
+        // Create inotify debouncer for local paths
+        let inotify_debouncer = if has_local {
+            match new_debouncer(Duration::from_millis(200), tx.clone()) {
+                Ok(mut debouncer) => {
+                    for path in &local_paths {
+                        if let Err(e) = debouncer
+                            .watcher()
+                            .watch(path, notify::RecursiveMode::NonRecursive)
+                        {
+                            log::error!("Failed to watch file {:?}: {}", path, e);
+                        } else {
+                            self.watched_paths.insert((*path).clone());
+                        }
                     }
-                }
-
-                // Watch explorer root directory (recursive) for tree updates
-                if let Some(ref root) = explorer_root {
-                    if let Err(e) = debouncer
-                        .watcher()
-                        .watch(root, notify::RecursiveMode::Recursive)
-                    {
-                        log::error!("Failed to watch explorer root {:?}: {}", root, e);
-                    } else {
-                        self.watched_explorer_root = Some(root.clone());
-                        log::info!("Started watching explorer root: {:?}", root);
-                    }
-                }
-
-                if !self.watched_paths.is_empty() || self.watched_explorer_root.is_some() {
-                    log::info!(
-                        "Started watching {} files + explorer root: {}",
-                        self.watched_paths.len(),
-                        self.watched_explorer_root.is_some()
-                    );
-
-                    // Bridge thread: forward events and wake egui on demand
-                    let (bridge_tx, bridge_rx) = mpsc::channel();
-                    let ctx = self.egui_ctx.clone();
-                    std::thread::Builder::new()
-                        .name("watcher-bridge".into())
-                        .spawn(move || {
-                            while let Ok(event) = debouncer_rx.recv() {
-                                let _ = bridge_tx.send(event);
-                                ctx.request_repaint();
+                    if let Some(ref root) = explorer_root {
+                        if !explorer_is_gvfs {
+                            if let Err(e) = debouncer
+                                .watcher()
+                                .watch(root, notify::RecursiveMode::Recursive)
+                            {
+                                log::error!("Failed to watch explorer root {:?}: {}", root, e);
+                            } else {
+                                self.watched_explorer_root = Some(root.clone());
                             }
-                        })
-                        .expect("failed to spawn watcher bridge thread");
-
-                    self.watcher = Some(debouncer);
-                    self.watcher_rx = Some(bridge_rx);
-                    self.watch_enabled = true;
-                    self.watcher_retry_count = 0;
+                        }
+                    }
+                    Some(debouncer)
+                }
+                Err(e) => {
+                    log::error!("Failed to create inotify watcher: {}", e);
+                    None
                 }
             }
-            Err(e) => {
-                log::error!("Failed to create file watcher: {}", e);
-                self.error_message = Some(format!("Failed to create file watcher: {}", e));
+        } else {
+            None
+        };
+
+        // Create poll debouncer for GVFS/remote paths
+        let poll_debouncer = if has_gvfs {
+            let poll_config = notify_debouncer_mini::Config::default()
+                .with_timeout(Duration::from_millis(200))
+                .with_notify_config(
+                    notify::Config::default().with_poll_interval(Duration::from_secs(2)),
+                );
+            match new_debouncer_opt::<_, PollWatcher>(poll_config, tx.clone()) {
+                Ok(mut debouncer) => {
+                    for path in &gvfs_paths {
+                        if let Err(e) = debouncer
+                            .watcher()
+                            .watch(path, notify::RecursiveMode::NonRecursive)
+                        {
+                            log::error!("Failed to poll-watch file {:?}: {}", path, e);
+                        } else {
+                            self.watched_paths.insert((*path).clone());
+                        }
+                    }
+                    if let Some(ref root) = explorer_root {
+                        if explorer_is_gvfs {
+                            if let Err(e) = debouncer
+                                .watcher()
+                                .watch(root, notify::RecursiveMode::Recursive)
+                            {
+                                log::error!(
+                                    "Failed to poll-watch explorer root {:?}: {}",
+                                    root,
+                                    e
+                                );
+                            } else {
+                                self.watched_explorer_root = Some(root.clone());
+                            }
+                        }
+                    }
+                    Some(debouncer)
+                }
+                Err(e) => {
+                    log::error!("Failed to create poll watcher: {}", e);
+                    None
+                }
             }
+        } else {
+            None
+        };
+
+        // Build FileWatcher enum from whichever debouncers succeeded
+        let file_watcher = match (inotify_debouncer, poll_debouncer) {
+            (Some(i), Some(p)) => Some(FileWatcher::Dual { inotify: i, poll: p }),
+            (Some(d), None) => Some(FileWatcher::Inotify(d)),
+            (None, Some(d)) => Some(FileWatcher::Poll(d)),
+            (None, None) => None,
+        };
+
+        if let Some(fw) = file_watcher {
+            let local_count = local_paths.len();
+            let gvfs_count = gvfs_paths.len();
+            log::info!(
+                "Started watching {} local (inotify) + {} GVFS (poll) files, explorer root: {}",
+                local_count,
+                gvfs_count,
+                self.watched_explorer_root.is_some()
+            );
+
+            // Bridge thread: forward events and wake egui on demand
+            let (bridge_tx, bridge_rx) = mpsc::channel();
+            let ctx = self.egui_ctx.clone();
+            std::thread::Builder::new()
+                .name("watcher-bridge".into())
+                .spawn(move || {
+                    while let Ok(event) = debouncer_rx.recv() {
+                        let _ = bridge_tx.send(event);
+                        ctx.request_repaint();
+                    }
+                })
+                .expect("failed to spawn watcher bridge thread");
+
+            self.watcher = Some(fw);
+            self.watcher_rx = Some(bridge_rx);
+            self.watch_enabled = true;
+            self.watcher_retry_count = 0;
+        } else {
+            log::error!("Failed to create any file watcher");
+            self.error_message = Some("Failed to create file watcher".to_string());
         }
     }
 
@@ -1397,20 +1500,44 @@ impl MarkdownApp {
 
         let current_paths: HashSet<PathBuf> = self.get_open_tab_paths().into_iter().collect();
 
-        // Add new paths
-        if let Some(debouncer) = &mut self.watcher {
+        if let Some(fw) = &mut self.watcher {
+            // Check if we need a watcher type that doesn't currently exist
+            let needs_poll = current_paths.iter().any(|p| is_gvfs_path(p));
+            let needs_inotify = current_paths.iter().any(|p| !is_gvfs_path(p));
+            let has_poll = fw.poll_watcher().is_some();
+            let has_inotify = fw.inotify_watcher().is_some();
+
+            if (needs_poll && !has_poll) || (needs_inotify && !has_inotify) {
+                // Watcher configuration changed (e.g., first GVFS tab added), restart
+                log::info!("Watcher type mismatch, restarting watchers");
+                self.start_watching();
+                return;
+            }
+
+            // Add new paths to the appropriate watcher
             for path in current_paths.difference(&self.watched_paths) {
-                if let Err(e) = debouncer
-                    .watcher()
-                    .watch(path, notify::RecursiveMode::NonRecursive)
-                {
-                    log::error!("Failed to watch file {:?}: {}", path, e);
+                let watcher = if is_gvfs_path(path) {
+                    fw.poll_watcher()
+                } else {
+                    fw.inotify_watcher()
+                };
+                if let Some(w) = watcher {
+                    if let Err(e) = w.watch(path, notify::RecursiveMode::NonRecursive) {
+                        log::error!("Failed to watch file {:?}: {}", path, e);
+                    }
                 }
             }
 
-            // Remove old paths
+            // Remove old paths from the appropriate watcher
             for path in self.watched_paths.difference(&current_paths) {
-                let _ = debouncer.watcher().unwatch(path);
+                let watcher = if is_gvfs_path(path) {
+                    fw.poll_watcher()
+                } else {
+                    fw.inotify_watcher()
+                };
+                if let Some(w) = watcher {
+                    let _ = w.unwatch(path);
+                }
             }
         }
 
