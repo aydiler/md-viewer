@@ -1353,8 +1353,10 @@ impl MarkdownApp {
         let (gvfs_paths, local_paths): (Vec<_>, Vec<_>) =
             tab_paths.iter().partition(|p| is_gvfs_path(p));
         let explorer_is_gvfs = explorer_root.as_ref().is_some_and(|r| is_gvfs_path(r));
+        // Explorer root only watched via inotify (local) — GVFS explorer roots are
+        // skipped to avoid costly recursive polling over SFTP
         let has_local = !local_paths.is_empty() || (explorer_root.is_some() && !explorer_is_gvfs);
-        let has_gvfs = !gvfs_paths.is_empty() || explorer_is_gvfs;
+        let has_gvfs = !gvfs_paths.is_empty();
 
         // Both debouncers send to the same channel
         let (tx, debouncer_rx) = mpsc::channel();
@@ -1415,22 +1417,10 @@ impl MarkdownApp {
                             self.watched_paths.insert((*path).clone());
                         }
                     }
-                    if let Some(ref root) = explorer_root {
-                        if explorer_is_gvfs {
-                            if let Err(e) = debouncer
-                                .watcher()
-                                .watch(root, notify::RecursiveMode::Recursive)
-                            {
-                                log::error!(
-                                    "Failed to poll-watch explorer root {:?}: {}",
-                                    root,
-                                    e
-                                );
-                            } else {
-                                self.watched_explorer_root = Some(root.clone());
-                            }
-                        }
-                    }
+                    // Skip recursive watching of GVFS explorer root — polling an
+                    // entire remote directory tree every 2s causes lag from SFTP
+                    // roundtrips (stat + read_dir for each entry). Users can refresh
+                    // the explorer manually instead.
                     Some(debouncer)
                 }
                 Err(e) => {
