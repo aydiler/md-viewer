@@ -1559,14 +1559,11 @@ impl CommonMarkCache {
 
     /// Record the y-position of a header for scroll navigation.
     /// Converts viewport-relative position to content-relative using scroll offset.
-    /// Only records if not already recorded (first render captures correct position).
+    /// Always updates to reflect current layout (e.g. after zoom changes the content width).
     /// The `normalized_key` should be a pre-computed lowercase key for the header title.
     pub fn record_header_position(&mut self, normalized_key: &str, viewport_y: f32) {
-        // Only record on first encounter to avoid position jumping
-        if !self.header_positions.contains_key(normalized_key) {
-            let content_y = self.current_scroll_offset + viewport_y;
-            self.header_positions.insert(normalized_key.to_string(), content_y);
-        }
+        let content_y = self.current_scroll_offset + viewport_y;
+        self.header_positions.insert(normalized_key.to_string(), content_y);
     }
 
     /// Get the y-position of a header by its normalized title (content-relative).
