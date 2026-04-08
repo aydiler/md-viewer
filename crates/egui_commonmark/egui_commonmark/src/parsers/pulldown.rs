@@ -136,25 +136,42 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
 /// formula. Returns true for currency amounts and other false positives like:
 /// - `$17.57` → parsed as InlineMath("17.57")
 /// - `$3,000–$4,000` → parsed as InlineMath("3,000–")
+/// - `$/t is worse because...total_usd...` → long English sentence with `_` in identifiers
 ///
 /// The approach: real LaTeX math ALWAYS contains structural syntax (backslash
 /// commands, superscripts, subscripts, braces, or known math operators).
 /// Anything without these markers is almost certainly a misparse.
+/// Additionally, very long "math" containing multiple English words is almost
+/// certainly a false positive from `$` being used as currency.
 fn is_likely_currency(tex: &str) -> bool {
     let trimmed = tex.trim();
     if trimmed.is_empty() {
         return false;
     }
 
-    // Real math indicators — if ANY of these are present, it's actual LaTeX
-    let has_math_syntax = trimmed.contains('\\')  // \frac, \sum, \int, etc.
-        || trimmed.contains('^')                   // superscript
-        || trimmed.contains('_')                   // subscript
-        || trimmed.contains('{')                   // grouping
-        || trimmed.contains('}');                   // grouping
+    // Real LaTeX commands (\frac, \sum, etc.) are the strongest signal
+    let has_backslash_cmd = trimmed.contains('\\');
+    if has_backslash_cmd {
+        return false;
+    }
 
-    // If it has math syntax, trust the parser — it's real math
-    if has_math_syntax {
+    // Braces are strong LaTeX indicators (grouping: {x+1}, subscript: _{n})
+    let has_braces = trimmed.contains('{') || trimmed.contains('}');
+    if has_braces {
+        return false;
+    }
+
+    // For ^ and _, only trust them as math if the content is short and
+    // doesn't look like English prose. Long text with underscores from
+    // identifiers (total_usd, miss_cost) is a false positive.
+    let has_sub_super = trimmed.contains('^') || trimmed.contains('_');
+    if has_sub_super {
+        // Count whitespace-separated words — real inline math rarely has >5 words
+        let word_count = trimmed.split_whitespace().count();
+        if word_count > 5 {
+            return true; // Too many words — this is prose, not math
+        }
+        // Short content with ^ or _ is likely real math (e.g., x_i, a^2)
         return false;
     }
 

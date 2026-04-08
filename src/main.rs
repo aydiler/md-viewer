@@ -1087,6 +1087,7 @@ struct MarkdownApp {
     egui_ctx: egui::Context,
     // Track state to avoid unconditional repaints
     last_applied_dark_mode: Option<bool>,
+    last_zoom_level: f32,
     last_window_title: String,
     title_dirty: bool,
     /// Cached set of open tab paths for file explorer highlighting (avoids per-frame syscalls)
@@ -1245,6 +1246,7 @@ impl MarkdownApp {
             is_virtual_display,
             egui_ctx: cc.egui_ctx.clone(),
             last_applied_dark_mode: None,
+            last_zoom_level: zoom_level,
             last_window_title: String::new(),
             title_dirty: true,
             open_tab_paths: HashSet::new(),
@@ -2806,6 +2808,15 @@ impl eframe::App for MarkdownApp {
         }
 
         ctx.set_zoom_factor(self.zoom_level);
+
+        // Invalidate cached header positions when zoom changes
+        // (positions are in pixel space, which scales with zoom)
+        if (self.zoom_level - self.last_zoom_level).abs() > f32::EPSILON {
+            for tab in &mut self.tabs {
+                tab.cache.clear_header_positions();
+            }
+            self.last_zoom_level = self.zoom_level;
+        }
 
         // Update window title only when dirty
         if self.title_dirty {
