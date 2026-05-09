@@ -1198,9 +1198,26 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Source of a lightbox texture. Mermaid pre-rasterizes its own texture so we
+/// own the handle to keep it alive; loader-managed images (egui_extras) just
+/// give us an id whose lifetime is governed by the loader.
+enum LightboxTexture {
+    Owned(egui::TextureHandle),
+    Loaded(egui::TextureId),
+}
+
+impl LightboxTexture {
+    fn id(&self) -> egui::TextureId {
+        match self {
+            Self::Owned(handle) => handle.id(),
+            Self::Loaded(id) => *id,
+        }
+    }
+}
+
 struct LightboxState {
-    /// Pre-rasterized texture (GPU-resident). Zoom just scales this — instant.
-    texture: egui::TextureHandle,
+    /// GPU-resident texture (mermaid-owned or loader-owned). Zoom scales it — instant.
+    texture: LightboxTexture,
     /// Original rasterized pixel dimensions (before any zoom)
     base_size: egui::Vec2,
     zoom: f32,
@@ -1210,9 +1227,6 @@ struct LightboxState {
     /// egui's ScrollArea may clamp the old offset when content size changes mid-zoom)
     scroll_offset: egui::Vec2,
 }
-
-// LightboxState is constructed directly from pre-rasterized mermaid textures
-// (see take_clicked_mermaid in CommonMarkCache)
 
 /// Check if a path is on a GVFS FUSE mount (e.g., SFTP via Thunar/Nautilus).
 fn is_gvfs_path(path: &Path) -> bool {
@@ -3949,7 +3963,17 @@ impl eframe::App for MarkdownApp {
             if let Some((texture, base_size)) = tab.cache.take_clicked_mermaid() {
                 self.lightbox_open_count += 1;
                 self.lightbox = Some(LightboxState {
-                    texture,
+                    texture: LightboxTexture::Owned(texture),
+                    base_size,
+                    zoom: 1.0,
+                    open_id: self.lightbox_open_count,
+                    scroll_offset: egui::Vec2::ZERO,
+                });
+            }
+            if let Some((tex_id, base_size)) = tab.cache.take_clicked_image() {
+                self.lightbox_open_count += 1;
+                self.lightbox = Some(LightboxState {
+                    texture: LightboxTexture::Loaded(tex_id),
                     base_size,
                     zoom: 1.0,
                     open_id: self.lightbox_open_count,
@@ -3958,7 +3982,7 @@ impl eframe::App for MarkdownApp {
             }
         }
 
-        // Lightbox overlay for enlarged mermaid diagrams
+        // Lightbox overlay for enlarged diagrams or images
         self.render_lightbox(ctx);
 
         // Drag and drop overlay

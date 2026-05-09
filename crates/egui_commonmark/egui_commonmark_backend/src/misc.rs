@@ -307,12 +307,28 @@ impl Image {
         }
     }
 
-    pub fn end(self, ui: &mut Ui, options: &CommonMarkOptions) {
+    pub fn end(self, ui: &mut Ui, cache: &mut CommonMarkCache, options: &CommonMarkOptions) {
         let response = ui.add(
             egui::Image::from_uri(&self.uri)
                 .fit_to_original_size(1.0)
-                .max_width(options.max_width(ui)),
+                .max_width(options.max_width(ui))
+                .sense(egui::Sense::click()),
         );
+
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        if response.clicked() {
+            let load = ui.ctx().try_load_texture(
+                &self.uri,
+                egui::TextureOptions::default(),
+                egui::load::SizeHint::default(),
+            );
+            if let Ok(egui::load::TexturePoll::Ready { texture }) = load {
+                cache.clicked_image = Some((texture.id, texture.size));
+            }
+        }
 
         if !self.alt_text.is_empty() && options.show_alt_text_on_hover {
             response.on_hover_ui_at_pointer(|ui| {
@@ -1380,6 +1396,10 @@ pub struct CommonMarkCache {
     #[cfg(feature = "mermaid")]
     clicked_mermaid: Option<(egui::TextureHandle, egui::Vec2)>,
 
+    /// Set when a regular image is clicked (texture id + intrinsic size for lightbox).
+    /// Texture lifetime is owned by egui's loader, so we only carry the id.
+    clicked_image: Option<(egui::TextureId, egui::Vec2)>,
+
     /// Hash of the diagram that currently has an active background thread.
     /// Only one diagram renders at a time so they appear top-to-bottom.
     #[cfg(feature = "mermaid")]
@@ -1416,6 +1436,7 @@ impl std::fmt::Debug for CommonMarkCache {
         s.field("mermaid_states_count", &self.mermaid_states.len());
         #[cfg(feature = "mermaid")]
         s.field("clicked_mermaid", &self.clicked_mermaid.is_some());
+        s.field("clicked_image", &self.clicked_image.is_some());
         #[cfg(feature = "math")]
         s.field("math_states_count", &self.math_states.len());
         s.finish()
@@ -1460,6 +1481,7 @@ impl Default for CommonMarkCache {
                 })),
             #[cfg(feature = "mermaid")]
             clicked_mermaid: None,
+            clicked_image: None,
             #[cfg(feature = "mermaid")]
             mermaid_rendering: None,
             #[cfg(feature = "math")]
@@ -1523,6 +1545,12 @@ impl CommonMarkCache {
     #[cfg(feature = "mermaid")]
     pub fn take_clicked_mermaid(&mut self) -> Option<(egui::TextureHandle, egui::Vec2)> {
         self.clicked_mermaid.take()
+    }
+
+    /// Take the clicked image texture id and size (if any). Returns `Some` once per click.
+    /// The texture is owned by egui's loader; the id is valid for as long as it stays loaded.
+    pub fn take_clicked_image(&mut self) -> Option<(egui::TextureId, egui::Vec2)> {
+        self.clicked_image.take()
     }
 
     /// Clear the cache for all scrollable elements
