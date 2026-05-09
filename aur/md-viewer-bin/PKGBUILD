@@ -1,0 +1,35 @@
+pkgname=md-viewer-bin
+pkgver=0.1.2
+pkgrel=1
+pkgdesc="Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload (prebuilt binary)"
+arch=('x86_64')
+url="https://github.com/aydiler/md-viewer"
+license=('MIT')
+depends=(
+    'gcc-libs'
+    'libxcb'
+    'libxkbcommon'
+    'openssl'
+    'gtk3'
+    'fontconfig'
+    'dbus'
+)
+optdepends=(
+    'zenity: native file dialogs'
+    'xdg-desktop-portal: file dialogs on Wayland'
+    'xdg-desktop-portal-gtk: GTK portal backend'
+)
+provides=('md-viewer')
+conflicts=('md-viewer' 'md-viewer-git')
+source=(
+    "md-viewer-${pkgver}-linux-x86_64.tar.gz::https://github.com/aydiler/md-viewer/releases/download/v${pkgver}/md-viewer-${pkgver}-linux-x86_64.tar.gz"
+    "md-viewer.desktop::https://raw.githubusercontent.com/aydiler/md-viewer/v${pkgver}/data/md-viewer.desktop"
+    "LICENSE::https://raw.githubusercontent.com/aydiler/md-viewer/v${pkgver}/LICENSE"
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+    install -Dm755 "$srcdir/md-viewer" "$pkgdir/usr/bin/md-viewer"
+    install -Dm644 "$srcdir/md-viewer.desktop" "$pkgdir/usr/share/applications/md-viewer.desktop"
+    install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

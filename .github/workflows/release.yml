@@ -112,7 +112,7 @@ jobs:
 
   create-release:
     runs-on: ubuntu-latest
-    needs: [build, publish-crates, publish-snap]
+    needs: [build]
     permissions:
       contents: write
     steps:
