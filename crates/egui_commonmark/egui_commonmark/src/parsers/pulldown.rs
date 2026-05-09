@@ -908,7 +908,7 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::TagEnd::Image => {
                 if let Some(image) = self.image.take() {
-                    image.end(ui, options);
+                    image.end(ui, cache, options);
                 }
             }
             pulldown_cmark::TagEnd::HtmlBlock => {
