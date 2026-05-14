@@ -1,0 +1,573 @@
+From 0489670d495debce23979a89e74be60d54923cf7 Mon Sep 17 00:00:00 2001
+From: Nick Endrikat <nickendrikat@gmail.com>
+Date: Thu, 14 May 2026 08:35:15 -0700
+Subject: [PATCH 1/2] Fix wide inline code wrapping
+
+Use the available pane width for Markdown rendering and split long inline code paths so wide notes do not overlap or clip rendered text.
+
+Co-Authored-By: OpenClaude (gpt-5.5) <openclaude@gitlawb.com>
+---
+ .../egui_commonmark/src/parsers/pulldown.rs   | 175 ++++++++++++------
+ .../egui_commonmark/tests/wrapping.rs         |  32 ++++
+ docs/devlog/016-wide-inline-code-wrapping.md  |  73 ++++++++
+ src/main.rs                                   |   2 +-
+ 4 files changed, 220 insertions(+), 62 deletions(-)
+ create mode 100644 crates/egui_commonmark/egui_commonmark/tests/wrapping.rs
+ create mode 100644 docs/devlog/016-wide-inline-code-wrapping.md
+
+diff --git a/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs b/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs
+index 723ea36..d6867fa 100644
+--- a/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs
++++ b/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs
+@@ -7,13 +7,43 @@ use egui::{self, Id, Pos2, TextStyle, Ui};
+ 
+ use crate::List;
+ use egui_commonmark_backend_extended::elements::{
+-    blockquote, footnote, footnote_start, heading_end_spacing, heading_start_spacing, newline,
+-    paragraph_end_spacing, rule, soft_break, ImmutableCheckbox,
++    ImmutableCheckbox, blockquote, footnote, footnote_start, heading_end_spacing,
++    heading_start_spacing, newline, paragraph_end_spacing, rule, soft_break,
+ };
+ use egui_commonmark_backend_extended::misc::*;
+ use egui_commonmark_backend_extended::pulldown::*;
+ use pulldown_cmark::{CowStr, HeadingLevel};
+ 
++fn inline_code_wrap_segments(text: &str) -> Vec<String> {
++    const MAX_SEGMENT_CHARS: usize = 56;
++
++    let mut segments = Vec::new();
++    let mut current = String::new();
++    let mut current_len = 0;
++
++    for character in text.chars() {
++        current.push(character);
++        current_len += 1;
++
++        if current_len >= MAX_SEGMENT_CHARS
++            && (matches!(character, '/' | '\\' | '-' | '_') || character.is_whitespace())
++        {
++            segments.push(std::mem::take(&mut current));
++            current_len = 0;
++        }
++    }
++
++    if !current.is_empty() {
++        segments.push(current);
++    }
++
++    if segments.is_empty() {
++        vec![text.to_owned()]
++    } else {
++        segments
++    }
++}
++
+ /// Newline logic is constructed by the following:
+ /// All elements try to insert a newline before them (if they are allowed)
+ /// and end their own line.
+@@ -198,7 +228,7 @@ impl CommonMarkViewerInternal {
+         text: &str,
+         split_points_id: Option<Id>,
+     ) -> (egui::InnerResponse<()>, Vec<CheckboxClickEvent>) {
+-        let max_width = options.max_width(ui);
++        let available_width = options.max_width(ui);
+         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
+ 
+         // Compute content hash and ensure events are cached
+@@ -213,20 +243,18 @@ impl CommonMarkViewerInternal {
+             cache.set_cached_events(content_hash, owned_events);
+         }
+ 
+-        let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
++        let re = ui.allocate_ui_with_layout(egui::vec2(available_width, 0.0), layout, |ui| {
+             ui.spacing_mut().item_spacing.x = 0.0;
+             let height = ui.text_style_height(&TextStyle::Body);
+             ui.set_row_height(height);
+ 
+             // Use cached events — clone the Vec reference data for iteration
+             // (events are 'static so this is cheap pointer copies, not re-parsing)
+-            let events_data = cache.get_cached_events(content_hash)
++            let events_data = cache
++                .get_cached_events(content_hash)
+                 .expect("events just cached")
+                 .to_vec();
+-            let mut events = events_data
+-                .into_iter()
+-                .enumerate()
+-                .peekable();
++            let mut events = events_data.into_iter().enumerate().peekable();
+ 
+             while let Some((index, (e, src_span))) = events.next() {
+                 let start_position = ui.next_widget_position();
+@@ -237,7 +265,15 @@ impl CommonMarkViewerInternal {
+                     self.line.should_end_newline_forced = false;
+                 }
+ 
+-                self.process_event(ui, &mut events, e, src_span, cache, options, max_width);
++                self.process_event(
++                    ui,
++                    &mut events,
++                    e,
++                    src_span,
++                    cache,
++                    options,
++                    available_width,
++                );
+ 
+                 if let Some(source_id) = split_points_id {
+                     if should_add_split_point {
+@@ -542,47 +578,53 @@ impl CommonMarkViewerInternal {
+                 .max_width(max_width)
+                 .show(ui, |ui| {
+                     egui::Frame::group(ui.style()).show(ui, |ui| {
+-                let Table { header, rows } = parse_table(events);
+-
+-                egui::Grid::new(id).striped(true).show(ui, |ui| {
+-                    for col in header {
+-                        ui.horizontal(|ui| {
+-                            for (e, src_span) in col {
+-                                let tmp_start =
+-                                    std::mem::replace(&mut self.line.should_start_newline, false);
+-                                let tmp_end =
+-                                    std::mem::replace(&mut self.line.should_end_newline, false);
+-                                self.event(ui, e, src_span, cache, options, max_width);
+-                                self.line.should_start_newline = tmp_start;
+-                                self.line.should_end_newline = tmp_end;
++                        let Table { header, rows } = parse_table(events);
++
++                        egui::Grid::new(id).striped(true).show(ui, |ui| {
++                            for col in header {
++                                ui.horizontal(|ui| {
++                                    for (e, src_span) in col {
++                                        let tmp_start = std::mem::replace(
++                                            &mut self.line.should_start_newline,
++                                            false,
++                                        );
++                                        let tmp_end = std::mem::replace(
++                                            &mut self.line.should_end_newline,
++                                            false,
++                                        );
++                                        self.event(ui, e, src_span, cache, options, max_width);
++                                        self.line.should_start_newline = tmp_start;
++                                        self.line.should_end_newline = tmp_end;
++                                    }
++                                });
+                             }
+-                        });
+-                    }
+ 
+-                    ui.end_row();
+-
+-                    for row in rows {
+-                        for col in row {
+-                            ui.horizontal(|ui| {
+-                                for (e, src_span) in col {
+-                                    let tmp_start = std::mem::replace(
+-                                        &mut self.line.should_start_newline,
+-                                        false,
+-                                    );
+-                                    let tmp_end =
+-                                        std::mem::replace(&mut self.line.should_end_newline, false);
+-                                    self.event(ui, e, src_span, cache, options, max_width);
+-                                    self.line.should_start_newline = tmp_start;
+-                                    self.line.should_end_newline = tmp_end;
++                            ui.end_row();
++
++                            for row in rows {
++                                for col in row {
++                                    ui.horizontal(|ui| {
++                                        for (e, src_span) in col {
++                                            let tmp_start = std::mem::replace(
++                                                &mut self.line.should_start_newline,
++                                                false,
++                                            );
++                                            let tmp_end = std::mem::replace(
++                                                &mut self.line.should_end_newline,
++                                                false,
++                                            );
++                                            self.event(ui, e, src_span, cache, options, max_width);
++                                            self.line.should_start_newline = tmp_start;
++                                            self.line.should_end_newline = tmp_end;
++                                        }
++                                    });
+                                 }
+-                            });
+-                        }
+ 
+-                        ui.end_row();
+-                    }
++                                ui.end_row();
++                            }
++                        });
+                     });
+                 });
+-            });
+ 
+             self.is_table = false;
+             if events.peek().is_none() {
+@@ -610,7 +652,14 @@ impl CommonMarkViewerInternal {
+             }
+             pulldown_cmark::Event::Code(text) => {
+                 self.text_style.code = true;
+-                self.event_text(text, ui, options);
++                let segments = inline_code_wrap_segments(&text);
++                let wraps_inline_code = segments.len() > 1;
++                for segment in segments {
++                    self.event_text(segment.into(), ui, options);
++                    if wraps_inline_code {
++                        ui.end_row();
++                    }
++                }
+                 self.text_style.code = false;
+             }
+             pulldown_cmark::Event::InlineHtml(text) => {
+@@ -677,9 +726,9 @@ impl CommonMarkViewerInternal {
+     }
+ 
+     fn event_text(&mut self, text: CowStr, ui: &mut Ui, options: &CommonMarkOptions) {
+-        let rich_text = self
+-            .text_style
+-            .to_richtext_with_typography(ui, &text, Some(&options.typography));
++        let rich_text =
++            self.text_style
++                .to_richtext_with_typography(ui, &text, Some(&options.typography));
+         if let Some(image) = &mut self.image {
+             image.alt_text.push(rich_text);
+         } else if let Some(block) = &mut self.code_block {
+@@ -839,7 +888,10 @@ impl CommonMarkViewerInternal {
+                     let left_edge = ui.min_rect().left();
+                     let heading_rect = egui::Rect::from_min_size(
+                         egui::pos2(left_edge, available.top()),
+-                        egui::vec2(available.width() + (available.left() - left_edge), available.height()),
++                        egui::vec2(
++                            available.width() + (available.left() - left_edge),
++                            available.height(),
++                        ),
+                     );
+                     let rich_texts = std::mem::take(&mut self.current_heading_rich_texts);
+                     ui.allocate_ui_at_rect(heading_rect, |ui| {
+@@ -913,13 +965,18 @@ impl CommonMarkViewerInternal {
+             }
+             pulldown_cmark::TagEnd::HtmlBlock => {
+                 if !self.html_block.is_empty() {
+-                    if let Some(table) = egui_commonmark_backend_extended::html_table::parse_html_table(&self.html_block) {
++                    if let Some(table) =
++                        egui_commonmark_backend_extended::html_table::parse_html_table(
++                            &self.html_block,
++                        )
++                    {
+                         self.render_html_table(ui, &table, options, max_width);
+                     } else if let Some(html_fn) = options.html_fn {
+                         html_fn(ui, &self.html_block);
+                     } else {
+                         // Render non-table HTML as plain text (existing fallback)
+-                        let text: pulldown_cmark::CowStr = std::mem::take(&mut self.html_block).into();
++                        let text: pulldown_cmark::CowStr =
++                            std::mem::take(&mut self.html_block).into();
+                         self.event_text(text, ui, options);
+                     }
+                     self.html_block.clear();
+@@ -1000,9 +1057,8 @@ impl CommonMarkViewerInternal {
+                                     egui::Frame::NONE
+                                         .inner_margin(egui::Margin::symmetric(8, 4))
+                                         .show(ui, |ui| {
+-                                            let rich_text = self
+-                                                .text_style
+-                                                .to_richtext_with_typography(
++                                            let rich_text =
++                                                self.text_style.to_richtext_with_typography(
+                                                     ui,
+                                                     cell,
+                                                     Some(&options.typography),
+@@ -1022,8 +1078,7 @@ impl CommonMarkViewerInternal {
+                         let rect = grid_response.response.rect;
+                         // Estimate header height from total rows
+                         let total_rows = table.header.len() + table.rows.len();
+-                        let header_fraction =
+-                            table.header.len() as f32 / total_rows as f32;
++                        let header_fraction = table.header.len() as f32 / total_rows as f32;
+                         let separator_y = rect.top() + rect.height() * header_fraction;
+                         ui.painter().hline(
+                             rect.left()..=rect.right(),
+@@ -1038,10 +1093,8 @@ impl CommonMarkViewerInternal {
+     }
+ 
+     fn paint_vertical_separator(ui: &mut Ui, color: egui::Color32) {
+-        let (rect, _) = ui.allocate_exact_size(
+-            egui::vec2(1.0, ui.available_height()),
+-            egui::Sense::hover(),
+-        );
++        let (rect, _) =
++            ui.allocate_exact_size(egui::vec2(1.0, ui.available_height()), egui::Sense::hover());
+         ui.painter().vline(
+             rect.center().x,
+             rect.top()..=rect.bottom(),
+diff --git a/crates/egui_commonmark/egui_commonmark/tests/wrapping.rs b/crates/egui_commonmark/egui_commonmark/tests/wrapping.rs
+new file mode 100644
+index 0000000..ebd5118
+--- /dev/null
++++ b/crates/egui_commonmark/egui_commonmark/tests/wrapping.rs
+@@ -0,0 +1,32 @@
++use egui::{Context, Rect};
++use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
++
++fn markdown_body_rect_for(markdown: &str, width: f32) -> Rect {
++    let ctx = Context::default();
++    let mut body_rect = Rect::NOTHING;
++
++    for _ in 0..2 {
++        ctx.begin_pass(Default::default());
++        egui::CentralPanel::default().show(&ctx, |ui| {
++            ui.set_width(width);
++            let mut cache = CommonMarkCache::default();
++            let response = CommonMarkViewer::new().show(ui, &mut cache, markdown);
++            body_rect = response.response.rect;
++        });
++        let _ = ctx.end_pass();
++    }
++
++    body_rect
++}
++
++#[test]
++fn long_inline_code_does_not_expand_past_content_width() {
++    let markdown = "`10-19 Infrastructure Core/10-Architecture/10-K3s-Plex-Legacy/10-Ansible-K3s-Plex/10.25-Ansible-K3s-Plex-Runbooks.md`";
++
++    let body_rect = markdown_body_rect_for(markdown, 540.0);
++
++    assert!(
++        body_rect.height() > 23.0,
++        "long inline code stayed on one row instead of wrapping: rect={body_rect:?}"
++    );
++}
+diff --git a/docs/devlog/016-wide-inline-code-wrapping.md b/docs/devlog/016-wide-inline-code-wrapping.md
+new file mode 100644
+index 0000000..3eab329
+--- /dev/null
++++ b/docs/devlog/016-wide-inline-code-wrapping.md
+@@ -0,0 +1,73 @@
++# Feature: Wide Inline Code Wrapping
++
++**Status:** ✅ Complete
++**Branch:** `fix/wide-inline-wrap-overlap`
++**Date:** 2026-05-14
++**Lines Changed:** `src/main.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`
++
++## Summary
++
++Fixed Markdown content overlap when notes contain long inline-code paths. The viewer now lets Markdown fill the available content pane width while splitting oversized inline-code chunks at path-friendly breakpoints so they wrap instead of expanding beyond the viewport.
++
++## Features
++
++- [x] Use the current content pane width for `CommonMarkViewer::default_width` instead of a fixed 600 px width.
++- [x] Split long inline-code text into row-wrapped segments at `/`, `\\`, `-`, `_`, or whitespace after a safe chunk length.
++- [x] Add a regression test for long inline-code path wrapping.
++- [x] Verify manually on a wide System Notes window under Hyprland/Wayland.
++
++## Key Discoveries
++
++### Fixed content width caused wasted space
++
++The application passed a hard-coded `default_width(Some(600))` to `CommonMarkViewer`, so rendered Markdown stayed confined even when the content pane had much more room. Switching to `ui.available_width()` lets notes use the full pane.
++
++### Long inline-code widgets can expand egui rows
++
++Long inline code, especially file paths in metadata, renders as one inline widget. If that widget remains too wide, the paragraph can exceed the viewport and overlap/cut off adjacent rendered chunks. Splitting only long inline-code chunks avoids changing normal paragraph text and keeps the fix targeted.
++
++```rust
++for segment in inline_code_wrap_segments(&text) {
++    self.event_text(segment.into(), ui, options);
++    if wraps_inline_code {
++        ui.end_row();
++    }
++}
++```
++
++## Architecture
++
++### Modified Rendering Flow
++
++| Location | Change |
++|----------|--------|
++| `src/main.rs` | Pass current `ui.available_width()` into `CommonMarkViewer::default_width`. |
++| `pulldown.rs` | Add `inline_code_wrap_segments()` helper and use it for `Event::Code`. |
++| `wrapping.rs` | Add focused regression test for long inline-code path wrapping. |
++
++### Why the fix stays narrow
++
++Only inline code receives forced segmentation. Normal text, headings, links, code blocks, images, and table behavior continue through the existing renderer path.
++
++## Testing Notes
++
++Commands run:
++
++```bash
++cargo test -p egui_commonmark_extended --test wrapping
++cargo check
++git diff --check
++```
++
++Manual verification:
++
++```bash
++cargo run -- "/home/akiro/Coding/System Notes/10-19 Infrastructure Core/10-Architecture/10-K3s-Plex-Legacy/10-Ansible-K3s-Plex/10.24-Ansible-K3s-Plex-Process-Flow.md"
++```
++
++Observed behavior: long inline-code metadata no longer overlaps or cuts off, and normal body content fills the wider pane.
++
++## Future Improvements
++
++- [ ] Consider a richer inline text layout path if links and inline code need fully proportional wrapping without forced line breaks.
++- [ ] Add a visual snapshot or UI harness test if the project adopts one for egui rendering regressions.
+diff --git a/src/main.rs b/src/main.rs
+index d18cc0d..df33ebe 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -2062,7 +2062,7 @@ impl MarkdownApp {
+                     CommonMarkViewer::new()
+                         .default_implicit_uri_scheme(&tab.base_uri)
+                         .max_image_width(Some(800))
+-                        .default_width(Some(600))
++                        .default_width(Some(ui.available_width() as usize))
+                         .indentation_spaces(2)
+                         .show_alt_text_on_hover(true)
+                         .syntax_theme_dark("base16-ocean.dark")
+-- 
+2.54.0
+
+
+From 5938bd4925c1f26b68fcac1c780d54a09e8f361e Mon Sep 17 00:00:00 2001
+From: Nick Endrikat <nickendrikat@gmail.com>
+Date: Thu, 14 May 2026 09:17:35 -0700
+Subject: [PATCH 2/2] Cover unbroken inline code wrapping
+
+Move the wrapping regression to the root test suite and split long inline code by length so unbroken tokens cannot overflow the pane.
+
+Co-Authored-By: OpenClaude (gpt-5.5) <openclaude@gitlawb.com>
+---
+ .../egui_commonmark/src/parsers/pulldown.rs   |  8 ++-
+ docs/devlog/016-wide-inline-code-wrapping.md  |  8 +--
+ tests/wrapping.rs                             | 52 +++++++++++++++++++
+ 3 files changed, 59 insertions(+), 9 deletions(-)
+ create mode 100644 tests/wrapping.rs
+
+diff --git a/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs b/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs
+index d6867fa..18bbe3a 100644
+--- a/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs
++++ b/crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs
+@@ -7,8 +7,8 @@ use egui::{self, Id, Pos2, TextStyle, Ui};
+ 
+ use crate::List;
+ use egui_commonmark_backend_extended::elements::{
+-    ImmutableCheckbox, blockquote, footnote, footnote_start, heading_end_spacing,
+-    heading_start_spacing, newline, paragraph_end_spacing, rule, soft_break,
++    blockquote, footnote, footnote_start, heading_end_spacing, heading_start_spacing, newline,
++    paragraph_end_spacing, rule, soft_break, ImmutableCheckbox,
+ };
+ use egui_commonmark_backend_extended::misc::*;
+ use egui_commonmark_backend_extended::pulldown::*;
+@@ -25,9 +25,7 @@ fn inline_code_wrap_segments(text: &str) -> Vec<String> {
+         current.push(character);
+         current_len += 1;
+ 
+-        if current_len >= MAX_SEGMENT_CHARS
+-            && (matches!(character, '/' | '\\' | '-' | '_') || character.is_whitespace())
+-        {
++        if current_len >= MAX_SEGMENT_CHARS {
+             segments.push(std::mem::take(&mut current));
+             current_len = 0;
+         }
+diff --git a/docs/devlog/016-wide-inline-code-wrapping.md b/docs/devlog/016-wide-inline-code-wrapping.md
+index 3eab329..1494dc9 100644
+--- a/docs/devlog/016-wide-inline-code-wrapping.md
++++ b/docs/devlog/016-wide-inline-code-wrapping.md
+@@ -3,7 +3,7 @@
+ **Status:** ✅ Complete
+ **Branch:** `fix/wide-inline-wrap-overlap`
+ **Date:** 2026-05-14
+-**Lines Changed:** `src/main.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`
++**Lines Changed:** `src/main.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `tests/wrapping.rs`
+ 
+ ## Summary
+ 
+@@ -12,8 +12,8 @@ Fixed Markdown content overlap when notes contain long inline-code paths. The vi
+ ## Features
+ 
+ - [x] Use the current content pane width for `CommonMarkViewer::default_width` instead of a fixed 600 px width.
+-- [x] Split long inline-code text into row-wrapped segments at `/`, `\\`, `-`, `_`, or whitespace after a safe chunk length.
+-- [x] Add a regression test for long inline-code path wrapping.
++- [x] Split long inline-code text into row-wrapped segments after a safe chunk length.
++- [x] Add a root integration test for short, path-like, and unbroken inline-code wrapping.
+ - [x] Verify manually on a wide System Notes window under Hyprland/Wayland.
+ 
+ ## Key Discoveries
+@@ -43,7 +43,7 @@ for segment in inline_code_wrap_segments(&text) {
+ |----------|--------|
+ | `src/main.rs` | Pass current `ui.available_width()` into `CommonMarkViewer::default_width`. |
+ | `pulldown.rs` | Add `inline_code_wrap_segments()` helper and use it for `Event::Code`. |
+-| `wrapping.rs` | Add focused regression test for long inline-code path wrapping. |
++| `tests/wrapping.rs` | Add root integration coverage for short, path-like, and unbroken inline-code wrapping. |
+ 
+ ### Why the fix stays narrow
+ 
+diff --git a/tests/wrapping.rs b/tests/wrapping.rs
+new file mode 100644
+index 0000000..9488bf5
+--- /dev/null
++++ b/tests/wrapping.rs
+@@ -0,0 +1,52 @@
++use egui::{Context, Rect};
++use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
++
++fn markdown_body_rect_for(markdown: &str, width: f32) -> Rect {
++    let ctx = Context::default();
++    let mut body_rect = Rect::NOTHING;
++
++    for _ in 0..2 {
++        ctx.begin_pass(Default::default());
++        egui::CentralPanel::default().show(&ctx, |ui| {
++            ui.set_width(width);
++            let mut cache = CommonMarkCache::default();
++            let response = CommonMarkViewer::new().show(ui, &mut cache, markdown);
++            body_rect = response.response.rect;
++        });
++        let _ = ctx.end_pass();
++    }
++
++    body_rect
++}
++
++#[test]
++fn short_inline_code_remains_single_row() {
++    let rect = markdown_body_rect_for("prefix `short-code` suffix", 540.0);
++
++    assert!(
++        rect.height() <= 23.0,
++        "short inline code wrapped unexpectedly: {rect:?}"
++    );
++}
++
++#[test]
++fn path_like_inline_code_wraps_into_multiple_rows() {
++    let markdown = "`10-19 Infrastructure Core/10-Architecture/10-K3s-Plex-Legacy/10-Ansible-K3s-Plex/10.25-Ansible-K3s-Plex-Runbooks.md`";
++    let rect = markdown_body_rect_for(markdown, 540.0);
++
++    assert!(
++        rect.height() > 23.0,
++        "path-like inline code did not wrap: {rect:?}"
++    );
++}
++
++#[test]
++fn unbroken_long_inline_code_wraps_into_multiple_rows() {
++    let markdown = format!("`{}`", "A".repeat(180));
++    let rect = markdown_body_rect_for(&markdown, 540.0);
++
++    assert!(
++        rect.height() > 23.0,
++        "unbroken long inline code did not wrap: {rect:?}"
++    );
++}
+-- 
+2.54.0
+
