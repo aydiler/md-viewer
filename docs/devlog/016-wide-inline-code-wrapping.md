@@ -3,7 +3,7 @@
 **Status:** ✅ Complete
 **Branch:** `fix/wide-inline-wrap-overlap`
 **Date:** 2026-05-14
-**Lines Changed:** `src/main.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`
+**Lines Changed:** `src/main.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `tests/wrapping.rs`
 
 ## Summary
 
@@ -12,8 +12,8 @@ Fixed Markdown content overlap when notes contain long inline-code paths. The vi
 ## Features
 
 - [x] Use the current content pane width for `CommonMarkViewer::default_width` instead of a fixed 600 px width.
-- [x] Split long inline-code text into row-wrapped segments at `/`, `\\`, `-`, `_`, or whitespace after a safe chunk length.
-- [x] Add a regression test for long inline-code path wrapping.
+- [x] Split long inline-code text into row-wrapped segments after a safe chunk length.
+- [x] Add a root integration test for short, path-like, and unbroken inline-code wrapping.
 - [x] Verify manually on a wide System Notes window under Hyprland/Wayland.
 
 ## Key Discoveries
@@ -43,7 +43,7 @@ for segment in inline_code_wrap_segments(&text) {
 |----------|--------|
 | `src/main.rs` | Pass current `ui.available_width()` into `CommonMarkViewer::default_width`. |
 | `pulldown.rs` | Add `inline_code_wrap_segments()` helper and use it for `Event::Code`. |
-| `wrapping.rs` | Add focused regression test for long inline-code path wrapping. |
+| `tests/wrapping.rs` | Add root integration coverage for short, path-like, and unbroken inline-code wrapping. |
 
 ### Why the fix stays narrow
 

@@ -7,8 +7,8 @@ use egui::{self, Id, Pos2, TextStyle, Ui};
 
 use crate::List;
 use egui_commonmark_backend_extended::elements::{
-    ImmutableCheckbox, blockquote, footnote, footnote_start, heading_end_spacing,
-    heading_start_spacing, newline, paragraph_end_spacing, rule, soft_break,
+    blockquote, footnote, footnote_start, heading_end_spacing, heading_start_spacing, newline,
+    paragraph_end_spacing, rule, soft_break, ImmutableCheckbox,
 };
 use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
@@ -25,9 +25,7 @@ fn inline_code_wrap_segments(text: &str) -> Vec<String> {
         current.push(character);
         current_len += 1;
 
-        if current_len >= MAX_SEGMENT_CHARS
-            && (matches!(character, '/' | '\\' | '-' | '_') || character.is_whitespace())
-        {
+        if current_len >= MAX_SEGMENT_CHARS {
             segments.push(std::mem::take(&mut current));
             current_len = 0;
         }
