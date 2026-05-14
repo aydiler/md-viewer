@@ -2062,7 +2062,7 @@ impl MarkdownApp {
                     CommonMarkViewer::new()
                         .default_implicit_uri_scheme(&tab.base_uri)
                         .max_image_width(Some(800))
-                        .default_width(Some(600))
+                        .default_width(Some(ui.available_width() as usize))
                         .indentation_spaces(2)
                         .show_alt_text_on_hover(true)
                         .syntax_theme_dark("base16-ocean.dark")

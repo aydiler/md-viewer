@@ -7,12 +7,42 @@ use egui::{self, Id, Pos2, TextStyle, Ui};
 
 use crate::List;
 use egui_commonmark_backend_extended::elements::{
-    blockquote, footnote, footnote_start, heading_end_spacing, heading_start_spacing, newline,
-    paragraph_end_spacing, rule, soft_break, ImmutableCheckbox,
+    ImmutableCheckbox, blockquote, footnote, footnote_start, heading_end_spacing,
+    heading_start_spacing, newline, paragraph_end_spacing, rule, soft_break,
 };
 use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
 use pulldown_cmark::{CowStr, HeadingLevel};
+
+fn inline_code_wrap_segments(text: &str) -> Vec<String> {
+    const MAX_SEGMENT_CHARS: usize = 56;
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+
+    for character in text.chars() {
+        current.push(character);
+        current_len += 1;
+
+        if current_len >= MAX_SEGMENT_CHARS
+            && (matches!(character, '/' | '\\' | '-' | '_') || character.is_whitespace())
+        {
+            segments.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    if segments.is_empty() {
+        vec![text.to_owned()]
+    } else {
+        segments
+    }
+}
 
 /// Newline logic is constructed by the following:
 /// All elements try to insert a newline before them (if they are allowed)
@@ -198,7 +228,7 @@ impl CommonMarkViewerInternal {
         text: &str,
         split_points_id: Option<Id>,
     ) -> (egui::InnerResponse<()>, Vec<CheckboxClickEvent>) {
-        let max_width = options.max_width(ui);
+        let available_width = options.max_width(ui);
         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
 
         // Compute content hash and ensure events are cached
@@ -213,20 +243,18 @@ impl CommonMarkViewerInternal {
             cache.set_cached_events(content_hash, owned_events);
         }
 
-        let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
+        let re = ui.allocate_ui_with_layout(egui::vec2(available_width, 0.0), layout, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
 
             // Use cached events — clone the Vec reference data for iteration
             // (events are 'static so this is cheap pointer copies, not re-parsing)
-            let events_data = cache.get_cached_events(content_hash)
+            let events_data = cache
+                .get_cached_events(content_hash)
                 .expect("events just cached")
                 .to_vec();
-            let mut events = events_data
-                .into_iter()
-                .enumerate()
-                .peekable();
+            let mut events = events_data.into_iter().enumerate().peekable();
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
@@ -237,7 +265,15 @@ impl CommonMarkViewerInternal {
                     self.line.should_end_newline_forced = false;
                 }
 
-                self.process_event(ui, &mut events, e, src_span, cache, options, max_width);
+                self.process_event(
+                    ui,
+                    &mut events,
+                    e,
+                    src_span,
+                    cache,
+                    options,
+                    available_width,
+                );
 
                 if let Some(source_id) = split_points_id {
                     if should_add_split_point {
@@ -542,47 +578,53 @@ impl CommonMarkViewerInternal {
                 .max_width(max_width)
                 .show(ui, |ui| {
                     egui::Frame::group(ui.style()).show(ui, |ui| {
-                let Table { header, rows } = parse_table(events);
+                        let Table { header, rows } = parse_table(events);
 
-                egui::Grid::new(id).striped(true).show(ui, |ui| {
-                    for col in header {
-                        ui.horizontal(|ui| {
-                            for (e, src_span) in col {
-                                let tmp_start =
-                                    std::mem::replace(&mut self.line.should_start_newline, false);
-                                let tmp_end =
-                                    std::mem::replace(&mut self.line.should_end_newline, false);
-                                self.event(ui, e, src_span, cache, options, max_width);
-                                self.line.should_start_newline = tmp_start;
-                                self.line.should_end_newline = tmp_end;
+                        egui::Grid::new(id).striped(true).show(ui, |ui| {
+                            for col in header {
+                                ui.horizontal(|ui| {
+                                    for (e, src_span) in col {
+                                        let tmp_start = std::mem::replace(
+                                            &mut self.line.should_start_newline,
+                                            false,
+                                        );
+                                        let tmp_end = std::mem::replace(
+                                            &mut self.line.should_end_newline,
+                                            false,
+                                        );
+                                        self.event(ui, e, src_span, cache, options, max_width);
+                                        self.line.should_start_newline = tmp_start;
+                                        self.line.should_end_newline = tmp_end;
+                                    }
+                                });
+                            }
+
+                            ui.end_row();
+
+                            for row in rows {
+                                for col in row {
+                                    ui.horizontal(|ui| {
+                                        for (e, src_span) in col {
+                                            let tmp_start = std::mem::replace(
+                                                &mut self.line.should_start_newline,
+                                                false,
+                                            );
+                                            let tmp_end = std::mem::replace(
+                                                &mut self.line.should_end_newline,
+                                                false,
+                                            );
+                                            self.event(ui, e, src_span, cache, options, max_width);
+                                            self.line.should_start_newline = tmp_start;
+                                            self.line.should_end_newline = tmp_end;
+                                        }
+                                    });
+                                }
+
+                                ui.end_row();
                             }
                         });
-                    }
-
-                    ui.end_row();
-
-                    for row in rows {
-                        for col in row {
-                            ui.horizontal(|ui| {
-                                for (e, src_span) in col {
-                                    let tmp_start = std::mem::replace(
-                                        &mut self.line.should_start_newline,
-                                        false,
-                                    );
-                                    let tmp_end =
-                                        std::mem::replace(&mut self.line.should_end_newline, false);
-                                    self.event(ui, e, src_span, cache, options, max_width);
-                                    self.line.should_start_newline = tmp_start;
-                                    self.line.should_end_newline = tmp_end;
-                                }
-                            });
-                        }
-
-                        ui.end_row();
-                    }
                     });
                 });
-            });
 
             self.is_table = false;
             if events.peek().is_none() {
@@ -610,7 +652,14 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::Event::Code(text) => {
                 self.text_style.code = true;
-                self.event_text(text, ui, options);
+                let segments = inline_code_wrap_segments(&text);
+                let wraps_inline_code = segments.len() > 1;
+                for segment in segments {
+                    self.event_text(segment.into(), ui, options);
+                    if wraps_inline_code {
+                        ui.end_row();
+                    }
+                }
                 self.text_style.code = false;
             }
             pulldown_cmark::Event::InlineHtml(text) => {
@@ -677,9 +726,9 @@ impl CommonMarkViewerInternal {
     }
 
     fn event_text(&mut self, text: CowStr, ui: &mut Ui, options: &CommonMarkOptions) {
-        let rich_text = self
-            .text_style
-            .to_richtext_with_typography(ui, &text, Some(&options.typography));
+        let rich_text =
+            self.text_style
+                .to_richtext_with_typography(ui, &text, Some(&options.typography));
         if let Some(image) = &mut self.image {
             image.alt_text.push(rich_text);
         } else if let Some(block) = &mut self.code_block {
@@ -839,7 +888,10 @@ impl CommonMarkViewerInternal {
                     let left_edge = ui.min_rect().left();
                     let heading_rect = egui::Rect::from_min_size(
                         egui::pos2(left_edge, available.top()),
-                        egui::vec2(available.width() + (available.left() - left_edge), available.height()),
+                        egui::vec2(
+                            available.width() + (available.left() - left_edge),
+                            available.height(),
+                        ),
                     );
                     let rich_texts = std::mem::take(&mut self.current_heading_rich_texts);
                     ui.allocate_ui_at_rect(heading_rect, |ui| {
@@ -913,13 +965,18 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::TagEnd::HtmlBlock => {
                 if !self.html_block.is_empty() {
-                    if let Some(table) = egui_commonmark_backend_extended::html_table::parse_html_table(&self.html_block) {
+                    if let Some(table) =
+                        egui_commonmark_backend_extended::html_table::parse_html_table(
+                            &self.html_block,
+                        )
+                    {
                         self.render_html_table(ui, &table, options, max_width);
                     } else if let Some(html_fn) = options.html_fn {
                         html_fn(ui, &self.html_block);
                     } else {
                         // Render non-table HTML as plain text (existing fallback)
-                        let text: pulldown_cmark::CowStr = std::mem::take(&mut self.html_block).into();
+                        let text: pulldown_cmark::CowStr =
+                            std::mem::take(&mut self.html_block).into();
                         self.event_text(text, ui, options);
                     }
                     self.html_block.clear();
@@ -1000,9 +1057,8 @@ impl CommonMarkViewerInternal {
                                     egui::Frame::NONE
                                         .inner_margin(egui::Margin::symmetric(8, 4))
                                         .show(ui, |ui| {
-                                            let rich_text = self
-                                                .text_style
-                                                .to_richtext_with_typography(
+                                            let rich_text =
+                                                self.text_style.to_richtext_with_typography(
                                                     ui,
                                                     cell,
                                                     Some(&options.typography),
@@ -1022,8 +1078,7 @@ impl CommonMarkViewerInternal {
                         let rect = grid_response.response.rect;
                         // Estimate header height from total rows
                         let total_rows = table.header.len() + table.rows.len();
-                        let header_fraction =
-                            table.header.len() as f32 / total_rows as f32;
+                        let header_fraction = table.header.len() as f32 / total_rows as f32;
                         let separator_y = rect.top() + rect.height() * header_fraction;
                         ui.painter().hline(
                             rect.left()..=rect.right(),
@@ -1038,10 +1093,8 @@ impl CommonMarkViewerInternal {
     }
 
     fn paint_vertical_separator(ui: &mut Ui, color: egui::Color32) {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(1.0, ui.available_height()),
-            egui::Sense::hover(),
-        );
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(1.0, ui.available_height()), egui::Sense::hover());
         ui.painter().vline(
             rect.center().x,
             rect.top()..=rect.bottom(),
