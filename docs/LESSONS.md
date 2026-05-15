@@ -584,3 +584,47 @@ Visual effect: one frame lands close (line-ratio), the next frame snaps precise 
 **First attempt that regressed:** Splitting at break-friendly characters (`/ \ - _ . :`) past 56 chars to keep paths readable. At narrow window widths the variable-length segments (60-120 chars) still exceeded the column width, and egui's intra-widget wrap re-introduced the original clipping bug.
 **Fix:** Blind fixed-size char-count cut. Each chunk has a known upper bound (56 chars) so it always fits the column. Mid-identifier breaks are a cosmetic cost, but functionally correct at every width.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`inline_code_wrap_segments`)
+
+---
+
+## Virtualization
+
+### show_scrollable was "buggy" because split_points were list-only
+**Context:** Adopting `CommonMarkViewer::show_scrollable` to fix scroll jank on large docs. Upstream the API was marked `#[doc(hidden)] // Buggy in scenarios more complex than the example application`.
+**Root cause:** The split_points-population gate at `parsers/pulldown.rs:347` was `self.list.is_inside_a_list() && is_element_end` — waypoints were only added for events ending *inside lists*. A doc that's mostly headings + paragraphs + code blocks produced *no* split_points. The viewport-skip math then fell back to `Pos2::ZERO` and rendered content overlapped its own tail.
+**Fix:** Add a split point at every block-level `Event::End` (Paragraph, Heading, BlockQuote, CodeBlock, List, Item, FootnoteDefinition, Table, HtmlBlock, MetadataBlock, DefinitionList*). Inline ends (Emphasis/Strong/Link/Image/Sup/Sub) stay rejected — splitting mid-paragraph would orphan inline formatting state. Table-internal ends (TableHead/Row/Cell) also rejected since tables are pre-parsed atomically.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`is_block_end_tag`)
+
+### Cache invalidation must include zoom and theme, not just width
+**Context:** `show_scrollable`'s split_points y-coords are layout-dependent. The original invalidator only watched `available_size`.
+**Problem:** Zoom (Ctrl+/-) and dark-mode toggle leave stale split_points; viewport-skip then picks the wrong event range and renders garbage.
+**Fix:** `compute_layout_signature(ui, options)` hashes width, body font height, monospace font height, `dark_mode`, `default_width`, and `indentation_spaces`. ScrollableCache stores `layout_signature: u64`; mismatch clears `split_points` and `page_size`. The body-font-height term captures egui's zoom factor implicitly — no need to read `pixels_per_point` separately.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`compute_layout_signature`)
+
+### show_scrollable parsed pulldown on every frame
+**Context:** Naive switch to `show_scrollable` would have made scroll *slower* than `show()` did.
+**Root cause:** `show()` caches parsed events in `CommonMarkCache::cached_events` keyed by content hash (parsers/pulldown.rs:318-327). `show_scrollable` did not — it ran `Parser::new_ext(text).into_offset_iter().collect()` at line 410-413 every paint, ~52 ms at 100k lines.
+**Fix:** Extend `ScrollableCache` with `events`, `content_version`, `layout_signature`. The caller (md-viewer's `Tab`) provides a monotonic `content_version: u64` bumped on every load/reload via the new `CommonMarkViewer::content_version(v)` builder. The renderer reads it via `content_version: Option<u64>` and falls back to `hash_content(text)` when omitted. Either way, parsing happens at most once per content change — clone is ~11 ms at 100k.
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`ScrollableCache`), `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show_scrollable` cache-population branch)
+
+### Selection-preserving wheel hack needs ScrollAreaOutput
+**Context:** The post-render `state.offset.y = …; state.store(...)` workaround documented above ("Scroll during selection requires post-render state modification") needs access to the underlying `ScrollAreaOutput`. After switching to `show_scrollable` the renderer owns the ScrollArea internally, so the caller can no longer build one.
+**Fix:** `CommonMarkViewer::show_scrollable` now returns `egui::scroll_area::ScrollAreaOutput<()>`. New builder methods `pending_scroll_offset(Option<f32>)` and `scroll_source(ScrollSource)` let the caller drive the renderer-owned ScrollArea without giving up the post-render hook. `tab.scroll_offset` / `tab.last_viewport_height` / `tab.last_content_height` now read from `scroll_output.state.offset.y` / `inner_rect.height()` / `content_size.y`.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/lib.rs` (builder + return type), `src/main.rs` (`render_tab_content`)
+
+### Outline scroll-to: virtualization breaks the corrective y-record loop
+**Context:** Outline-click and search-jump used to be a two-stage scroll: frame 1 lands close (line-ratio estimate via `pending_scroll_offset`), frame 2 snaps precise (via `cache.active_search_y()` recorded during paint). Post-virtualization, blocks *off-screen* don't paint and don't record their y, so the corrective scroll can't fire for far targets.
+**Fix idea (not yet implemented):** When `pending_scroll_offset` is set for a target outside the viewport, also clear `ScrollableCache::split_points` for that frame so the renderer does one full pass, populates positions, then the *next* frame snaps precisely. Same pattern the existing width-change invalidation uses.
+**Files:** TODO if it shows up in practice — flagged in `docs/devlog/020-virtualize-large-docs.md`
+
+### show_rows for the outline drops O(headers) per frame to O(visible)
+**Context:** The outline `ScrollArea::show` iterated all of `tab.outline_headers` every frame; on a 100k-line doc with ~15k headers this dominated the right-panel cost.
+**Fix:** Pre-compute `visible_indices: Vec<usize>` (skip collapsed-ancestor rows) once per frame, then use `ScrollArea::show_rows(ui, row_height, visible_indices.len(), |ui, range| ...)`. Outline rows have uniform height (fold indicator is 20px, others use `interact_size.y` which is also ~20px), so the row-height assumption holds.
+**Gotcha:** MCP widget registration now only fires for actually-rendered rows. That's correct — off-screen widgets aren't testable via MCP anyway — but means a "register every fold indicator up-front" approach won't work if you ever need a registration of every row regardless of visibility.
+**Files:** `src/main.rs` (`render_outline`)
+
+### Lazy syntect: cache LayoutJob, key by content + theme + font size
+**Context:** Syntect re-highlighted every code block on every paint (`egui_commonmark_backend/src/misc.rs:1209`). On a 100k-line doc with ~1500 code blocks this dominated first paint (~15 s of CPU) and continued to dominate during scroll.
+**Fix:** `CommonMarkCache::syntax_layouts: HashMap<u64, LayoutJob>` keyed by hash of `(content, lang, theme_is_dark, mono_font_size, code_line_height)`. `CodeBlock::end` checks the cache before running syntect. Cache hit clones the stored LayoutJob (cheap — text + format ranges).
+**Theme/zoom changes** key in new entries naturally because they're part of the key; old entries become dead weight until cache reset on file load. Bounded by unique-code-block count, typically <5 MB for real docs. LRU eviction is deferred until measured pathology.
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs` (`CommonMarkCache::syntax_layouts`, `CodeBlock::end`)
