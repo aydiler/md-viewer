@@ -49,7 +49,7 @@ case "$OS" in
     Darwin)
         case "$ARCH" in
             arm64|aarch64) ASSET_NAME="macos-arm64" ;;
-            x86_64) ASSET_NAME="macos-x86_64" ;;
+            x86_64) err "Intel Macs are not currently built. Build from source: cargo install md-viewer" ;;
             *) err "unsupported macOS architecture: $ARCH" ;;
         esac
         ;;
