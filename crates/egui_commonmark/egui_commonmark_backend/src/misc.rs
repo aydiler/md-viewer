@@ -1312,6 +1312,16 @@ pub struct CommonMarkCache {
     /// Current scroll offset, set before rendering to calculate content-relative positions.
     current_scroll_offset: f32,
 
+    /// Byte ranges of search matches in the source content. Renderer paints a background
+    /// color on overlapping text events. Sorted ascending by start.
+    search_ranges: Vec<std::ops::Range<usize>>,
+    /// Active match — gets a stronger highlight color.
+    active_search_range: Option<std::ops::Range<usize>>,
+    /// Content-relative y position recorded by the renderer when the active match
+    /// is painted. Used by the app for precise scroll-into-view, since line-ratio
+    /// estimates are unreliable in image-heavy documents.
+    active_search_y: Option<f32>,
+
     /// Mermaid diagram render states: content hash → rendering/ready/error
     #[cfg(feature = "mermaid")]
     mermaid_states: HashMap<u64, MermaidState>,
@@ -1361,7 +1371,9 @@ impl std::fmt::Debug for CommonMarkCache {
             .field("scroll", &self.scroll)
             .field("has_installed_loaders", &self.has_installed_loaders)
             .field("header_positions", &self.header_positions)
-            .field("current_scroll_offset", &self.current_scroll_offset);
+            .field("current_scroll_offset", &self.current_scroll_offset)
+            .field("search_ranges_count", &self.search_ranges.len())
+            .field("active_search_range", &self.active_search_range);
         #[cfg(feature = "mermaid")]
         s.field("mermaid_states_count", &self.mermaid_states.len());
         #[cfg(feature = "mermaid")]
@@ -1390,6 +1402,9 @@ impl Default for CommonMarkCache {
             has_installed_loaders: false,
             header_positions: HashMap::new(),
             current_scroll_offset: 0.0,
+            search_ranges: Vec::new(),
+            active_search_range: None,
+            active_search_y: None,
             #[cfg(feature = "mermaid")]
             mermaid_states: HashMap::new(),
             #[cfg(feature = "mermaid")]
@@ -1577,6 +1592,53 @@ impl CommonMarkCache {
     /// Should be called when content changes.
     pub fn clear_header_positions(&mut self) {
         self.header_positions.clear();
+    }
+
+    /// Replace the set of search-match byte ranges. Renderer paints a background color
+    /// on text events that overlap these ranges. Ranges should be sorted by start and
+    /// non-overlapping; the caller is responsible for that invariant.
+    pub fn set_search_ranges(&mut self, ranges: Vec<std::ops::Range<usize>>) {
+        self.search_ranges = ranges;
+    }
+
+    /// Set the currently active match. Renderer uses a stronger highlight color for it.
+    /// Resets the recorded y position; the renderer will re-record on next paint.
+    pub fn set_active_search_range(&mut self, range: Option<std::ops::Range<usize>>) {
+        if self.active_search_range != range {
+            self.active_search_y = None;
+        }
+        self.active_search_range = range;
+    }
+
+    /// Clear all search-match state.
+    pub fn clear_search_ranges(&mut self) {
+        self.search_ranges.clear();
+        self.active_search_range = None;
+        self.active_search_y = None;
+    }
+
+    /// Record the actual content-relative y position of the active match.
+    /// Called by the renderer when an Active highlight is emitted.
+    /// `viewport_y` is the cursor y inside `show_viewport`; converted to
+    /// content-relative by adding the scroll offset.
+    pub fn record_active_search_y_viewport(&mut self, viewport_y: f32) {
+        self.active_search_y = Some(self.current_scroll_offset + viewport_y);
+    }
+
+    /// Get the recorded content-relative y of the active match, if it has rendered
+    /// at least once since the active range was set. Used for precise scroll-into-view.
+    pub fn active_search_y(&self) -> Option<f32> {
+        self.active_search_y
+    }
+
+    /// Read-only view of stored search ranges (used by the renderer).
+    pub fn search_ranges(&self) -> &[std::ops::Range<usize>] {
+        &self.search_ranges
+    }
+
+    /// Read-only view of the active search range (used by the renderer).
+    pub fn active_search_range(&self) -> Option<&std::ops::Range<usize>> {
+        self.active_search_range.as_ref()
     }
 
     /// Get cached parsed events if the content hash matches.

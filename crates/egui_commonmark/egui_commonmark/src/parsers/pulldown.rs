@@ -14,6 +14,87 @@ use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
 use pulldown_cmark::{CowStr, HeadingLevel};
 
+/// Search-match highlight kind for a single rendered text segment.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum HighlightKind {
+    None,
+    Match,
+    Active,
+}
+
+impl HighlightKind {
+    fn background_color(self, ui: &Ui) -> Option<egui::Color32> {
+        let dark = ui.style().visuals.dark_mode;
+        match self {
+            HighlightKind::None => None,
+            HighlightKind::Match => Some(if dark {
+                egui::Color32::from_rgb(102, 92, 46)
+            } else {
+                egui::Color32::from_rgb(255, 229, 127)
+            }),
+            HighlightKind::Active => Some(if dark {
+                egui::Color32::from_rgb(156, 107, 26)
+            } else {
+                egui::Color32::from_rgb(255, 167, 38)
+            }),
+        }
+    }
+}
+
+/// Split `text` (covering `span` in the source) into segments tagged with the
+/// highlight kind that applies to each. Returns at least one segment.
+///
+/// Assumes `text.len() == span.len()` — caller is responsible for that check
+/// (markdown escapes or smart-punct transforms can break it).
+fn compute_highlight_segments(
+    text: &str,
+    span: &Range<usize>,
+    ranges: &[Range<usize>],
+    active: Option<&Range<usize>>,
+) -> Vec<(String, HighlightKind)> {
+    let mut overlaps: Vec<(usize, usize, HighlightKind)> = Vec::new();
+    for r in ranges {
+        let start = r.start.max(span.start);
+        let end = r.end.min(span.end);
+        if start >= end {
+            continue;
+        }
+        let local_start = start - span.start;
+        let local_end = end - span.start;
+        let is_active = active.map(|a| a == r).unwrap_or(false);
+        let kind = if is_active {
+            HighlightKind::Active
+        } else {
+            HighlightKind::Match
+        };
+        overlaps.push((local_start, local_end, kind));
+    }
+
+    if overlaps.is_empty() {
+        return vec![(text.to_string(), HighlightKind::None)];
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    for (start, end, kind) in overlaps {
+        if start > cursor
+            && text.is_char_boundary(cursor)
+            && text.is_char_boundary(start)
+        {
+            segments.push((text[cursor..start].to_string(), HighlightKind::None));
+        }
+        if text.is_char_boundary(start) && text.is_char_boundary(end) {
+            segments.push((text[start..end].to_string(), kind));
+        }
+        cursor = end;
+    }
+    if cursor < text.len() && text.is_char_boundary(cursor) {
+        segments.push((text[cursor..].to_string(), HighlightKind::None));
+    }
+
+    segments
+}
+
 /// Split a long inline-code token into fixed-size chunks so the row-wrap layout
 /// can put each chunk on its own row instead of overflowing the content width.
 /// Short tokens (<= MAX) pass through unchanged.
@@ -638,14 +719,38 @@ impl CommonMarkViewerInternal {
             pulldown_cmark::Event::Start(tag) => self.start_tag(ui, tag, options),
             pulldown_cmark::Event::End(tag) => self.end_tag(ui, tag, cache, options, max_width),
             pulldown_cmark::Event::Text(text) => {
-                self.event_text(text, ui, options);
+                self.event_text_with_highlights(text, &src_span, cache, ui, options);
             }
             pulldown_cmark::Event::Code(text) => {
                 self.text_style.code = true;
                 let segments = inline_code_wrap_segments(&text);
                 let wrap = segments.len() > 1;
+                // For non-wrapped inline code, derive an interior span (strip equal
+                // backticks on each side) so search highlights line up with the visible
+                // code text. Wrapped (>56 char) code skips highlighting in v1.
+                let interior_span = if !wrap && src_span.len() >= text.len() {
+                    let delim_total = src_span.len() - text.len();
+                    if delim_total > 0 && delim_total % 2 == 0 {
+                        let bt = delim_total / 2;
+                        Some((src_span.start + bt)..(src_span.end - bt))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 for segment in segments {
-                    self.event_text(segment.into(), ui, options);
+                    if let Some(ref span) = interior_span {
+                        self.event_text_with_highlights(
+                            segment.into(),
+                            span,
+                            cache,
+                            ui,
+                            options,
+                        );
+                    } else {
+                        self.event_text(segment.into(), ui, options);
+                    }
                     if wrap {
                         ui.end_row();
                     }
@@ -716,12 +821,52 @@ impl CommonMarkViewerInternal {
     }
 
     fn event_text(&mut self, text: CowStr, ui: &mut Ui, options: &CommonMarkOptions) {
-        let rich_text = self
-            .text_style
-            .to_richtext_with_typography(ui, &text, Some(&options.typography));
+        self.emit_text(text, HighlightKind::None, ui, options);
+    }
+
+    /// Like `event_text`, but applies a search-highlight background color when `hl` is not `None`.
+    fn emit_text(
+        &mut self,
+        text: CowStr,
+        hl: HighlightKind,
+        ui: &mut Ui,
+        options: &CommonMarkOptions,
+    ) {
+        let bg = hl.background_color(ui);
+        let mut rich_text = if bg.is_some() && self.text_style.code {
+            // egui's RichText renderer overrides `background_color` with the theme's
+            // `code_bg_color` whenever `.code()` is set (widget_text.rs:421). To make
+            // our search highlight visible inside inline code, build the RichText
+            // manually with a monospace font instead of calling `.code()` — that gives
+            // the visual effect of code (monospace + slightly larger weight) while
+            // letting our background_color survive.
+            let mut t = egui::RichText::new(text.as_ref())
+                .text_style(egui::TextStyle::Monospace);
+            if self.text_style.strong {
+                t = t.strong();
+            }
+            if self.text_style.emphasis {
+                t = t.italics();
+            }
+            if self.text_style.strikethrough {
+                t = t.strikethrough();
+            }
+            if self.text_style.quote {
+                t = t.weak();
+            }
+            t
+        } else {
+            self.text_style
+                .to_richtext_with_typography(ui, &text, Some(&options.typography))
+        };
+        if let Some(bg) = bg {
+            rich_text = rich_text.background_color(bg);
+        }
         if let Some(image) = &mut self.image {
             image.alt_text.push(rich_text);
         } else if let Some(block) = &mut self.code_block {
+            // Code blocks render via syntect after end_tag; highlight inside code
+            // blocks is a v2 feature (would need syntect integration). Just collect text.
             block.content.push_str(&text);
         } else if let Some(link) = &mut self.link {
             link.text.push(rich_text);
@@ -732,6 +877,37 @@ impl CommonMarkViewerInternal {
             self.current_heading_rich_texts.push(rich_text);
         } else {
             ui.label(rich_text);
+        }
+    }
+
+    /// Split `text` at search-match boundaries (using `span` to locate matches in the
+    /// source content) and emit each segment with the appropriate highlight. Falls back
+    /// to plain `event_text` when there are no ranges or `text.len() != span.len()`
+    /// (markdown escapes or smart-punct transforms can break the 1:1 byte mapping).
+    fn event_text_with_highlights(
+        &mut self,
+        text: CowStr,
+        span: &Range<usize>,
+        cache: &mut CommonMarkCache,
+        ui: &mut Ui,
+        options: &CommonMarkOptions,
+    ) {
+        let ranges = cache.search_ranges();
+        if ranges.is_empty() || text.len() != span.len() {
+            self.event_text(text, ui, options);
+            return;
+        }
+        let segments =
+            compute_highlight_segments(&text, span, ranges, cache.active_search_range());
+        for (segment_text, hl) in segments {
+            // Record the cursor y for the Active segment BEFORE emitting it, so the
+            // app can scroll to the active match's actual position (line-ratio
+            // estimates are unreliable in image-heavy docs).
+            if hl == HighlightKind::Active {
+                let vy = ui.cursor().top();
+                cache.record_active_search_y_viewport(vy);
+            }
+            self.emit_text(segment_text.into(), hl, ui, options);
         }
     }
 
