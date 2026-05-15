@@ -597,6 +597,11 @@ struct Tab {
     history_forward: Vec<PathBuf>,
     /// Cached matches for the current search query; empty when bar is closed or query is empty
     search_matches: Vec<SearchMatch>,
+    /// Monotonic counter bumped on every content load/reload. Used as the
+    /// invalidation key for the renderer's per-document scroll cache so
+    /// parsed events and split_points can survive across frames without
+    /// re-hashing the entire content.
+    content_version: u64,
 }
 
 impl Tab {
@@ -638,6 +643,7 @@ impl Tab {
             history_back: Vec::new(),
             history_forward: Vec::new(),
             search_matches: Vec::new(),
+            content_version: 1,
         }
     }
 
@@ -671,6 +677,7 @@ impl Tab {
             history_back: Vec::new(),
             history_forward: Vec::new(),
             search_matches: Vec::new(),
+            content_version: 1,
         }
     }
 
@@ -691,6 +698,7 @@ impl Tab {
             self.content_lines = content.lines().count();
             self.content = content.into_owned();
             self.cache = CommonMarkCache::default();
+            self.content_version = self.content_version.wrapping_add(1);
             self.base_uri = Self::compute_base_uri(&self.path);
 
             let parsed = parse_headers(&self.content);
@@ -725,6 +733,7 @@ impl Tab {
             self.path = path.clone();
             self.id = egui::Id::new(path);
             self.cache = CommonMarkCache::default();
+            self.content_version = self.content_version.wrapping_add(1);
             self.scroll_offset = 0.0;
             self.pending_scroll_offset = None;
             self.base_uri = Self::compute_base_uri(&self.path);
