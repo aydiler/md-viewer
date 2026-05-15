@@ -1,6 +1,6 @@
 app-id: io.github.aydiler.md-viewer
 runtime: org.freedesktop.Platform
-runtime-version: '23.08'
+runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -12,10 +12,16 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
-  # File access (markdown files live in the user's home tree).
-  # Tighten to xdg-documents only if you'd rather have a stricter sandbox,
-  # but most users keep notes outside ~/Documents.
-  - --filesystem=home
+  # Network is needed so HTTP image URLs in markdown render in the sandbox
+  # (the README documents remote-image support, and shields.io badges, etc.).
+  - --share=network
+  # Read-only host access. A viewer never writes to user files, but it must
+  # read files at arbitrary paths: CLI invocation (`md-viewer ~/notes/foo.md`),
+  # live reload via the notify watcher, and files dropped from outside
+  # xdg-documents. Narrower than --filesystem=home in capability (no writes),
+  # broader in scope (also exposes /etc, /usr as readable) — defensible for a
+  # markdown viewer.
+  - --filesystem=host:ro
   - --filesystem=xdg-documents
   # Native file dialogs via portals
   - --talk-name=org.freedesktop.portal.FileChooser
@@ -55,8 +61,15 @@ modules:
     sources:
       - type: git
         url: https://github.com/aydiler/md-viewer.git
-        tag: v0.1.2
+        tag: v0.1.3
+        # Pinning to the tag's commit SHA satisfies Flathub linter and
+        # prevents tag-rewrite drift from changing the build inputs.
+        commit: 43d5efa8b68027df28124401839e86d13b4d1ee2
+        # Tells Flathub's update bot to watch for new tags after merge.
+        x-checker-data:
+          type: git
+          tag-pattern: '^v([\d.]+)$'
       # Pre-resolved Cargo sources (generated with flatpak-cargo-generator.py).
-      # Regenerate when Cargo.lock changes:
+      # Regenerate when Cargo.lock changes its transitive deps:
       #   python3 flatpak-cargo-generator.py Cargo.lock -o flatpak/cargo-sources.json
       - cargo-sources.json
