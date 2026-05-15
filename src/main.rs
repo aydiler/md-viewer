@@ -2262,18 +2262,31 @@ impl MarkdownApp {
                     });
                     ui.separator();
                 }
+                // Pre-compute the visible header indices (skip those hidden
+                // by collapsed ancestors). This lets us virtualize via
+                // show_rows, paying O(visible-on-screen) instead of
+                // O(total-headers) per frame. On a 100k-line doc with ~15k
+                // headers this is the difference between visibly laggy and
+                // smooth outline interactions.
+                let visible_indices: Vec<usize> = (0..tab.outline_headers.len())
+                    .filter(|&i| {
+                        !header_is_hidden(&tab.outline_headers, i, &tab.collapsed_headers)
+                    })
+                    .collect();
+                let show_fold_indicators = any_header_has_children(&tab.outline_headers);
+                // Row height: fold indicator is 20px tall, fold-indicator-less
+                // rows fall back to the standard interact_size which is
+                // typically 18–20px anyway. A small fudge keeps neighboring
+                // rows from clipping into each other.
+                let row_height = ui.spacing().interact_size.y.max(20.0);
+
                 egui::ScrollArea::vertical()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .id_salt("outline")
-                    .show(ui, |ui| {
+                    .show_rows(ui, row_height, visible_indices.len(), |ui, row_range| {
                         let mut toggle_index: Option<usize> = None;
-                        // Only reserve space for fold indicators if any header has children
-                        let show_fold_indicators = any_header_has_children(&tab.outline_headers);
-                        for (idx, header) in tab.outline_headers.iter().enumerate() {
-                            // Skip headers hidden by collapsed ancestors
-                            if header_is_hidden(&tab.outline_headers, idx, &tab.collapsed_headers) {
-                                continue;
-                            }
+                        for &idx in &visible_indices[row_range] {
+                            let header = &tab.outline_headers[idx];
 
                             let has_children = header_has_children(&tab.outline_headers, idx);
                             let is_collapsed = tab.collapsed_headers.contains(&idx);
