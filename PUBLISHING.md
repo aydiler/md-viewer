@@ -19,17 +19,23 @@ This document covers the **one-time setup** for each channel and the **per-relea
 
 ## Crates.io
 
-```bash
-# Login (one-time)
-cargo login
+**Crates.io publishing is intentionally NOT automated** in `release.yml`. `cargo publish` rejects this repo because `Cargo.toml` consumes `egui_commonmark_extended` with a custom `math` feature (added in the vendored fork at `crates/egui_commonmark/`). The upstream `egui_commonmark_extended` on crates.io does not have that feature, so dependency resolution against the registry fails:
 
-# Publish (run from repo root)
-cargo publish
+```
+package `md-viewer` depends on `egui_commonmark_extended` with feature `math`
+but `egui_commonmark_extended` does not have that feature
 ```
 
-**Note**: The vendored `egui_commonmark` fork uses a local path. For crates.io publishing, you may need to either:
-- Publish your fork to crates.io first
-- Or patch the dependency in Cargo.toml to use a git URL
+To re-enable crates.io publishing, you would need to either:
+- Publish the vendored fork to crates.io under a new name (e.g., `egui_commonmark_extended_aydiler`) and update `Cargo.toml` to depend on the renamed crate. Ongoing fork maintenance becomes a separate publishing pipeline.
+- Or, upstream the `math` feature into `egui_commonmark_extended` and drop the local patch.
+
+Manual publish (if you do address one of the above):
+
+```bash
+cargo login              # one-time
+cargo publish            # from repo root
+```
 
 ## AUR (Arch User Repository)
 
