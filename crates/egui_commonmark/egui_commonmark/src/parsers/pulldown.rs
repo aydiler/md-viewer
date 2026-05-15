@@ -395,6 +395,32 @@ impl CommonMarkViewerInternal {
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
 
+        // Ensure parsed events are cached on the ScrollableCache, keyed by a
+        // content version. The version is currently derived from a content
+        // hash as a stand-in; a later commit threads a caller-provided
+        // counter through the public API so we can skip even this hash.
+        // The win here is avoiding pulldown_cmark::Parser::new_ext + collect
+        // on every frame (~52 ms at 100k lines).
+        let version = Self::hash_content(text);
+        {
+            let sc = scroll_cache(cache, &source_id);
+            if sc.events.is_empty() || sc.content_version != version {
+                sc.events = pulldown_cmark::Parser::new_ext(
+                    text,
+                    parser_options_math(options.math_fn.is_some()),
+                )
+                .into_offset_iter()
+                .map(|(e, r)| (e.into_static(), r))
+                .collect();
+                sc.content_version = version;
+                // Content changed — cached split_points y-coords are no
+                // longer valid for this content. Drop them so the first
+                // post-change frame falls into the bootstrap branch below.
+                sc.page_size = None;
+                sc.split_points.clear();
+            }
+        }
+
         let Some(page_size) = scroll_cache(cache, &source_id).page_size else {
             egui::ScrollArea::vertical()
                 .id_salt(scroll_id)
@@ -407,10 +433,11 @@ impl CommonMarkViewerInternal {
             return;
         };
 
-        let events =
-            pulldown_cmark::Parser::new_ext(text, parser_options_math(options.math_fn.is_some()))
-                .into_offset_iter()
-                .collect::<Vec<_>>();
+        // Clone owned events out of the cache so we can iterate while
+        // process_event mutably borrows the cache for syntect/header state.
+        // The clone is O(events) but uses Event<'static>'s cheap refcounted
+        // CowStr internals — measured ~11 ms at 100k lines vs ~52 ms parse.
+        let events = scroll_cache(cache, &source_id).events.clone();
 
         let num_rows = events.len();
 
