@@ -245,6 +245,36 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
     }
 }
 
+/// Hash the layout-affecting render context.
+///
+/// `split_points` cache y-positions, which become invalid when anything that
+/// affects layout changes. The previous code (parsers/pulldown.rs invalidation
+/// block) only watched `available_size`, so zooming (Ctrl++/-) or toggling
+/// dark mode would leave stale split_points in place and the viewport-skip
+/// math would render the wrong content range.
+fn compute_layout_signature(ui: &egui::Ui, options: &CommonMarkOptions) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Width drives wrap and is the dominant layout input.
+    ui.available_width().to_bits().hash(&mut h);
+    // Body text height already encodes egui's zoom factor and any explicit
+    // font-size override, so we don't need to read pixels_per_point separately.
+    ui.text_style_height(&egui::TextStyle::Body)
+        .to_bits()
+        .hash(&mut h);
+    ui.text_style_height(&egui::TextStyle::Monospace)
+        .to_bits()
+        .hash(&mut h);
+    // Theme doesn't change widget heights, but it does change the resolved
+    // syntect theme — invalidating here keeps split_points and the syntect
+    // cache (added later) coherent.
+    ui.style().visuals.dark_mode.hash(&mut h);
+    // Caller-configured constraints that affect block widths.
+    options.default_width.hash(&mut h);
+    options.indentation_spaces.hash(&mut h);
+    h.finish()
+}
+
 /// Whether a TagEnd marks a safe block-level boundary for viewport-skip.
 ///
 /// At a block end the renderer's transient inline state (heading rich-text
@@ -433,6 +463,7 @@ impl CommonMarkViewerInternal {
     ) {
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
+        let layout_sig = compute_layout_signature(ui, options);
 
         // Ensure parsed events are cached on the ScrollableCache, keyed by a
         // content version. The version is currently derived from a content
@@ -457,6 +488,14 @@ impl CommonMarkViewerInternal {
                 // post-change frame falls into the bootstrap branch below.
                 sc.page_size = None;
                 sc.split_points.clear();
+            }
+            // Width/zoom/theme change: y-coordinates are invalid for the
+            // new layout, even though parsed events are still good.
+            if sc.layout_signature != layout_sig {
+                sc.layout_signature = layout_sig;
+                sc.page_size = None;
+                sc.split_points.clear();
+                sc.available_size = available_size;
             }
         }
 
@@ -549,13 +588,10 @@ impl CommonMarkViewerInternal {
                 });
             });
 
-        // Forcing full re-render to repopulate split points for the new size
-        let scroll_cache = scroll_cache(cache, &source_id);
-        if available_size != scroll_cache.available_size {
-            scroll_cache.available_size = available_size;
-            scroll_cache.page_size = None;
-            scroll_cache.split_points.clear();
-        }
+        // No trailing invalidation needed — layout_signature is checked at
+        // the top of show_scrollable, so a width/zoom/theme change in the
+        // same frame falls into the bootstrap branch above immediately
+        // instead of one frame later.
     }
 
     #[allow(clippy::too_many_arguments)]
