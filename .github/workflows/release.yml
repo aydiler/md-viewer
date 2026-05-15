@@ -158,19 +158,37 @@ jobs:
     name: Publish to AUR
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
     permissions:
       contents: read
+    env:
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
     steps:
+      # GitHub Actions disallows both `secrets.*` and `env.*` in job-level `if:`,
+      # so we gate at step level instead. This step always succeeds and sets an
+      # output that subsequent steps check, leaving the job green when the secret
+      # isn't configured.
+      - name: Check AUR secret
+        id: check
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY not set; skipping AUR publish (see PUBLISHING.md for setup)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.proceed == 'true'
 
       - name: Set version
+        if: steps.check.outputs.proceed == 'true'
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
 
       - name: Set up SSH for AUR
+        if: steps.check.outputs.proceed == 'true'
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
           ssh-keyscan aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null
           cat > ~/.ssh/config <<'EOF'
@@ -182,6 +200,7 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: Clone AUR repo and update PKGBUILD
+        if: steps.check.outputs.proceed == 'true'
         run: |
           git clone ssh://aur@aur.archlinux.org/md-viewer-git.git aur-repo
           cp aur/PKGBUILD aur-repo/PKGBUILD
@@ -190,6 +209,7 @@ jobs:
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" aur-repo/PKGBUILD
 
       - name: Regenerate .SRCINFO
+        if: steps.check.outputs.proceed == 'true'
         run: |
           # makepkg refuses to run as root; spin up an Arch container with an unprivileged user.
           docker run --rm -v "$PWD/aur-repo:/pkg" -w /pkg archlinux/archlinux:base-devel bash -c '
@@ -199,6 +219,7 @@ jobs:
           ' > aur-repo/.SRCINFO
 
       - name: Commit and push to AUR
+        if: steps.check.outputs.proceed == 'true'
         working-directory: aur-repo
         run: |
           git config user.name "md-viewer CI"
