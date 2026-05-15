@@ -14,6 +14,38 @@ use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
 use pulldown_cmark::{CowStr, HeadingLevel};
 
+/// Split a long inline-code token into fixed-size chunks so the row-wrap layout
+/// can put each chunk on its own row instead of overflowing the content width.
+/// Short tokens (<= MAX) pass through unchanged.
+///
+/// Blind char-count cut (not break-friendly on `/`, `-`, etc.): variable-length
+/// segments can still exceed the column at narrow widths and re-introduce the
+/// original clipping bug. Fixed-size chunks always fit.
+fn inline_code_wrap_segments(text: &str) -> Vec<String> {
+    const MAX_SEGMENT_CHARS: usize = 56;
+
+    if text.chars().count() <= MAX_SEGMENT_CHARS {
+        return vec![text.to_owned()];
+    }
+
+    let mut segments = Vec::new();
+    let mut current = String::with_capacity(MAX_SEGMENT_CHARS * 4);
+    let mut current_len = 0;
+
+    for ch in text.chars() {
+        current.push(ch);
+        current_len += 1;
+        if current_len >= MAX_SEGMENT_CHARS {
+            segments.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
 /// Newline logic is constructed by the following:
 /// All elements try to insert a newline before them (if they are allowed)
 /// and end their own line.
@@ -610,7 +642,14 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::Event::Code(text) => {
                 self.text_style.code = true;
-                self.event_text(text, ui, options);
+                let segments = inline_code_wrap_segments(&text);
+                let wrap = segments.len() > 1;
+                for segment in segments {
+                    self.event_text(segment.into(), ui, options);
+                    if wrap {
+                        ui.end_row();
+                    }
+                }
                 self.text_style.code = false;
             }
             pulldown_cmark::Event::InlineHtml(text) => {
