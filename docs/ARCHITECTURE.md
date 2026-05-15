@@ -53,6 +53,8 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 
 - **Link Navigation**: Uses egui_commonmark's link hook mechanism. Ctrl+Click opens links in new tabs, regular click navigates within the current tab.
 
+- **Search (Ctrl+F)**: Current-document find bar with inline highlights. `SearchState` lives on `MarkdownApp`; per-tab `search_matches: Vec<SearchMatch>` cache match byte ranges. Highlights are painted by the vendored `egui_commonmark` renderer via a new `CommonMarkCache::set_search_ranges` API; the renderer splits `Event::Text` and (non-wrapped) `Event::Code` at range boundaries and applies a background color to the matching segments. Enter/Shift+Enter cycle matches with line-ratio scroll-into-view; Esc closes the bar and clears highlights on all tabs.
+
 - **Global Allocator**: mimalloc for performance
 
 ## Key Libraries

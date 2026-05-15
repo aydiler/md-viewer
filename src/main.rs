@@ -158,6 +158,37 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
+/// A single match in a tab's content, identified by byte range and 1-based line number
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchMatch {
+    byte_start: usize,
+    byte_end: usize,
+    line_number: usize,
+}
+
+/// Per-frame return from `render_search_bar`
+#[derive(Default)]
+struct SearchBarOutcome {
+    close_requested: bool,
+    prev_clicked: bool,
+    next_clicked: bool,
+}
+
+/// App-level search state — only one find bar is visible at a time
+#[derive(Default)]
+struct SearchState {
+    is_open: bool,
+    query: String,
+    /// Shadow copy of `query` used to detect changes across frames
+    last_query: String,
+    /// Tab index the cached matches were built for; `None` forces rebuild
+    last_tab: Option<usize>,
+    /// Set after Ctrl+F so the text input is focused next frame
+    focus_requested: bool,
+    /// Index into the active tab's `search_matches`
+    active_match_index: usize,
+}
+
 /// Action from file explorer interaction
 #[derive(Default)]
 struct ExplorerAction {
@@ -557,12 +588,15 @@ struct Tab {
     scroll_offset: f32,
     pending_scroll_offset: Option<f32>,
     last_content_height: f32,
+    last_viewport_height: f32,
     content_lines: usize,
     local_links: Vec<String>,
     /// Cached base URI for markdown image/link resolution (e.g. "file:///path/to/dir/")
     base_uri: String,
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
+    /// Cached matches for the current search query; empty when bar is closed or query is empty
+    search_matches: Vec<SearchMatch>,
 }
 
 impl Tab {
@@ -597,11 +631,13 @@ impl Tab {
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             last_content_height: 0.0,
+            last_viewport_height: 0.0,
             content_lines,
             local_links,
             base_uri,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            search_matches: Vec::new(),
         }
     }
 
@@ -629,10 +665,12 @@ impl Tab {
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             last_content_height: 0.0,
+            last_viewport_height: 0.0,
             content_lines,
             local_links,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            search_matches: Vec::new(),
         }
     }
 
@@ -664,7 +702,15 @@ impl Tab {
             for link in &self.local_links {
                 self.cache.add_link_hook(link);
             }
+
+            // Stale byte ranges; caller rebuilds if search bar is open
+            self.search_matches.clear();
         }
+    }
+
+    /// Rebuild `search_matches` for `query`. Empty query clears matches.
+    fn rebuild_search(&mut self, query: &str) {
+        self.search_matches = find_matches(&self.content, query);
     }
 
     fn load_file(&mut self, path: &PathBuf) {
@@ -692,6 +738,9 @@ impl Tab {
             for link in &self.local_links {
                 self.cache.add_link_hook(link);
             }
+
+            // Stale byte ranges; caller rebuilds if search bar is open
+            self.search_matches.clear();
         }
     }
 
@@ -863,6 +912,93 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         document_title,
         outline_headers,
     }
+}
+
+/// Find all occurrences of `query` in `content`, case-insensitive (ASCII only).
+///
+/// Byte offsets are 1:1 with `content` because `to_ascii_lowercase` does not change
+/// byte length. Non-ASCII letters match literally (`É` does not match `é`) — see the
+/// devlog future-improvements list for the case-toggle and full Unicode case folding.
+///
+/// Matches spanning a newline are excluded (a search bar should not jump to results
+/// the user cannot interpret as a single line).
+///
+/// Matches inside markdown that's not visibly rendered are also excluded:
+/// - Image alt-text `![alt](url)` — alt is hover/screen-reader only
+/// - Image URL `![alt](url)` — never visible
+/// - Link URL `[text](url)` — never visible (only the text part is)
+///
+/// Without this, cycling lands on invisible matches: the user sees no visible
+/// highlight change and the scroll target points to a paragraph where the rendered
+/// text doesn't contain the searched bytes.
+fn find_matches(content: &str, query: &str) -> Vec<SearchMatch> {
+    if query.is_empty() || content.is_empty() {
+        return Vec::new();
+    }
+
+    let content_lc = content.to_ascii_lowercase();
+    let query_lc = query.to_ascii_lowercase();
+    let query_len = query_lc.len();
+
+    // Identify byte ranges of non-renderable markdown parts so we can skip matches
+    // inside them. Pattern: `(!?)[alt-or-text](url)`.
+    // - Group 1 = `!` for images, empty for links
+    // - Group 2 = alt (image) or text (link); exclude only if image (group 1 = `!`)
+    // - Group 3 = url; always exclude (URLs are never visible inline)
+    let skip_spans: Vec<std::ops::Range<usize>> = {
+        static MD_LINK_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        let re = MD_LINK_RE.get_or_init(|| {
+            Regex::new(r"(!?)\[([^\]]*)\]\(([^)]*)\)").expect("static regex must compile")
+        });
+        let mut spans = Vec::new();
+        for cap in re.captures_iter(content) {
+            let is_image = cap.get(1).map(|m| !m.as_str().is_empty()).unwrap_or(false);
+            // Always exclude URL (group 3)
+            if let Some(url) = cap.get(3) {
+                spans.push(url.start()..url.end());
+            }
+            // For images, also exclude alt (group 2)
+            if is_image {
+                if let Some(alt) = cap.get(2) {
+                    spans.push(alt.start()..alt.end());
+                }
+            }
+        }
+        spans
+    };
+
+    let in_skip = |start: usize, end: usize| -> bool {
+        skip_spans.iter().any(|s| start >= s.start && end <= s.end)
+    };
+
+    let mut matches = Vec::new();
+    let mut line_number = 1usize;
+    let mut cursor = 0usize;
+
+    for (byte_start, _) in content_lc.match_indices(&query_lc) {
+        // Count newlines between cursor and this match's start
+        line_number += content[cursor..byte_start]
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count();
+        cursor = byte_start;
+
+        let byte_end = byte_start + query_len;
+        if content[byte_start..byte_end].contains('\n') {
+            continue; // Skip matches that cross line boundaries
+        }
+        if in_skip(byte_start, byte_end) {
+            continue; // Skip matches inside image alt-text or URL portions of links/images
+        }
+
+        matches.push(SearchMatch {
+            byte_start,
+            byte_end,
+            line_number,
+        });
+    }
+
+    matches
 }
 
 /// Check if header at `index` should be hidden because an ancestor is collapsed
@@ -1097,6 +1233,8 @@ struct MarkdownApp {
     lightbox_scroll: f32,
     // Counter for unique lightbox IDs (prevents stale egui state between opens)
     lightbox_open_count: u64,
+    // Find-bar state (current-document search)
+    search: SearchState,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -1251,6 +1389,7 @@ impl MarkdownApp {
             lightbox: None,
             lightbox_scroll: 0.0,
             lightbox_open_count: 0,
+            search: SearchState::default(),
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -1644,6 +1783,10 @@ impl MarkdownApp {
     fn reload_changed_tabs(&mut self, changed_paths: Vec<PathBuf>) {
         let now = Instant::now();
         let mut refresh_tree = false;
+        // If the active tab gets reloaded while the find bar is open, its
+        // `search_matches` will be cleared by `Tab::reload`. Force a rebuild
+        // on the next frame by invalidating the cache-validity shadow state.
+        let active_path = self.tabs.get(self.active_tab).map(|t| t.path.clone());
 
         for path in changed_paths {
             // Trigger flash effect for the changed file (use canonical path for consistent lookup)
@@ -1675,11 +1818,19 @@ impl MarkdownApp {
             }
 
             // Reload the tab content
+            let mut active_was_reloaded = false;
             for tab in &mut self.tabs {
                 if tab.path == path {
                     log::info!("Reloading tab: {:?}", path);
                     tab.reload();
+                    if Some(&tab.path) == active_path.as_ref() {
+                        active_was_reloaded = true;
+                    }
                 }
+            }
+            if active_was_reloaded && self.search.is_open {
+                // Invalidate maybe_rebuild_search's "cached for" shadow
+                self.search.last_tab = None;
             }
         }
 
@@ -1687,6 +1838,198 @@ impl MarkdownApp {
         if refresh_tree {
             log::info!("Refreshing file explorer tree");
             self.file_explorer.refresh();
+        }
+    }
+
+    /// Outcome of rendering the find bar (consumed after panel renders, before global input handler runs)
+    fn render_search_bar(&mut self, ctx: &egui::Context) -> SearchBarOutcome {
+        let mut outcome = SearchBarOutcome::default();
+        if !self.search.is_open {
+            return outcome;
+        }
+
+        let input_id = egui::Id::new("search_input");
+        let total_matches = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.search_matches.len())
+            .unwrap_or(0);
+        let active_idx = self.search.active_match_index;
+
+        egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+
+                let text_edit = egui::TextEdit::singleline(&mut self.search.query)
+                    .id(input_id)
+                    .hint_text("Find in document")
+                    .desired_width(280.0);
+                let response = ui.add(text_edit);
+
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Search: Input", "textbox", &response, None);
+
+                if self.search.focus_requested {
+                    response.request_focus();
+                    self.search.focus_requested = false;
+                }
+
+                ui.add_space(8.0);
+
+                let label_text = if self.search.query.is_empty() {
+                    String::new()
+                } else if total_matches == 0 {
+                    "0 matches".to_string()
+                } else {
+                    format!("{} / {}", active_idx + 1, total_matches)
+                };
+                let label_response = ui.label(
+                    egui::RichText::new(&label_text)
+                        .color(ui.style().visuals.weak_text_color())
+                        .small(),
+                );
+
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge.register_widget(
+                    "Search: Match Count",
+                    "label",
+                    &label_response,
+                    Some(&label_text),
+                );
+                #[cfg(not(feature = "mcp"))]
+                let _ = label_response;
+
+                ui.add_space(4.0);
+                let prev_btn = ui
+                    .add_enabled(total_matches > 0, egui::Button::new("↑").small())
+                    .on_hover_text("Previous match (Shift+Enter / ↑)");
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Search: Previous", "button", &prev_btn, None);
+                if prev_btn.clicked() {
+                    outcome.prev_clicked = true;
+                }
+
+                let next_btn = ui
+                    .add_enabled(total_matches > 0, egui::Button::new("↓").small())
+                    .on_hover_text("Next match (Enter / ↓)");
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Search: Next", "button", &next_btn, None);
+                if next_btn.clicked() {
+                    outcome.next_clicked = true;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close_btn = ui.small_button("✕").on_hover_text("Close (Esc)");
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge
+                        .register_widget("Search: Close", "button", &close_btn, None);
+                    if close_btn.clicked() {
+                        outcome.close_requested = true;
+                    }
+                });
+            });
+        });
+
+        outcome
+    }
+
+    /// Move the active match index forward (dir > 0) or backward (dir < 0), wrapping
+    /// around, and request a scroll-to-line via `pending_scroll_offset`.
+    fn jump_match(&mut self, dir: i32) {
+        let n = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.search_matches.len())
+            .unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let new_idx = if dir >= 0 {
+            (self.search.active_match_index + 1) % n
+        } else if self.search.active_match_index == 0 {
+            n - 1
+        } else {
+            self.search.active_match_index - 1
+        };
+        self.search.active_match_index = new_idx;
+        self.scroll_to_active_match();
+    }
+
+    /// Request a scroll-to-line for the current `active_match_index`. No-op when
+    /// there's no active tab, no matches, or content height hasn't been measured yet.
+    /// Used both by `jump_match` (cycling) and by `maybe_rebuild_search` (so typing a
+    /// fresh query or switching tabs lands the view on the first match instead of
+    /// leaving the view at wherever the user previously scrolled).
+    fn scroll_to_active_match(&mut self) {
+        let idx = self.search.active_match_index;
+        let tab = match self.tabs.get_mut(self.active_tab) {
+            Some(t) => t,
+            None => return,
+        };
+        let Some(m) = tab.search_matches.get(idx) else {
+            return;
+        };
+        if tab.last_content_height <= 0.0 || tab.content_lines == 0 {
+            return;
+        }
+        // Line-ratio estimate gets the view roughly in the right area. The renderer
+        // records the actual y of the active match during paint; render_tab_content
+        // schedules a corrective scroll next frame if this estimate was off.
+        let estimated_y =
+            (m.line_number as f32 / tab.content_lines as f32) * tab.last_content_height;
+        let margin = if tab.last_viewport_height > 0.0 {
+            tab.last_viewport_height * 0.35
+        } else {
+            100.0
+        };
+        tab.pending_scroll_offset = Some((estimated_y - margin).max(0.0));
+    }
+
+    /// Rebuild the active tab's search matches if the query or active tab has changed.
+    /// Cheap (no-op) when nothing changed.
+    fn maybe_rebuild_search(&mut self) {
+        if !self.search.is_open {
+            return;
+        }
+        let tab_idx = self.active_tab;
+        let needs_rebuild =
+            self.search.query != self.search.last_query || self.search.last_tab != Some(tab_idx);
+        if !needs_rebuild {
+            return;
+        }
+        let q = self.search.query.clone();
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.rebuild_search(&q);
+        }
+        self.search.last_query = q;
+        self.search.last_tab = Some(tab_idx);
+        // Always start at the first match after any rebuild — query change, tab
+        // change, or watcher reload. Match indices are not semantically comparable
+        // across rebuilds; preserving a numeric index across docs is coincidental
+        // (matches Firefox / Chrome / VS Code behavior).
+        self.search.active_match_index = 0;
+        // Scroll to the new first match so the user sees the active highlight
+        // immediately rather than wherever they were previously scrolled. Without
+        // this, the visible match (somewhere else on screen) gets the regular
+        // highlight color, leaving the user with the impression that the active
+        // highlight is "stuck on the previous result".
+        self.scroll_to_active_match();
+    }
+
+    /// Close the find bar and clear highlight state on every tab.
+    fn close_search(&mut self) {
+        self.search.is_open = false;
+        self.search.query.clear();
+        self.search.last_query.clear();
+        self.search.last_tab = None;
+        self.search.focus_requested = false;
+        self.search.active_match_index = 0;
+        for tab in self.tabs.iter_mut() {
+            tab.search_matches.clear();
+            tab.cache.clear_search_ranges();
         }
     }
 
@@ -2033,7 +2376,28 @@ impl MarkdownApp {
     fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
         let mut open_in_new_tab: Option<PathBuf> = None;
 
+        // Snapshot search state before taking a mutable borrow on the active tab
+        let search_is_open = self.search.is_open;
+        let active_idx = self.search.active_match_index;
+
         let tab = self.tabs.get_mut(self.active_tab)?;
+
+        // Push current search match ranges into the cache so the renderer can paint highlights
+        if search_is_open && !tab.search_matches.is_empty() {
+            let ranges: Vec<_> = tab
+                .search_matches
+                .iter()
+                .map(|m| m.byte_start..m.byte_end)
+                .collect();
+            let active = tab
+                .search_matches
+                .get(active_idx)
+                .map(|m| m.byte_start..m.byte_end);
+            tab.cache.set_search_ranges(ranges);
+            tab.cache.set_active_search_range(active);
+        } else {
+            tab.cache.clear_search_ranges();
+        }
 
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
@@ -2064,6 +2428,7 @@ impl MarkdownApp {
 
                 let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
                     tab.scroll_offset = viewport.min.y;
+                    tab.last_viewport_height = viewport.height();
                     tab.cache.set_scroll_offset(viewport.min.y);
 
                     CommonMarkViewer::new()
@@ -2083,6 +2448,29 @@ impl MarkdownApp {
                 });
 
                 tab.last_content_height = scroll_output.content_size.y;
+
+                // If the renderer recorded an exact y for the active match, check
+                // whether the current scroll position keeps it visible. If not,
+                // schedule a corrective scroll using the recorded y — this fixes
+                // line-ratio overshoot/undershoot in image-heavy documents.
+                if let Some(actual_y) = tab.cache.active_search_y() {
+                    let current_scroll = scroll_output.state.offset.y;
+                    let viewport_top = current_scroll;
+                    let viewport_bottom = current_scroll + tab.last_viewport_height;
+                    // Consider "not visible" if outside the viewport with a small margin
+                    let margin_outside = 20.0_f32;
+                    let needs_correction = actual_y < viewport_top + margin_outside
+                        || actual_y > viewport_bottom - margin_outside;
+                    if needs_correction && tab.last_viewport_height > 0.0 {
+                        // Place the active match ~35% from the top of the viewport
+                        let inset = tab.last_viewport_height * 0.35;
+                        let want_scroll = (actual_y - inset).max(0.0);
+                        // Avoid stomping if we're already at the target (within a frame)
+                        if (want_scroll - current_scroll).abs() > 2.0 {
+                            tab.pending_scroll_offset = Some(want_scroll);
+                        }
+                    }
+                }
 
                 // Manual scroll handling for mouse wheel during text selection
                 let pointer_over_content = ui.ctx().input(|i| {
@@ -2858,6 +3246,10 @@ impl eframe::App for MarkdownApp {
         let mut next_tab = false;
         let mut prev_tab = false;
         let mut focus_tab: Option<usize> = None;
+        let mut open_search = false;
+        let mut next_match = false;
+        let mut prev_match = false;
+        let mut close_search_kb = false;
 
         // Ctrl+/- zoom: applies to lightbox when open, document otherwise
         ctx.input(|i| {
@@ -2971,6 +3363,31 @@ impl eframe::App for MarkdownApp {
                 if i.key_pressed(egui::Key::F5) {
                     toggle_watch = true;
                 }
+                // Ctrl+F: Open find bar (or refocus if already open)
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::F) {
+                    open_search = true;
+                }
+                // While the find bar is open, intercept Enter / Shift+Enter / ↑↓ / Esc.
+                // Up/Down are safe to bind even when the singleline TextEdit has focus
+                // because it doesn't use vertical arrows for cursor movement.
+                if self.search.is_open {
+                    if i.key_pressed(egui::Key::Enter) {
+                        if i.modifiers.shift {
+                            prev_match = true;
+                        } else {
+                            next_match = true;
+                        }
+                    }
+                    if i.key_pressed(egui::Key::ArrowDown) {
+                        next_match = true;
+                    }
+                    if i.key_pressed(egui::Key::ArrowUp) {
+                        prev_match = true;
+                    }
+                    if i.key_pressed(egui::Key::Escape) {
+                        close_search_kb = true;
+                    }
+                }
             });
         } // end lightbox guard
 
@@ -3021,6 +3438,21 @@ impl eframe::App for MarkdownApp {
             }
         }
 
+        // Search bar actions (Ctrl+F open, Enter/Shift+Enter cycle, Esc close)
+        if open_search {
+            self.search.is_open = true;
+            self.search.focus_requested = true;
+        }
+        if next_match {
+            self.jump_match(1);
+        }
+        if prev_match {
+            self.jump_match(-1);
+        }
+        if close_search_kb {
+            self.close_search();
+        }
+
         // Handle drag and drop
         self.is_dragging = false;
         ctx.input(|i| {
@@ -3061,6 +3493,17 @@ impl eframe::App for MarkdownApp {
                         .clicked()
                     {
                         self.close_active_tab();
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    if ui
+                        .add(egui::Button::new("Find...").shortcut_text("Ctrl+F"))
+                        .clicked()
+                    {
+                        self.search.is_open = true;
+                        self.search.focus_requested = true;
                         ui.close();
                     }
 
@@ -3298,6 +3741,20 @@ impl eframe::App for MarkdownApp {
             self.error_message = None;
         }
 
+        // Find bar (conditional, between error bar and tab bar)
+        let search_outcome = self.render_search_bar(ctx);
+        // Rebuild matches if query or tab changed (TextEdit may have mutated the query)
+        self.maybe_rebuild_search();
+        if search_outcome.close_requested {
+            self.close_search();
+        }
+        if search_outcome.next_clicked {
+            self.jump_match(1);
+        }
+        if search_outcome.prev_clicked {
+            self.jump_match(-1);
+        }
+
         // Tab bar
         let mut tab_to_close: Option<usize> = None;
         egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
@@ -3475,3 +3932,128 @@ Visit [egui](https://github.com/emilk/egui) for more information.
 
 [^1]: This is a footnote with additional details.
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_matches_empty_query_returns_none() {
+        assert_eq!(find_matches("hello world", ""), vec![]);
+    }
+
+    #[test]
+    fn find_matches_empty_content_returns_none() {
+        assert_eq!(find_matches("", "hello"), vec![]);
+    }
+
+    #[test]
+    fn find_matches_single_ascii() {
+        let m = find_matches("hello world", "world");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].byte_start, 6);
+        assert_eq!(m[0].byte_end, 11);
+        assert_eq!(m[0].line_number, 1);
+    }
+
+    #[test]
+    fn find_matches_case_insensitive_ascii() {
+        let m = find_matches("Hello WORLD", "world");
+        assert_eq!(m.len(), 1);
+        assert_eq!(&"Hello WORLD"[m[0].byte_start..m[0].byte_end], "WORLD");
+    }
+
+    #[test]
+    fn find_matches_multiple_per_line() {
+        // "foo bar foo baz foo" → 3 matches, all on line 1
+        let m = find_matches("foo bar foo baz foo", "foo");
+        assert_eq!(m.len(), 3);
+        assert!(m.iter().all(|sm| sm.line_number == 1));
+        let starts: Vec<_> = m.iter().map(|sm| sm.byte_start).collect();
+        assert_eq!(starts, vec![0, 8, 16]);
+    }
+
+    #[test]
+    fn find_matches_line_numbers_one_based() {
+        let content = "first line\nsecond match here\nthird\nmatch on four";
+        let m = find_matches(content, "match");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].line_number, 2);
+        assert_eq!(m[1].line_number, 4);
+    }
+
+    #[test]
+    fn find_matches_preserves_byte_offsets_with_utf8() {
+        // "café résumé naïve" — each accented char is 2 bytes in UTF-8
+        let content = "café résumé naïve";
+        let m = find_matches(content, "café");
+        assert_eq!(m.len(), 1);
+        // Confirm byte range slices back to the original substring
+        assert_eq!(&content[m[0].byte_start..m[0].byte_end], "café");
+    }
+
+    #[test]
+    fn find_matches_skips_cross_newline_matches() {
+        // Query "oo\nb" theoretically spans two lines — should not be reported
+        let content = "foo\nbar";
+        let m = find_matches(content, "oo\nb");
+        assert_eq!(m, vec![]);
+    }
+
+    #[test]
+    fn find_matches_overlapping_uses_match_indices_semantics() {
+        // str::match_indices does NOT overlap matches: "aaaa" / "aa" → [0, 2]
+        let m = find_matches("aaaa", "aa");
+        let starts: Vec<_> = m.iter().map(|sm| sm.byte_start).collect();
+        assert_eq!(starts, vec![0, 2]);
+    }
+
+    #[test]
+    fn find_matches_skips_image_alt_text() {
+        // Image alt text isn't visibly rendered (used only as hover/screen-reader text).
+        // A match inside the alt portion of `![alt](url)` would have no visible target
+        // for highlighting/scrolling — exclude it.
+        let content = "See ![Syntax docs](pic.png) and the syntax guide.";
+        let m = find_matches(content, "syntax");
+        let starts: Vec<_> = m.iter().map(|sm| sm.byte_start).collect();
+        assert_eq!(m.len(), 1, "got {:?}", m);
+        // The surviving match is "syntax" in "the syntax guide", not "Syntax" in alt
+        assert_eq!(&content[starts[0]..starts[0] + 6], "syntax");
+    }
+
+    #[test]
+    fn find_matches_skips_image_url() {
+        // Image URL isn't visibly rendered — exclude matches inside.
+        let content = "![ok](path/syntax.png) more text";
+        let m = find_matches(content, "syntax");
+        assert_eq!(m.len(), 0, "URL match should be filtered: {:?}", m);
+    }
+
+    #[test]
+    fn find_matches_skips_link_url_keeps_link_text() {
+        // Link text IS rendered (visible clickable text). Link URL is not.
+        let content = "Click [syntax docs](https://example.com/syntax.html) here";
+        let m = find_matches(content, "syntax");
+        // Two raw matches: "syntax" in link text (visible) + "syntax" in URL (invisible)
+        assert_eq!(m.len(), 1, "should keep link text, drop URL: {:?}", m);
+        let s = m[0].byte_start;
+        // The kept match is "syntax" in "[syntax docs]" (visible link text)
+        assert_eq!(&content[s..s + 6], "syntax");
+        // And it's the FIRST occurrence (inside the brackets), not the URL one
+        assert!(s < content.find("https").unwrap());
+    }
+
+    #[test]
+    fn find_matches_multiple_alt_text_images() {
+        let content = "![a one](u.png) one ![two two](w.png) two";
+        let m = find_matches(content, "one");
+        let starts: Vec<_> = m.iter().map(|sm| sm.byte_start).collect();
+        // Two raw "one" matches in alt + 1 in visible text → only 1 survives
+        assert_eq!(m.len(), 1);
+        assert_eq!(&content[starts[0]..starts[0] + 3], "one");
+
+        let m2 = find_matches(content, "two");
+        // Two raw "two" matches in alt + 1 in visible text → only 1 survives
+        assert_eq!(m2.len(), 1);
+    }
+}

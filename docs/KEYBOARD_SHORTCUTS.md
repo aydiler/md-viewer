@@ -27,6 +27,17 @@
 | Click link | Navigate in current tab |
 | Ctrl+Click link | Open link in new tab |
 
+## Search
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+F | Open find bar (or refocus the input if already open) |
+| Enter or ↓ | Jump to the next match in the current document |
+| Shift+Enter or ↑ | Jump to the previous match in the current document |
+| Esc | Close the find bar and clear highlights |
+
+The find bar also has on-screen `↑` and `↓` buttons next to the match count for mouse navigation.
+
 ## View
 
 | Shortcut | Action |

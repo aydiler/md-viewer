@@ -512,3 +512,75 @@ magick X.png -gravity center -crop 540x540+0+0 +repage -resize 256x256 -strip ou
 **Problem:** `gh pr create` returned HTTP 422 with `{"resource":"Issue","code":"custom","field":"user","message":"user is blocked"}`. Direct `curl` against the GitHub API confirms the block; org-block check (`/orgs/flathub/blocks/aydiler`) returns 404 (not org-level) so the block is at the GitHub user level — likely auto-triggered by previous activity (the account had 3 close/reopen PRs for `io.github.aydiler.msigd-gui` in January 2026).
 **Workaround:** Open a topic on Flathub Discourse (https://discourse.flathub.org/) asking for unblock; reference the closed prior PRs and the new app. The push to `aydiler/flathub:io.github.aydiler.md-viewer` branch succeeds before the PR step, so once unblocked the PR can be opened from the GitHub web UI without redoing branch work.
 **Files:** N/A (account-level state)
+
+### Never `snapcraft --destructive-mode` for releases on a glibc-newer-than-base host
+**Context:** Issue #3 — v0.1.2 snap (revision 4) failed to start on Ubuntu 24.04 with `GLIBC_2.43 not found` errors. The snapcraft.yaml declared `base: core22` (glibc 2.35), but the actual binary required GLIBC_2.43.
+**Root cause:** v0.1.2 release CI run failed; the snap was manually uploaded with `snapcraft --destructive-mode` from this Arch host (glibc 2.43). Destructive mode builds directly on the host without LXD/multipass isolation, so cargo links against host glibc — `atan2f@GLIBC_2.43`, `acosf@GLIBC_2.43` etc. get baked into the binary regardless of the declared `base:`.
+**Fix:** Only publish snaps via CI (`snapcore/action-build@v1` uses LXD with the declared base). If CI fails, fix CI — never fall back to destructive-mode upload. The v0.1.3 CI run produced revision 6, which only requires up to `GLIBC_2.35` and works on Ubuntu 22.04+.
+**Verify before upload:**
+```bash
+objdump -T target/release/md-viewer | grep -oE 'GLIBC_[0-9.]+' | sort -u | tail
+# Must not exceed the glibc of the declared `base:` in snapcraft.yaml
+# core22 → 2.35, core24 → 2.39
+```
+**Files:** `snap/snapcraft.yaml`, `.github/workflows/release.yml`
+
+### `to_ascii_lowercase` preserves byte offsets; `to_lowercase` doesn't
+**Context:** Implementing case-insensitive substring search (`find_matches`) that returns byte ranges into the original content.
+**Problem:** `str::to_lowercase` does Unicode case folding which can *change byte length* (e.g. `"İ".to_lowercase() == "i̇"` — adds a combining mark). Any match offsets computed against the folded string would point at the wrong bytes in the original.
+**Fix:** Use `str::to_ascii_lowercase` on both sides. It only rewrites A–Z; non-ASCII bytes pass through untouched, so byte offsets stay 1:1 with the original.
+```rust
+let content_lc = content.to_ascii_lowercase();
+let query_lc = query.to_ascii_lowercase();
+for (byte_start, _) in content_lc.match_indices(&query_lc) {
+    // byte_start is a valid offset into the original `content`
+}
+```
+**Trade-off:** Non-ASCII case folding doesn't work (`É` won't match `é`). For a v1 simple search this was the right cut; the case-toggle and full Unicode folding are tracked in `docs/devlog/019-search-find.md` Future Improvements.
+**Files:** `src/main.rs` (`find_matches`)
+
+### Search-highlight in headings must go through `current_heading_rich_texts`
+**Context:** Search-match highlighting in `pulldown.rs` `Event::Text`
+**Gotcha:** The existing "Inline code in headers renders incorrectly" lesson taught that heading text fragments must accumulate into `current_heading_rich_texts` and render in `end_tag(Heading)` inside a single `allocate_ui_at_rect`. The new `emit_text` helper that applies highlight background colors MUST preserve this routing, otherwise highlighted segments in headings reset to x=0 individually and the header is rendered as fragmented overlapping text.
+**Fix:** `emit_text` keeps the same `if self.text_style.heading.is_some()` branch the original `event_text` had — only the per-segment `RichText` gets a `.background_color(...)` applied. The accumulator routing is identical.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`
+
+### MCP bridge has no keystroke injection; menus aren't in AccessKit
+**Context:** Verifying Ctrl+F end-to-end via the egui MCP bridge on Xvfb
+**Problem:** `xdotool key --window <id> ctrl+f` doesn't route to the egui app on Xvfb because there's no window manager to handle focus, AND the egui MCP bridge only exposes `egui_click` / `egui_type` (no `egui_keystroke`). Egui's `MenuBar::menu_button("File", ...)` widgets also don't surface their sub-buttons in the AccessKit tree, so triggering search via `File → Find...` click also fails.
+**Workaround:** For E2E testing of keyboard-shortcut-only features, either run on a real X11/Wayland session, or add a debug CLI flag that pre-opens the relevant UI state. For PRs, lean harder on unit tests + a no-regression AccessKit snapshot (count nodes before/after).
+**Files:** N/A (external limitation)
+
+### Search matches must skip non-renderable markdown spans (alt-text + URLs)
+**Context:** Find-feature cycling appears "stuck" — user presses Enter but the active highlight doesn't visibly move; sometimes the view scrolls to a position where the matched text isn't visible.
+**Root cause:** `find_matches` scans raw byte content. A query like "syntax" against the README returned 10 matches, but **several were inside `![alt-text](url)` markdown** — alt text is hover/screen-reader only, URLs are never visible. Cycling to those matches:
+- Painted the active highlight at bytes that don't appear on screen → no visible color change
+- Scrolled to the markdown source line of the `![...](...)` (which is where the *image* renders, not where the matched bytes are) → wrong position
+The user perceives "highlight stuck on first result" because the visible (non-active) matches all wear the dim color while the actual active match is invisible.
+**Fix:** In `find_matches`, regex-match `(!?)\[([^\]]*)\]\(([^)]*)\)` and filter out matches whose byte range falls in:
+- The URL portion (group 3) — always, for both images and links
+- The alt portion (group 2) — only when group 1 is `!` (image)
+Link *text* stays in scope because it IS rendered.
+**Files:** `src/main.rs` (`find_matches`)
+
+### Line-ratio scroll is unreliable in image-heavy docs — record actual y during paint
+**Context:** Auto-scroll to the active search match lands the wrong content on screen for matches past several images.
+**Root cause:** `(line_number / total_lines) * content_height` assumes uniform per-line height. In a README with multiple 400 px+ images, the actual rendered y of a text line is far below what the ratio estimates. Even subtracting 35% of viewport height as a margin isn't enough — match 4 of "syntax" in the README is past three large images and ends up off-screen below the viewport.
+**Fix:** Two-stage scroll.
+1. `scroll_to_active_match()` (called from `jump_match` and `maybe_rebuild_search`) sets `pending_scroll_offset` from the line-ratio estimate — gets the view roughly in the right area.
+2. During render, when `emit_text` paints an `Active` highlight segment, the renderer calls `cache.record_active_search_y_viewport(ui.cursor().top())`. The cache stores `current_scroll_offset + viewport_y` as content-relative y.
+3. After `show_viewport()` returns, `render_tab_content` reads `cache.active_search_y()`. If the recorded y is outside the visible viewport, schedule a corrective `pending_scroll_offset` for next frame.
+Visual effect: one frame lands close (line-ratio), the next frame snaps precise (recorded y). The active match is always in viewport after at most two frames.
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs` (`record_active_search_y_viewport`, `active_search_y`), `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`event_text_with_highlights`), `src/main.rs` (`scroll_to_active_match`, `render_tab_content` corrective block)
+
+### Heading bg-color rendering wasn't the bug — `allocate_ui_at_rect` is fine
+**Context:** Active highlight in h3 heading rendered as `HL_DARK` instead of `HL_ACTIVE_DARK`. Spent ~30 min suspecting `allocate_ui_at_rect` in `end_tag(Heading)` suppressed `RichText.background_color`.
+**What was actually happening:** The "active" match's byte range pointed inside an image alt-text — so the active *was* applied but to invisible bytes; the visible heading "Syntax" got the regular (Match) color because it was a *different* search range. Pixel sampling showed only `HL_DARK` pixels because there were no visible Active spans on that frame.
+**Diagnostic that would have caught it sooner:** log the active range's byte position AND a content-context window around it before chasing renderer-side hypotheses. If `active = Some(2823..2829)` and `content[2790..2870]` is `![Syntax Highlighting](...)`, you know the match is in alt text *before* touching the renderer.
+**Files:** N/A (debugging discipline)
+
+### Inline-code wrap segmentation: blind char-count cut, not break-friendly chars
+**Context:** Issue #5 — long inline-code tokens (file paths) overflowed the content column, clipping leading characters and overlapping adjacent text. Fixed by splitting long tokens into chunks separated by `ui.end_row()` in `Event::Code` handling.
+**First attempt that regressed:** Splitting at break-friendly characters (`/ \ - _ . :`) past 56 chars to keep paths readable. At narrow window widths the variable-length segments (60-120 chars) still exceeded the column width, and egui's intra-widget wrap re-introduced the original clipping bug.
+**Fix:** Blind fixed-size char-count cut. Each chunk has a known upper bound (56 chars) so it always fits the column. Mid-identifier breaks are a cosmetic cost, but functionally correct at every width.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`inline_code_wrap_segments`)
