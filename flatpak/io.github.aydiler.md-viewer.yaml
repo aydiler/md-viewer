@@ -15,17 +15,16 @@ finish-args:
   # Network is needed so HTTP image URLs in markdown render in the sandbox
   # (the README documents remote-image support, and shields.io badges, etc.).
   - --share=network
-  # Read-only host access. A viewer never writes to user files, but it must
-  # read files at arbitrary paths: CLI invocation (`md-viewer ~/notes/foo.md`),
-  # live reload via the notify watcher, and files dropped from outside
-  # xdg-documents. Narrower than --filesystem=home in capability (no writes),
-  # broader in scope (also exposes /etc, /usr as readable) — defensible for a
-  # markdown viewer.
-  - --filesystem=host:ro
+  # Read-only home access. A viewer never writes user files; it just needs
+  # to read at arbitrary paths under $HOME for CLI invocation
+  # (`md-viewer ~/notes/foo.md`), live reload via the notify watcher, and
+  # files outside xdg-documents. Narrower than --filesystem=host:ro (no
+  # /etc, /usr exposure) which the Flathub linter rejects.
+  - --filesystem=home:ro
   - --filesystem=xdg-documents
-  # Native file dialogs via portals
-  - --talk-name=org.freedesktop.portal.FileChooser
-  - --talk-name=org.freedesktop.portal.Desktop
+  # No --talk-name for XDG portals — Flatpak apps reach FileChooser and
+  # Desktop portals through the standard sandbox mechanism without an
+  # explicit D-Bus talk-name (the linter flags those as unnecessary).
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
