@@ -119,7 +119,7 @@ Downloads the prebuilt binary for your platform, verifies its SHA256, and instal
 curl -fsSL https://raw.githubusercontent.com/aydiler/md-viewer/main/scripts/install.sh | sh
 ```
 
-Supports Linux x86_64, macOS x86_64, and macOS arm64. Set `INSTALL_DIR=/usr/local/bin` to install elsewhere.
+Supports Linux x86_64 and macOS arm64 (Apple Silicon). Set `INSTALL_DIR=/usr/local/bin` to install elsewhere. Intel Macs need to build from source via `cargo install md-viewer`.
 
 > **macOS Gatekeeper note:** binaries are not yet signed/notarized. If macOS refuses to run the app, run:
 > `xattr -d com.apple.quarantine ~/.local/bin/md-viewer`
