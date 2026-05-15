@@ -12,15 +12,33 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: linux-x86_64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: macos-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_name: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: windows-x86_64
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux only)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
@@ -28,36 +46,60 @@ jobs:
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Remove local-only MCP dependency
+        shell: python
         run: |
-          # Remove the path dependency line but keep the feature (as empty)
-          # First, change the mcp feature to empty (must do before removing dep line)
-          sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
-          # Then remove the optional dependency line
-          sed -i '/^egui-mcp-bridge = /d' Cargo.toml
+          import pathlib, re
+          p = pathlib.Path("Cargo.toml")
+          t = p.read_text()
+          t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
+          t = re.sub(r'(?m)^egui-mcp-bridge = .*\n', '', t)
+          p.write_text(t)
 
       - name: Install git-cliff
+        if: runner.os == 'Linux'
         run: cargo install git-cliff
 
       - name: Generate changelog
+        if: runner.os == 'Linux'
         run: git-cliff --latest --strip header > RELEASE_NOTES.md
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Create tarball
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          tar -czf md-viewer-${VERSION}-linux-x86_64.tar.gz \
-            -C target/release md-viewer
+          ASSET="md-viewer-${VERSION}-${{ matrix.asset_name }}.tar.gz"
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" md-viewer
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${env:GITHUB_REF}" -replace '^refs/tags/v',''
+          $ASSET = "md-viewer-$VERSION-${{ matrix.asset_name }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/md-viewer.exe" -DestinationPath $ASSET
+          $Hash = (Get-FileHash -Algorithm SHA256 $ASSET).Hash.ToLower()
+          "$Hash  $ASSET" | Out-File -Encoding ascii "$ASSET.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-artifacts
+          name: release-${{ matrix.asset_name }}
+          if-no-files-found: error
           path: |
             md-viewer-*.tar.gz
+            md-viewer-*.zip
+            md-viewer-*.sha256
             RELEASE_NOTES.md
 
   publish-crates:
@@ -76,12 +118,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Remove local-only MCP dependency
+        shell: python
         run: |
-          # Remove the path dependency line but keep the feature (as empty)
-          # First, change the mcp feature to empty (must do before removing dep line)
-          sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
-          # Then remove the optional dependency line
-          sed -i '/^egui-mcp-bridge = /d' Cargo.toml
+          import pathlib, re
+          p = pathlib.Path("Cargo.toml")
+          t = p.read_text()
+          t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
+          t = re.sub(r'(?m)^egui-mcp-bridge = .*\n', '', t)
+          p.write_text(t)
       - name: Publish to crates.io
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
@@ -118,9 +162,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-artifacts
+          pattern: release-*
+          merge-multiple: true
 
       - uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
-          files: md-viewer-*.tar.gz
+          files: |
+            md-viewer-*.tar.gz
+            md-viewer-*.zip
+            md-viewer-*.sha256
