@@ -2421,41 +2421,36 @@ impl MarkdownApp {
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
-                let mut scroll_area = egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
+                // The renderer owns the ScrollArea now (via show_scrollable),
+                // so we configure scroll_source / pending offset / content
+                // version through builder methods. The returned ScrollAreaOutput
+                // exposes state.offset and inner_rect for the post-render
+                // selection-preserving wheel hack below.
+                let pending = tab.pending_scroll_offset.take();
+                let mut scroll_output = CommonMarkViewer::new()
+                    .default_implicit_uri_scheme(&tab.base_uri)
+                    .max_image_width(Some(800))
+                    .default_width(Some(600))
+                    .indentation_spaces(2)
+                    .show_alt_text_on_hover(true)
+                    .syntax_theme_dark("base16-ocean.dark")
+                    .syntax_theme_light("base16-ocean.light")
+                    .line_height(1.5)
+                    .code_line_height(1.3)
+                    .paragraph_spacing(2.0)
+                    .heading_spacing_above(2.0)
+                    .heading_spacing_below(0.75)
+                    .content_version(tab.content_version)
+                    .pending_scroll_offset(pending)
                     .scroll_source(egui::scroll_area::ScrollSource {
                         scroll_bar: true,
                         drag: false,
                         mouse_wheel: true,
                     })
-                    .id_salt(tab.id);
+                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
 
-                // Apply pending scroll offset from header clicks
-                if let Some(offset) = tab.pending_scroll_offset.take() {
-                    scroll_area = scroll_area.vertical_scroll_offset(offset);
-                }
-
-                let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
-                    tab.scroll_offset = viewport.min.y;
-                    tab.last_viewport_height = viewport.height();
-                    tab.cache.set_scroll_offset(viewport.min.y);
-
-                    CommonMarkViewer::new()
-                        .default_implicit_uri_scheme(&tab.base_uri)
-                        .max_image_width(Some(800))
-                        .default_width(Some(600))
-                        .indentation_spaces(2)
-                        .show_alt_text_on_hover(true)
-                        .syntax_theme_dark("base16-ocean.dark")
-                        .syntax_theme_light("base16-ocean.light")
-                        .line_height(1.5)
-                        .code_line_height(1.3)
-                        .paragraph_spacing(2.0)
-                        .heading_spacing_above(2.0)
-                        .heading_spacing_below(0.75)
-                        .show(ui, &mut tab.cache, &tab.content);
-                });
-
+                tab.scroll_offset = scroll_output.state.offset.y;
+                tab.last_viewport_height = scroll_output.inner_rect.height();
                 tab.last_content_height = scroll_output.content_size.y;
 
                 // If the renderer recorded an exact y for the active match, check

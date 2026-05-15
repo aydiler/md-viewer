@@ -520,6 +520,10 @@ impl CommonMarkViewerInternal {
         let page_size_opt = scroll_cache(cache, &source_id).page_size;
         let Some(page_size) = page_size_opt else {
             let out = make_scroll_area().show(ui, |ui| {
+                // The inner show() runs in normal ScrollArea content space
+                // (no viewport translation), so 0.0 is the right baseline
+                // for record_header_position / record_active_search_y.
+                cache.set_scroll_offset(0.0);
                 self.show(ui, cache, options, text, Some(source_id));
             });
             // Prevent repopulating points twice at startup
@@ -538,6 +542,10 @@ impl CommonMarkViewerInternal {
         make_scroll_area()
             .show_viewport(ui, |ui, viewport| {
                 ui.set_height(page_size.y);
+                // ui.cursor().top() inside show_viewport is viewport-relative;
+                // record_header_position and record_active_search_y_viewport
+                // add this offset to recover content-relative y.
+                cache.set_scroll_offset(viewport.min.y);
                 let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
 
                 let max_width = options.max_width(ui);
