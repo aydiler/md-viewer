@@ -127,7 +127,7 @@ A Flatpak manifest lives at `flatpak/io.github.aydiler.md-viewer.yaml`. Submitti
   flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest \
       flatpak/io.github.aydiler.md-viewer.yaml
   ```
-  Warnings are non-fatal but worth addressing.
+  Warnings are non-fatal but worth addressing. **One known lint error is intentional**: `finish-args-home-ro-filesystem-access` flags the `--filesystem=home:ro` permission. The viewer needs this to read markdown files at arbitrary paths under `$HOME` for CLI invocation (`md-viewer ~/anywhere/foo.md`) and live reload via the notify watcher. Flathub permits read-only home access with reviewer justification — include a note in the PR description explaining the use case. If reviewers reject it, fall back to `--filesystem=xdg-documents` only and document the CLI/live-reload limitation in the README.
 
 ### Local smoke test before submitting
 
