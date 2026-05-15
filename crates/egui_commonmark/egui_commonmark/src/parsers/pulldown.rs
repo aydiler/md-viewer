@@ -453,6 +453,7 @@ impl CommonMarkViewerInternal {
         (re, std::mem::take(&mut self.checkbox_events))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn show_scrollable(
         &mut self,
         source_id: Id,
@@ -460,18 +461,21 @@ impl CommonMarkViewerInternal {
         cache: &mut CommonMarkCache,
         options: &CommonMarkOptions,
         text: &str,
-    ) {
+        content_version: Option<u64>,
+        pending_scroll_offset: Option<f32>,
+        scroll_source: Option<egui::scroll_area::ScrollSource>,
+    ) -> egui::scroll_area::ScrollAreaOutput<()> {
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
         let layout_sig = compute_layout_signature(ui, options);
 
         // Ensure parsed events are cached on the ScrollableCache, keyed by a
-        // content version. The version is currently derived from a content
-        // hash as a stand-in; a later commit threads a caller-provided
-        // counter through the public API so we can skip even this hash.
-        // The win here is avoiding pulldown_cmark::Parser::new_ext + collect
-        // on every frame (~52 ms at 100k lines).
-        let version = Self::hash_content(text);
+        // content version. The caller can provide a monotonic version (bumped
+        // on every reload) — when omitted we fall back to hashing the content,
+        // which still beats reparsing but is O(N) per frame for the hash.
+        // The big win either way is avoiding pulldown_cmark::Parser::new_ext +
+        // collect on every frame (~52 ms at 100k lines).
+        let version = content_version.unwrap_or_else(|| Self::hash_content(text));
         {
             let sc = scroll_cache(cache, &source_id);
             if sc.events.is_empty() || sc.content_version != version {
@@ -499,16 +503,28 @@ impl CommonMarkViewerInternal {
             }
         }
 
-        let Some(page_size) = scroll_cache(cache, &source_id).page_size else {
-            egui::ScrollArea::vertical()
+        // Helper: build the renderer-owned ScrollArea with caller config.
+        let make_scroll_area = || {
+            let mut sa = egui::ScrollArea::vertical()
                 .id_salt(scroll_id)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    self.show(ui, cache, options, text, Some(source_id));
-                });
+                .auto_shrink([false, true]);
+            if let Some(offset) = pending_scroll_offset {
+                sa = sa.vertical_scroll_offset(offset);
+            }
+            if let Some(src) = scroll_source {
+                sa = sa.scroll_source(src);
+            }
+            sa
+        };
+
+        let page_size_opt = scroll_cache(cache, &source_id).page_size;
+        let Some(page_size) = page_size_opt else {
+            let out = make_scroll_area().show(ui, |ui| {
+                self.show(ui, cache, options, text, Some(source_id));
+            });
             // Prevent repopulating points twice at startup
             scroll_cache(cache, &source_id).available_size = available_size;
-            return;
+            return out;
         };
 
         // Clone owned events out of the cache so we can iterate while
@@ -519,12 +535,7 @@ impl CommonMarkViewerInternal {
 
         let num_rows = events.len();
 
-        egui::ScrollArea::vertical()
-            .id_salt(scroll_id)
-            // Elements have different widths, so the scroll area cannot try to shrink to the
-            // content, as that will mean that the scroll bar will move when loading elements
-            // with different widths.
-            .auto_shrink([false, true])
+        make_scroll_area()
             .show_viewport(ui, |ui, viewport| {
                 ui.set_height(page_size.y);
                 let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
@@ -586,8 +597,7 @@ impl CommonMarkViewerInternal {
                         }
                     }
                 });
-            });
-
+            })
         // No trailing invalidation needed — layout_signature is checked at
         // the top of show_scrollable, so a width/zoom/theme change in the
         // same frame falls into the bootstrap branch above immediately
