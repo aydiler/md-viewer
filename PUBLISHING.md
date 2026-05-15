@@ -106,8 +106,9 @@ A Flatpak manifest lives at `flatpak/io.github.aydiler.md-viewer.yaml`. Submitti
 
 ### Pre-submission requirements
 
-- **Replace the placeholder icon** at `data/io.github.aydiler.md-viewer.png` with a designed 256×256 PNG. Flathub reviewers will reject submissions whose icon is a generic placeholder.
-- **Regenerate Cargo sources** when `Cargo.lock` changes (Flathub builds offline):
+- **Replace the placeholder icon** at `data/io.github.aydiler.md-viewer.png` with a designed 256×256 PNG (or scalable SVG). Flathub reviewers will reject submissions whose icon is a generic placeholder.
+- **Bump `tag:` and `commit:` in the manifest** to the latest release before opening the PR. The `x-checker-data` block will auto-bump them on subsequent releases *after* the first submission is accepted.
+- **Regenerate Cargo sources** when `Cargo.lock` changes its transitive deps (Flathub builds offline):
   ```bash
   # one-time tool setup
   git clone https://github.com/flatpak/flatpak-builder-tools.git /tmp/fbt
@@ -115,15 +116,26 @@ A Flatpak manifest lives at `flatpak/io.github.aydiler.md-viewer.yaml`. Submitti
       /tmp/fbt/cargo/flatpak-cargo-generator.py Cargo.lock \
       -o flatpak/cargo-sources.json
   ```
-  Commit the updated `flatpak/cargo-sources.json`.
+  Commit the updated `flatpak/cargo-sources.json`. Pure version bumps (without dep changes) don't require regeneration.
+- **Run the Flathub linter and fix all error-level findings**:
+  ```bash
+  # one-time tool install (Arch Linux):
+  sudo pacman -S flatpak-builder
+  flatpak install --user flathub org.flatpak.Builder
+
+  # then:
+  flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest \
+      flatpak/io.github.aydiler.md-viewer.yaml
+  ```
+  Warnings are non-fatal but worth addressing.
 
 ### Local smoke test before submitting
 
 ```bash
 flatpak install --user flathub \
-    org.freedesktop.Platform//23.08 \
-    org.freedesktop.Sdk//23.08 \
-    org.freedesktop.Sdk.Extension.rust-stable//23.08
+    org.freedesktop.Platform//24.08 \
+    org.freedesktop.Sdk//24.08 \
+    org.freedesktop.Sdk.Extension.rust-stable//24.08
 
 flatpak-builder --user --install --force-clean build-dir \
     flatpak/io.github.aydiler.md-viewer.yaml
