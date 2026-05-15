@@ -351,11 +351,42 @@ impl CodeBlock {
             let mono_font_size = ui.text_style_height(&TextStyle::Monospace);
             let code_line_height = options.typography.resolve_code_line_height(mono_font_size);
 
-            // Build the LayoutJob for syntax highlighting
-            let mut job = if let Some(lang) = &self.lang {
-                self.syntax_highlighting(cache, options, lang, ui, &self.content, code_line_height)
+            // Cache key for the LayoutJob, hashing every input that affects
+            // the rendered output: content text, language tag, theme, font
+            // size, and the resolved line height (which depends on
+            // typography config + mono_font_size).
+            let cache_key = {
+                let mut h = DefaultHasher::new();
+                self.content.hash(&mut h);
+                self.lang.hash(&mut h);
+                ui.style().visuals.dark_mode.hash(&mut h);
+                mono_font_size.to_bits().hash(&mut h);
+                code_line_height.map(f32::to_bits).hash(&mut h);
+                h.finish()
+            };
+
+            // Build (or retrieve) the LayoutJob for syntax highlighting.
+            // Cache hit: clone the stored LayoutJob (cheap — egui's LayoutJob
+            // is just text + Vec<LayoutSection>). Cache miss: run syntect,
+            // store, and return. With viewport virtualization (C8), only the
+            // visible code blocks ever pay the syntect cost.
+            let mut job = if let Some(cached) = cache.syntax_layouts.get(&cache_key).cloned() {
+                cached
             } else {
-                plain_highlighting(ui, &self.content, code_line_height)
+                let job = if let Some(lang) = &self.lang {
+                    self.syntax_highlighting(
+                        cache,
+                        options,
+                        lang,
+                        ui,
+                        &self.content,
+                        code_line_height,
+                    )
+                } else {
+                    plain_highlighting(ui, &self.content, code_line_height)
+                };
+                cache.syntax_layouts.insert(cache_key, job.clone());
+                job
             };
 
             // Don't wrap code block text - use horizontal scroll instead
@@ -1304,6 +1335,13 @@ pub struct CommonMarkCache {
     /// Cached parsed markdown events to avoid re-parsing every frame.
     /// Keyed by a hash of the source text. Cleared when cache is reset.
     cached_events: Option<(u64, Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>)>,
+
+    /// Cached syntect LayoutJobs for code blocks, keyed by
+    /// (content_hash, lang, theme_is_dark, mono_font_size).
+    /// Avoids re-running syntect on every paint of an already-rendered block.
+    /// Theme/zoom changes naturally key in new entries; old ones become dead
+    /// weight until the cache is reset on file load.
+    syntax_layouts: HashMap<u64, LayoutJob>,
     pub(self) has_installed_loaders: bool,
 
     /// Stores the y-position of each header (by normalized title) for scroll navigation.
@@ -1433,6 +1471,7 @@ impl Default for CommonMarkCache {
             #[cfg(feature = "math")]
             math_rendering: None,
             cached_events: None,
+            syntax_layouts: HashMap::new(),
         }
     }
 }
