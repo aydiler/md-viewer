@@ -111,15 +111,18 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ## Installation
 
-### Arch Linux (AUR)
+### Quick Install (Linux / macOS) — recommended
+
+Downloads the prebuilt binary for your platform, verifies its SHA256, and installs to `~/.local/bin`. No compilation, takes seconds.
 
 ```bash
-# Using yay
-yay -S md-viewer-git
-
-# Using paru
-paru -S md-viewer-git
+curl -fsSL https://raw.githubusercontent.com/aydiler/md-viewer/main/scripts/install.sh | sh
 ```
+
+Supports Linux x86_64 and macOS arm64 (Apple Silicon). Set `INSTALL_DIR=/usr/local/bin` to install elsewhere. Intel Macs need to build from source via `cargo install md-viewer`.
+
+> **macOS Gatekeeper note:** binaries are not yet signed/notarized. If macOS refuses to run the app, run:
+> `xattr -d com.apple.quarantine ~/.local/bin/md-viewer`
 
 ### Snap Store
 
@@ -127,27 +130,50 @@ paru -S md-viewer-git
 sudo snap install md-viewer
 ```
 
-### Cargo (crates.io)
+Auto-updates via snapd.
+
+### Arch Linux (AUR)
+
+```bash
+yay -S md-viewer-git    # or: paru -S md-viewer-git
+```
+
+Builds from the latest `main` commit (rolling) — your system update grabs new versions automatically.
+
+### Flatpak / Flathub
+
+Once published to Flathub:
+
+```bash
+flatpak install flathub io.github.aydiler.md-viewer
+```
+
+(Flathub submission in progress — see `flatpak/` and `PUBLISHING.md`.)
+
+### Windows
+
+Download `md-viewer-<version>-windows-x86_64.zip` from the [latest release](https://github.com/aydiler/md-viewer/releases/latest), extract `md-viewer.exe`, and run it. Verify the included `.sha256` if you'd like.
+
+### Cargo (crates.io) — slower, builds from source
 
 ```bash
 cargo install md-viewer
 ```
 
+Compiles locally (~2–3 minutes). Update with `cargo install --force md-viewer`. Requires the system dependencies listed below.
+
 ### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/aydiler/md-viewer
 cd md-viewer
-
-# Build release binary
 cargo build --release
-
-# Install to ~/.local/bin (optional)
-make install
+make install   # installs to ~/.local/bin (optional)
 ```
 
 ### System Dependencies (Arch Linux)
+
+Only needed for `cargo install` / building from source:
 
 ```bash
 sudo pacman -S --needed \

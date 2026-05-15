@@ -12,15 +12,30 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_name: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: windows-x86_64
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux only)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
@@ -28,71 +43,67 @@ jobs:
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Remove local-only MCP dependency
+        shell: python
         run: |
-          # Remove the path dependency line but keep the feature (as empty)
-          # First, change the mcp feature to empty (must do before removing dep line)
-          sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
-          # Then remove the optional dependency line
-          sed -i '/^egui-mcp-bridge = /d' Cargo.toml
+          import pathlib, re
+          p = pathlib.Path("Cargo.toml")
+          t = p.read_text()
+          t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
+          t = re.sub(r'(?m)^egui-mcp-bridge = .*\n', '', t)
+          p.write_text(t)
 
       - name: Install git-cliff
+        if: runner.os == 'Linux'
         run: cargo install git-cliff
 
       - name: Generate changelog
+        if: runner.os == 'Linux'
         run: git-cliff --latest --strip header > RELEASE_NOTES.md
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Create tarball
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          tar -czf md-viewer-${VERSION}-linux-x86_64.tar.gz \
-            -C target/release md-viewer
+          ASSET="md-viewer-${VERSION}-${{ matrix.asset_name }}.tar.gz"
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" md-viewer
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${env:GITHUB_REF}" -replace '^refs/tags/v',''
+          $ASSET = "md-viewer-$VERSION-${{ matrix.asset_name }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/md-viewer.exe" -DestinationPath $ASSET
+          $Hash = (Get-FileHash -Algorithm SHA256 $ASSET).Hash.ToLower()
+          "$Hash  $ASSET" | Out-File -Encoding ascii "$ASSET.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-artifacts
+          name: release-${{ matrix.asset_name }}
+          if-no-files-found: error
           path: |
             md-viewer-*.tar.gz
+            md-viewer-*.zip
+            md-viewer-*.sha256
             RELEASE_NOTES.md
 
-  publish-crates:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
-            libgtk-3-dev libfontconfig1-dev libdbus-1-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Remove local-only MCP dependency
-        run: |
-          # Remove the path dependency line but keep the feature (as empty)
-          # First, change the mcp feature to empty (must do before removing dep line)
-          sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
-          # Then remove the optional dependency line
-          sed -i '/^egui-mcp-bridge = /d' Cargo.toml
-      - name: Publish to crates.io
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          # Skip if already published
-          if cargo search --limit 1 md-viewer | grep -q "md-viewer = \"${VERSION}\""; then
-            echo "Version ${VERSION} already on crates.io; skipping."
-            exit 0
-          fi
-          cargo publish --allow-dirty
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  # NOTE: crates.io publish is intentionally not automated. The repo consumes a
+  # vendored fork of `egui_commonmark_extended` (path patch in crates/) with a
+  # custom `math` feature that doesn't exist on the upstream crate. `cargo
+  # publish` resolves deps against crates.io and rejects this combination. See
+  # PUBLISHING.md for the path to re-enable (publish the fork under a new name).
 
   publish-snap:
     runs-on: ubuntu-latest
@@ -110,17 +121,106 @@ jobs:
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
 
+  publish-aur:
+    name: Publish to AUR
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    env:
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      # GitHub Actions disallows both `secrets.*` and `env.*` in job-level `if:`,
+      # so we gate at step level instead. This step always succeeds and sets an
+      # output that subsequent steps check, leaving the job green when the secret
+      # isn't configured.
+      - name: Check AUR secret
+        id: check
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY not set; skipping AUR publish (see PUBLISHING.md for setup)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.proceed == 'true'
+
+      - name: Set version
+        if: steps.check.outputs.proceed == 'true'
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Set up SSH for AUR
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+              IdentityFile ~/.ssh/aur
+              User aur
+              StrictHostKeyChecking yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Clone AUR repo and update PKGBUILD
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          git clone ssh://aur@aur.archlinux.org/md-viewer-git.git aur-repo
+          cp aur/PKGBUILD aur-repo/PKGBUILD
+          # Bump the literal pkgver line so the file reflects the latest tag.
+          # (Build-time pkgver() still overrides at install, but this keeps the file readable.)
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" aur-repo/PKGBUILD
+
+      - name: Regenerate .SRCINFO
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          # makepkg refuses to run as root; spin up an Arch container with an unprivileged user.
+          docker run --rm -v "$PWD/aur-repo:/pkg" -w /pkg archlinux/archlinux:base-devel bash -c '
+            useradd -m builder &&
+            chown -R builder /pkg &&
+            sudo -u builder makepkg --printsrcinfo
+          ' > aur-repo/.SRCINFO
+
+      - name: Restore aur-repo ownership to runner
+        if: steps.check.outputs.proceed == 'true'
+        # The container's chown -R builder propagated through the bind mount, so
+        # the host runner can no longer write inside aur-repo (e.g. .git/config).
+        # Reclaim ownership before doing git config / commit / push.
+        run: sudo chown -R "$(id -u):$(id -g)" aur-repo
+
+      - name: Commit and push to AUR
+        if: steps.check.outputs.proceed == 'true'
+        working-directory: aur-repo
+        run: |
+          git config user.name "md-viewer CI"
+          git config user.email "ci@noreply.aydiler"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "No changes to push to AUR."
+            exit 0
+          fi
+          git commit -m "Update to ${VERSION}"
+          git push
+
   create-release:
     runs-on: ubuntu-latest
-    needs: [build, publish-crates, publish-snap]
+    needs: [build, publish-snap]
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-artifacts
+          pattern: release-*
+          merge-multiple: true
 
       - uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
-          files: md-viewer-*.tar.gz
+          files: |
+            md-viewer-*.tar.gz
+            md-viewer-*.zip
+            md-viewer-*.sha256

@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.aydiler.md-viewer</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Markdown Viewer</name>
+  <summary>Fast, lightweight markdown viewer for Linux</summary>
+
+  <description>
+    <p>
+      A fast, lightweight markdown viewer built with Rust and egui.
+      Designed for distraction-free reading with excellent typography
+      and syntax highlighting.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>GitHub Flavored Markdown with syntax highlighting (200+ languages)</li>
+      <li>Tab system for multiple documents</li>
+      <li>File explorer sidebar</li>
+      <li>Outline / table-of-contents sidebar</li>
+      <li>Dark and light themes</li>
+      <li>Live reload on file changes</li>
+      <li>Session persistence</li>
+      <li>Native X11 and Wayland support</li>
+      <li>Mermaid diagrams, math, and image rendering</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.aydiler.md-viewer.desktop</launchable>
+
+  <url type="homepage">https://github.com/aydiler/md-viewer</url>
+  <url type="bugtracker">https://github.com/aydiler/md-viewer/issues</url>
+  <url type="vcs-browser">https://github.com/aydiler/md-viewer</url>
+
+  <developer id="io.github.aydiler">
+    <name>aydiler</name>
+  </developer>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Dark mode with mermaid diagram, file explorer, and outline</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/dark-mode.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Syntax highlighting in dark mode</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/syntax-highlighting.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Light mode with documentation</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/light-mode.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>JSON syntax highlighting and outline navigation in light mode</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/syntax-highlighting-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Tables with inline code and hyperlinks</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/tables.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1" />
+
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+    <category>Viewer</category>
+  </categories>
+
+  <keywords>
+    <keyword>markdown</keyword>
+    <keyword>viewer</keyword>
+    <keyword>reader</keyword>
+    <keyword>commonmark</keyword>
+    <keyword>gfm</keyword>
+  </keywords>
+
+  <provides>
+    <binary>md-viewer</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.3" date="2026-05-15">
+      <description>
+        <p>Distribution improvements:</p>
+        <ul>
+          <li>Cross-platform prebuilt binaries (Linux, macOS Intel/arm64, Windows)</li>
+          <li>One-line installer script for Linux and macOS</li>
+          <li>SHA256 checksums on every release artifact</li>
+          <li>AUR package now auto-published from CI</li>
+          <li>Flatpak manifest ready for Flathub submission</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.1.2" date="2026-03-04">
+      <description>
+        <p>Bug fixes and performance improvements.</p>
+      </description>
+    </release>
+    <release version="0.1.1" date="2026-01-30">
+      <description>
+        <p>Bug fixes.</p>
+      </description>
+    </release>
+  </releases>
+</component>
