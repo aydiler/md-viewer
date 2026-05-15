@@ -968,9 +968,7 @@ fn find_matches(content: &str, query: &str) -> Vec<SearchMatch> {
     };
 
     let in_skip = |start: usize, end: usize| -> bool {
-        skip_spans
-            .iter()
-            .any(|s| start >= s.start && end <= s.end)
+        skip_spans.iter().any(|s| start >= s.start && end <= s.end)
     };
 
     let mut matches = Vec::new();
@@ -1980,8 +1978,8 @@ impl MarkdownApp {
         // Line-ratio estimate gets the view roughly in the right area. The renderer
         // records the actual y of the active match during paint; render_tab_content
         // schedules a corrective scroll next frame if this estimate was off.
-        let estimated_y = (m.line_number as f32 / tab.content_lines as f32)
-            * tab.last_content_height;
+        let estimated_y =
+            (m.line_number as f32 / tab.content_lines as f32) * tab.last_content_height;
         let margin = if tab.last_viewport_height > 0.0 {
             tab.last_viewport_height * 0.35
         } else {
@@ -1997,8 +1995,8 @@ impl MarkdownApp {
             return;
         }
         let tab_idx = self.active_tab;
-        let needs_rebuild = self.search.query != self.search.last_query
-            || self.search.last_tab != Some(tab_idx);
+        let needs_rebuild =
+            self.search.query != self.search.last_query || self.search.last_tab != Some(tab_idx);
         if !needs_rebuild {
             return;
         }
