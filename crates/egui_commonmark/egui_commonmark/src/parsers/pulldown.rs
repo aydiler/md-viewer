@@ -245,6 +245,36 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
     }
 }
 
+/// Whether a TagEnd marks a safe block-level boundary for viewport-skip.
+///
+/// At a block end the renderer's transient inline state (heading rich-text
+/// accumulator, list nesting, emphasis flags) is neutral, so a future frame
+/// can start rendering from the next event without losing context.
+///
+/// Inline ends (Emphasis, Strong, Link, Image, Superscript, Subscript) are
+/// rejected — splitting mid-paragraph would orphan inline formatting state.
+/// Table-internal ends (TableHead, TableRow, TableCell) are rejected because
+/// tables are pre-parsed and rendered as a single atomic unit.
+fn is_block_end_tag(tag: &pulldown_cmark::TagEnd) -> bool {
+    use pulldown_cmark::TagEnd;
+    matches!(
+        tag,
+        TagEnd::Paragraph
+            | TagEnd::Heading(_)
+            | TagEnd::BlockQuote(_)
+            | TagEnd::CodeBlock
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::FootnoteDefinition
+            | TagEnd::Table
+            | TagEnd::HtmlBlock
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+    )
+}
+
 /// Detect if text parsed as inline math (`$...$`) is actually NOT a real LaTeX
 /// formula. Returns true for currency amounts and other false positives like:
 /// - `$17.57` → parsed as InlineMath("17.57")
@@ -343,8 +373,17 @@ impl CommonMarkViewerInternal {
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
-                let is_element_end = matches!(e, pulldown_cmark::Event::End(_));
-                let should_add_split_point = self.list.is_inside_a_list() && is_element_end;
+                // Add a viewport-skip waypoint at every block-level end (not
+                // just list-internal ends as the original code did). Without
+                // this, docs whose content is mostly headings + paragraphs
+                // produce empty split_points, the viewport-skip math falls
+                // back to Pos2::ZERO, and rendered content overlaps. This is
+                // the root cause of the "buggy in scenarios more complex
+                // than the example application" warning on show_scrollable.
+                let should_add_split_point = matches!(
+                    &e,
+                    pulldown_cmark::Event::End(end) if is_block_end_tag(end)
+                );
 
                 if events.peek().is_none() {
                     self.line.should_end_newline_forced = false;
