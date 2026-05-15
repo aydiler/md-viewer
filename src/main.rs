@@ -1479,7 +1479,10 @@ impl MarkdownApp {
 
         // Build FileWatcher enum from whichever debouncers succeeded
         let file_watcher = match (inotify_debouncer, poll_debouncer) {
-            (Some(i), Some(p)) => Some(FileWatcher::Dual { inotify: i, poll: p }),
+            (Some(i), Some(p)) => Some(FileWatcher::Dual {
+                inotify: i,
+                poll: p,
+            }),
             (Some(d), None) => Some(FileWatcher::Inotify(d)),
             (None, Some(d)) => Some(FileWatcher::Poll(d)),
             (None, None) => None,
@@ -1657,8 +1660,12 @@ impl MarkdownApp {
                 let mut current = path.parent();
                 while let Some(parent) = current {
                     if parent.starts_with(root) || parent == root {
-                        self.flashing_paths
-                            .insert(parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()), now);
+                        self.flashing_paths.insert(
+                            parent
+                                .canonicalize()
+                                .unwrap_or_else(|_| parent.to_path_buf()),
+                            now,
+                        );
                     }
                     if parent == root {
                         break;
@@ -2223,7 +2230,13 @@ impl MarkdownApp {
                 ui.separator();
 
                 // Pre-load children for all expanded dirs to avoid mutation during render
-                for dir in self.file_explorer.expanded_dirs.iter().cloned().collect::<Vec<_>>() {
+                for dir in self
+                    .file_explorer
+                    .expanded_dirs
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
                     if self.file_explorer.get_children(&dir).is_none() {
                         self.file_explorer.load_children(&dir);
                     }
@@ -2239,7 +2252,6 @@ impl MarkdownApp {
                     .auto_shrink([false, false])
                     .id_salt("file_explorer")
                     .show(ui, |ui| {
-
                         for node in &tree {
                             let node_action = self.render_tree_node(ui, node, 0, &open_paths);
                             if node_action.file_to_open.is_some() {
@@ -2295,7 +2307,12 @@ impl MarkdownApp {
         let indent = depth * 16;
 
         match node {
-            FileTreeNode::File { path, name, display_name, .. } => {
+            FileTreeNode::File {
+                path,
+                name,
+                display_name,
+                ..
+            } => {
                 // Calculate flash intensity for this file
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -2371,7 +2388,12 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
             }
-            FileTreeNode::Directory { path, name, display_name, .. } => {
+            FileTreeNode::Directory {
+                path,
+                name,
+                display_name,
+                ..
+            } => {
                 // Calculate flash intensity for this directory
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -2449,7 +2471,11 @@ impl MarkdownApp {
 
                 // Render children if expanded (read from node directly, no clone needed)
                 if self.file_explorer.is_expanded(path) {
-                    if let FileTreeNode::Directory { children: Some(ref child_nodes), .. } = node {
+                    if let FileTreeNode::Directory {
+                        children: Some(ref child_nodes),
+                        ..
+                    } = node
+                    {
                         for child in child_nodes {
                             let child_action =
                                 self.render_tree_node(ui, child, depth + 1, open_paths);
@@ -2813,9 +2839,7 @@ impl eframe::App for MarkdownApp {
             let title = self.window_title();
             if title != self.last_window_title {
                 self.last_window_title = title;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                    self.last_window_title.clone(),
-                ));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.last_window_title.clone()));
             }
         }
 
