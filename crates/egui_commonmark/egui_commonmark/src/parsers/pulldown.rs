@@ -495,21 +495,33 @@ impl CommonMarkViewerInternal {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     let scroll_cache = scroll_cache(cache, &source_id);
 
-                    // finding the first element that's not in the viewport anymore
-                    let (first_event_index, _, first_end_position) = scroll_cache
-                        .split_points
-                        .iter()
-                        .filter(|(_, _, end_position)| end_position.y < viewport.min.y)
-                        .nth_back(1)
-                        .copied()
-                        .unwrap_or((0, Pos2::ZERO, Pos2::ZERO));
+                    // split_points are populated in event order, which matches
+                    // top-to-bottom layout order, so y-coords are monotonic
+                    // non-decreasing. Binary-search instead of linear filter:
+                    // O(log N) vs the old O(N) at 15k+ split points (100k-line doc).
 
-                    // finding the last element that's just outside the viewport
+                    // First waypoint: the second-to-last split point whose
+                    // end.y is still above the viewport. Picking "second-to-last"
+                    // gives us a safety frame above the viewport top to avoid
+                    // clipping inline-flow content that started just above.
+                    let above = scroll_cache
+                        .split_points
+                        .partition_point(|(_, _, end)| end.y < viewport.min.y);
+                    let (first_event_index, _, first_end_position) = if above >= 2 {
+                        scroll_cache.split_points[above - 2]
+                    } else {
+                        (0, Pos2::ZERO, Pos2::ZERO)
+                    };
+
+                    // Last waypoint: the second split point whose start.y is
+                    // strictly below the viewport bottom. Same safety idea on
+                    // the bottom edge.
+                    let below = scroll_cache
+                        .split_points
+                        .partition_point(|(_, start, _)| start.y <= viewport.max.y);
                     let last_event_index = scroll_cache
                         .split_points
-                        .iter()
-                        .filter(|(_, start_position, _)| start_position.y > viewport.max.y)
-                        .nth(1)
+                        .get(below + 1)
                         .map(|(index, _, _)| *index)
                         .unwrap_or(num_rows);
 
