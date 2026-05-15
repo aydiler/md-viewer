@@ -428,3 +428,87 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 **Explanation:** This is normal behavior during startup - not an actual error
 **Note:** The error can be ignored; it's just polling to detect when the app is ready
 **Files:** `~/egui-mcp/crates/egui-mcp-bridge/src/server.rs`
+
+---
+
+## Distribution / CI / Packaging
+
+### GitHub Actions blocks `secrets.*` AND `env.*` in job-level `if:`
+**Context:** Wiring an optional `publish-aur` job gated on `AUR_SSH_PRIVATE_KEY` being set
+**Problem:** `if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}` caused the whole workflow file to fail validation (no jobs run, "workflow file issue" with 0s duration). Switching to `if: ${{ env.AUR_SSH_KEY != '' }}` also fails — only `github`, `needs`, `vars`, and `inputs` contexts are allowed in job-level `if:`.
+**Fix:** Gate at step level instead. First step always succeeds, reads the secret, writes `proceed=true|false` to `$GITHUB_OUTPUT`. Every subsequent step has `if: steps.check.outputs.proceed == 'true'`. The job shows green with a notice when the secret is unset.
+```yaml
+- name: Check secret
+  id: check
+  env:
+    AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+  run: |
+    if [ -z "$AUR_SSH_KEY" ]; then
+      echo "proceed=false" >> "$GITHUB_OUTPUT"
+    else
+      echo "proceed=true" >> "$GITHUB_OUTPUT"
+    fi
+- uses: actions/checkout@v4
+  if: steps.check.outputs.proceed == 'true'
+```
+**Files:** `.github/workflows/release.yml`
+
+### Docker bind-mount `chown` breaks host runner ownership
+**Context:** Regenerating `.SRCINFO` inside a containerized `archlinux/archlinux:base-devel` because `makepkg` refuses to run as root
+**Problem:** After `docker run --rm -v "$PWD/aur-repo:/pkg" ... bash -c 'useradd -m builder && chown -R builder /pkg && sudo -u builder makepkg --printsrcinfo'`, the next host step failed with `error: could not lock config file .git/config: Permission denied`. The container's `chown -R builder` propagates through the bind mount, so the host runner can no longer write inside `aur-repo`.
+**Fix:** Restore ownership to the runner immediately after the container exits:
+```yaml
+- name: Restore aur-repo ownership to runner
+  run: sudo chown -R "$(id -u):$(id -g)" aur-repo
+```
+**Files:** `.github/workflows/release.yml`
+
+### GitHub macos-13 (Intel) runners have multi-minute queue waits
+**Context:** Cross-platform release matrix including `macos-13` for Intel Mac users
+**Problem:** v0.1.3 release run sat queued 24+ minutes for an Intel Mac runner while linux/macos-arm64/windows finished. The free macOS-13 runner pool is heavily contended.
+**Fix:** Drop Intel Mac from the matrix. Modern Macs are all Apple Silicon — `aarch64-apple-darwin` covers the bulk. Direct Intel Mac users to `cargo install`.
+**Files:** `.github/workflows/release.yml`
+
+### `cargo publish` rejects vendored forks with custom features
+**Context:** Trying to publish md-viewer to crates.io as part of the release pipeline
+**Problem:** `Cargo.toml` consumes `egui_commonmark_extended` with feature `math` via a `[patch.crates-io]` local path-patch to the vendored fork in `crates/egui_commonmark/`. `cargo publish` resolves dependencies against crates.io (ignoring `[patch]`) where upstream `egui_commonmark_extended 0.22.2` has no `math` feature. Result:
+```
+package `md-viewer` depends on `egui_commonmark_extended` with feature `math`
+but `egui_commonmark_extended` does not have that feature
+```
+**Workaround:** crates.io publish is disabled (`publish-crates` job removed from release.yml). To re-enable, either upstream the `math` feature into `egui_commonmark_extended` and drop the patch, or publish the fork to crates.io under a unique name (e.g., `egui_commonmark_extended_aydiler`) and update `Cargo.toml` to depend on the renamed crate. Git URLs are NOT a workaround — `cargo publish` rejects any dependency not on crates.io.
+**Files:** `Cargo.toml`, `.github/workflows/release.yml`, `PUBLISHING.md`
+
+### Flathub linter rejects `--filesystem=home:ro` (exception pattern)
+**Context:** Tightening sandbox permissions for the Flatpak manifest
+**Problem:** `flatpak-builder-lint` flags `finish-args-home-ro-filesystem-access` as an error for `--filesystem=home:ro`. Stricter alternatives (`xdg-documents` only) break CLI invocation outside `~/Documents` and live reload for arbitrary paths. `--filesystem=host:ro` is also flagged (worse — exposes `/etc`, `/usr`).
+**Fix:** Keep `--filesystem=home:ro` (functional priority) and document the exception in the Flathub PR body. For a read-only markdown viewer that needs CLI invocation + `notify` watcher access, this is a defensible exception — reviewers grant it for similar markdown editors/viewers. Document in `PUBLISHING.md` so the next person knows the lint error is expected.
+**Files:** `flatpak/io.github.aydiler.md-viewer.yaml`, `PUBLISHING.md`
+
+### `--talk-name=*portal*` is unnecessary for Flatpak XDG portals
+**Context:** First-pass Flatpak manifest included `--talk-name=org.freedesktop.portal.FileChooser` and `.Desktop`
+**Problem:** `flatpak-builder-lint` flags `finish-args-portal-talk-name`. Flatpak apps reach XDG portals through the standard sandbox mechanism without explicit D-Bus talk-name permissions.
+**Fix:** Remove the `--talk-name=*portal*` lines entirely. Native file dialogs (via `rfd` crate) still work through the portal mechanism.
+**Files:** `flatpak/io.github.aydiler.md-viewer.yaml`
+
+### Pollinations.ai is the keyless image-gen fallback
+**Context:** Replacing a placeholder app icon without a Gemini/OpenAI API key
+**Problem:** The `gemini` CLI's OAuth-personal auth (free tier) only grants access to text models. Image-gen models (`gemini-3.1-flash-image-preview`, `gemini-2.5-flash-image`, etc.) return `ModelNotFoundError: Requested entity was not found` (HTTP 404). Setting `GEMINI_API_KEY` in `~/.gemini/.env` would fix it but requires user action.
+**Fix:** Pollinations.ai requires no key:
+```bash
+PROMPT="..."
+ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PROMPT")
+curl -fsSL --max-time 90 -o /tmp/icon.png \
+    "https://image.pollinations.ai/prompt/${ENC}?width=1024&height=1024&model=flux&nologo=true&seed=42"
+```
+Returns JPEG despite `.png` extension; convert via ImageMagick. Flux is default model. Image often has a margin around any "rounded card" subject — crop to remove:
+```bash
+magick X.png -gravity center -crop 540x540+0+0 +repage -resize 256x256 -strip out.png
+```
+**Files:** N/A (one-off icon generation pattern)
+
+### GitHub user-level block stops Flathub PRs entirely
+**Context:** Attempting to open a PR against `flathub/flathub` from the `aydiler` account
+**Problem:** `gh pr create` returned HTTP 422 with `{"resource":"Issue","code":"custom","field":"user","message":"user is blocked"}`. Direct `curl` against the GitHub API confirms the block; org-block check (`/orgs/flathub/blocks/aydiler`) returns 404 (not org-level) so the block is at the GitHub user level — likely auto-triggered by previous activity (the account had 3 close/reopen PRs for `io.github.aydiler.msigd-gui` in January 2026).
+**Workaround:** Open a topic on Flathub Discourse (https://discourse.flathub.org/) asking for unblock; reference the closed prior PRs and the new app. The push to `aydiler/flathub:io.github.aydiler.md-viewer` branch succeeds before the PR step, so once unblocked the PR can be opened from the GitHub web UI without redoing branch work.
+**Files:** N/A (account-level state)
