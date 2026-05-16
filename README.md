@@ -16,14 +16,16 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **GitHub Flavored Markdown** - Full GFM support including tables, task lists, and footnotes
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, and more rendered natively via [merman](https://github.com/Latias94/merman) (click to enlarge)
+- **Resizable Table Columns** - Drag column dividers to fit content (new in v0.1.5)
 - **HTML Tables** - Rendered as formatted grids with proper cell padding
 - **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
 - **Unicode Support** - System font fallbacks (Noto, DejaVu) for emojis, CJK, and non-Latin scripts
-- **60 FPS Rendering** - Smooth scrolling with viewport-based lazy rendering
+- **60 FPS Rendering** - Viewport virtualization keeps scroll smooth on 100k+ line docs
 - **Typography** - 1.5x line height for optimal readability (WCAG 2.1 compliant)
 
 ### Navigation
 - **Tab System** - Open multiple documents with tab bar (Ctrl+Click links to open in new tab)
+- **In-Document Search (Ctrl+F)** - Find bar with inline highlights, Enter/Shift+Enter to cycle matches
 - **File Explorer** - Hierarchical sidebar with lazy-loading directories and sorting options
 - **Outline Sidebar** - Click-to-navigate table of contents from document headers
 - **Navigation Buttons** - Back/forward buttons in title bar for quick history navigation
@@ -64,9 +66,19 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ![Syntax Highlighting Light](screenshots/syntax-highlighting-light.png)
 
 ### Light Mode -- Tables & Lists
-*Troubleshooting table with inline code, ordered lists, and hyperlinks*
+*Troubleshooting table with inline code in cells, ordered list, and resizable columns (drag dividers)*
 
 ![Tables](screenshots/tables.png)
+
+### Search (Ctrl+F)
+*Find bar with inline highlights and match counter; Enter / Shift+Enter to cycle*
+
+![Search](screenshots/search.png)
+
+### Resizable Table Columns
+*Drag column dividers to fit wide content (new in v0.1.5)*
+
+![Resizable Tables](screenshots/resizable-tables.png)
 
 ## Keyboard Shortcuts
 
@@ -89,6 +101,15 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 | Alt+Right | Navigate forward in history |
 | Click link | Navigate in current tab |
 | Ctrl+Click link | Open link in new tab |
+
+### Search
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+F | Open find bar (or refocus if already open) |
+| Enter / ↓ | Jump to next match |
+| Shift+Enter / ↑ | Jump to previous match |
+| Esc | Close find bar and clear highlights |
 
 ### View
 
