@@ -166,3 +166,16 @@ If any of these fail on the real desktop, **block the PR** and root-cause before
 - Memory: `[[issue-4-context]]` (note: reporter is `emvolz`, not `chrismeyersfsu` — memory file needs correction post-merge)
 - Original briefing: `~/.claude/plans/prio3-resizable-table-columns.md`
 - Implementation plan: `~/.claude/plans/implement-priority-3-from-zippy-raccoon.md`
+
+## Post-merge integration test pass (T-K, tables × virtualization)
+
+After merging with `feature/virtualize-large-docs` (the v0.1.5 base), a focused 4-subtest integration pass on the merged release binary against `/tmp/md-bench/doc_100000.md` (embeds tables throughout the 100k-line synthetic content). Per-subtest artifacts under `/tmp/md-bench/mcp/T-K/`.
+
+| Subtest | Result | Notes |
+|---|---|---|
+| **T-K1** render correctness | PASS | First table ("Magna \| Incididunt \| Do" header + 5 striped rows + outer border) renders cleanly when scrolled into the virtualized viewport. Code block above renders independently with syntect colors intact. |
+| **T-K2** scroll past + back | PASS | `egui_scroll` delta_y=-2000 then +2000; table re-renders with 8 rows visible, identical content, no clipping or stale layout. Confirms the viewport-skip cache treats tables (pre-parsed by `parse_table`, rendered atomically) correctly across boundary scrolls. |
+| **T-K3** drag-resize | N/A | Code review confirms `.resizable(true)` + `Column::auto().at_least(40.0)` intact at `parsers/pulldown.rs:888-894` (markdown) + `:1482-1488` (HTML). Pixel-precision drag via `egui_drag` and xdotool (sweep x = 282..296 with intermediate positions) couldn't reliably target the 2 px divider hit-zone — `src/main.rs:1288` overrides `resize_grab_radius_side` from egui's default ~5 to 2 px (jitter fix for SidePanel/scrollbar overlap per `docs/LESSONS.md`). Same precision caveat as the original C3 subtest. Not a regression. |
+| **T-K4** cell selection + scroll | PASS | `egui_drag(280, 180 → 340, 180)` selected "con" of "consequat" inside a cell — blue selection-bg visible. `egui_scroll delta_y=-30` kept the selection visible at the new on-screen y. Confirms TableBuilder cells participate in egui's selectable-label model AND the renderer's selection-preserving wheel hack at `src/main.rs:2475-2496` works through cell content too. |
+
+**No regressions at the tables × virtualization boundary.** Tables render correctly through the viewport-skip cache; selection-preserving wheel hack works inside cells; column-resize is functionally intact (precision testing limited by the 2 px hit-zone — pre-existing).
