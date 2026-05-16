@@ -30,7 +30,11 @@ publish_dir() {
     local logfile
     logfile=$(mktemp)
     local rc=0
-    (cd "$dir" && cargo publish --token "$CARGO_REGISTRY_TOKEN" 2>&1) | tee "$logfile" || rc=$?
+    # --allow-dirty: the "Remove local-only MCP dependency" CI step rewrites a
+    # commented substring in Cargo.toml (changes `# mcp = [...]` → `# mcp = []`),
+    # which leaves the working directory dirty even though the published artifact
+    # is identical. Trusting the CI-prep transform is intentional.
+    (cd "$dir" && cargo publish --token "$CARGO_REGISTRY_TOKEN" --allow-dirty 2>&1) | tee "$logfile" || rc=$?
 
     if [ $rc -eq 0 ]; then
         echo "  Published ${label} OK"
