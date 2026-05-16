@@ -716,3 +716,30 @@ ui.vertical(|ui| {
 **Fix:** `CommonMarkCache::syntax_layouts: HashMap<u64, LayoutJob>` keyed by hash of `(content, lang, theme_is_dark, mono_font_size, code_line_height)`. `CodeBlock::end` checks the cache before running syntect. Cache hit clones the stored LayoutJob (cheap — text + format ranges).
 **Theme/zoom changes** key in new entries naturally because they're part of the key; old entries become dead weight until cache reset on file load. Bounded by unique-code-block count, typically <5 MB for real docs. LRU eviction is deferred until measured pathology.
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs` (`CommonMarkCache::syntax_layouts`, `CodeBlock::end`)
+
+### Nested horizontal ScrollArea doesn't auto-redirect vertical wheel
+**Context:** Issue #4 — wide markdown/HTML tables are wrapped in `egui::ScrollArea::horizontal()` inside the outer document `ScrollArea::vertical()`. Mouse wheel over the table body scrolled the page, never the table. Users could only scroll a wide table sideways by dragging the bottom scrollbar.
+**Root cause:** egui 0.33's `ScrollArea::horizontal()` only consumes the X component of `smooth_scroll_delta` during its `.show()`. Plain mouse wheel emits Y delta only, so the inner area sees nothing; the unconsumed Y delta then reaches the outer vertical area and scrolls the page. Shift+wheel has the same broken behavior — egui doesn't auto-convert Y→X for nested horizontal areas.
+**Fix:** After the nested `ScrollArea::horizontal().show(...)` returns, check `ui.rect_contains_pointer(out.inner_rect)`. If hovered AND the area still has room in the wheel direction, redirect Y delta into `out.state.offset.x`, `state.store(ctx, out.id)`, then zero `i.smooth_scroll_delta.y` so the outer area doesn't double-consume.
+**Edge pass-through:** If `offset.x == 0` and wheel-up, OR `offset.x >= max_x` and wheel-down, return early without touching the delta. The outer area then scrolls normally — avoids "stuck table swallows my wheel" feel.
+```rust
+fn forward_wheel_to_horizontal_scroll<R>(
+    ui: &Ui,
+    out: &mut egui::containers::scroll_area::ScrollAreaOutput<R>,
+) {
+    if !ui.rect_contains_pointer(out.inner_rect) { return; }
+    let dy = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+    if dy.abs() < 0.1 { return; }
+    let max_x = (out.content_size.x - out.inner_rect.width()).max(0.0);
+    if max_x <= 0.0 { return; }
+    let at_left  = out.state.offset.x <= 0.0   && dy > 0.0;
+    let at_right = out.state.offset.x >= max_x && dy < 0.0;
+    if at_left || at_right { return; }
+    out.state.offset.x = (out.state.offset.x - dy).clamp(0.0, max_x);
+    out.state.store(ui.ctx(), out.id);
+    ui.ctx().input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+    ui.ctx().request_repaint();
+}
+```
+**Why `State` is `Copy`:** egui's `ScrollArea::State` is `#[derive(Copy)]`, so `out.state.store(ctx, id)` copies and stores — the caller's `out.state` stays accessible after.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`forward_wheel_to_horizontal_scroll`, both table call sites)

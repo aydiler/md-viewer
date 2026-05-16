@@ -55,6 +55,8 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 
 - **Search (Ctrl+F)**: Current-document find bar with inline highlights. `SearchState` lives on `MarkdownApp`; per-tab `search_matches: Vec<SearchMatch>` cache match byte ranges. Highlights are painted by the vendored `egui_commonmark` renderer via a new `CommonMarkCache::set_search_ranges` API; the renderer splits `Event::Text` and (non-wrapped) `Event::Code` at range boundaries and applies a background color to the matching segments. Enter/Shift+Enter cycle matches with line-ratio scroll-into-view; Esc closes the bar and clears highlights on all tabs.
 
+- **Table wheel routing**: Wide markdown / HTML tables are wrapped in a nested `egui::ScrollArea::horizontal()`. After each table renders, `forward_wheel_to_horizontal_scroll` in `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` redirects pending vertical wheel deltas into the inner area's horizontal offset when the cursor is hovered. Edge passthrough (offset at 0 or max in wheel direction) lets the wheel fall through to the outer vertical area so the page can still scroll past the table.
+
 - **Global Allocator**: mimalloc for performance
 
 ## Key Libraries

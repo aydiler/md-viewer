@@ -15,6 +15,6 @@
 
 Tracked in issue #4. Recommended order:
 
-1. **Search / find-all (Ctrl+F)** — bounded, ~300-500 LoC in `src/main.rs`. Draft spec exists from the PR #5 contributor.
-2. **Table horizontal-scroll UX** — small (~30 lines) fix at `crates/egui_commonmark/.../pulldown.rs:572` to route wheel events through nested ScrollAreas.
+1. ~~**Search / find-all (Ctrl+F)**~~ — shipped in v0.1.4 (PR #14).
+2. ~~**Table horizontal-scroll UX**~~ — shipped post-v0.1.4 via `forward_wheel_to_horizontal_scroll` in `crates/egui_commonmark/.../pulldown.rs`.
 3. **Resizable table columns** — large refactor: swap `egui::Grid` for `egui_extras::TableBuilder` in the vendored fork. Regression-testing all existing table edge cases required.
