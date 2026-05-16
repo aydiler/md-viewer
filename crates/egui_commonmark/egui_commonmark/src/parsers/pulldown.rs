@@ -614,10 +614,14 @@ impl CommonMarkViewerInternal {
         let page_size_opt = scroll_cache(cache, &source_id).page_size;
         let Some(page_size) = page_size_opt else {
             let out = make_scroll_area().show(ui, |ui| {
-                // The inner show() runs in normal ScrollArea content space
-                // (no viewport translation), so 0.0 is the right baseline
-                // for record_header_position / record_active_search_y.
-                cache.set_scroll_offset(0.0);
+                // The inner show() runs inside a scrolled ScrollArea. The
+                // cursor is viewport-relative, so we add the *current scroll
+                // offset* — not 0 — to convert to content-relative y when
+                // recording header / active-search positions. A non-zero
+                // pending_scroll_offset means the caller jumped to that
+                // position this frame; without this, the bootstrap records
+                // every position shifted by -pending, corrupting the cache.
+                cache.set_scroll_offset(pending_scroll_offset.unwrap_or(0.0));
                 self.show(ui, cache, options, text, Some(source_id));
             });
             // Prevent repopulating points twice at startup
