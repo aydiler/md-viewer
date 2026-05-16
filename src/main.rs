@@ -2269,9 +2269,7 @@ impl MarkdownApp {
                 // headers this is the difference between visibly laggy and
                 // smooth outline interactions.
                 let visible_indices: Vec<usize> = (0..tab.outline_headers.len())
-                    .filter(|&i| {
-                        !header_is_hidden(&tab.outline_headers, i, &tab.collapsed_headers)
-                    })
+                    .filter(|&i| !header_is_hidden(&tab.outline_headers, i, &tab.collapsed_headers))
                     .collect();
                 let show_fold_indicators = any_header_has_children(&tab.outline_headers);
                 // Row height: fold indicator is 20px tall, fold-indicator-less
