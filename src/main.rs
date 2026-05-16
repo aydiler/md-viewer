@@ -123,12 +123,21 @@ const OUTLINE_DEFAULT_WIDTH: f32 = 208.0; // 200 + 8 margins
 const PANEL_SEPARATORS: f32 = 16.0;
 const OPTIMAL_WINDOW_HEIGHT: f32 = 750.0;
 
+fn content_default_width(full_width_content: bool) -> Option<usize> {
+    if full_width_content {
+        None
+    } else {
+        Some(CONTENT_OPTIMAL_WIDTH as usize)
+    }
+}
+
 /// Persisted state saved between sessions
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedState {
     dark_mode: Option<bool>,
     zoom_level: Option<f32>,
     show_outline: Option<bool>,
+    full_width_content: Option<bool>,
     open_tabs: Option<Vec<PathBuf>>,
     active_tab: Option<usize>,
     // File explorer state
@@ -1208,6 +1217,7 @@ struct MarkdownApp {
     dark_mode: bool,
     zoom_level: f32,
     show_outline: bool,
+    full_width_content: bool,
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
@@ -1299,6 +1309,7 @@ impl MarkdownApp {
             .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
+        let full_width_content = persisted.full_width_content.unwrap_or(false);
         let show_explorer = persisted.show_explorer.unwrap_or(true);
 
         // Determine initial tabs
@@ -1377,6 +1388,7 @@ impl MarkdownApp {
             dark_mode,
             zoom_level,
             show_outline,
+            full_width_content,
             watch_enabled: watch,
             error_message: None,
             is_dragging: false,
@@ -2438,10 +2450,11 @@ impl MarkdownApp {
                 // exposes state.offset and inner_rect for the post-render
                 // selection-preserving wheel hack below.
                 let pending = tab.pending_scroll_offset.take();
+                let default_width = content_default_width(self.full_width_content);
                 let mut scroll_output = CommonMarkViewer::new()
                     .default_implicit_uri_scheme(&tab.base_uri)
                     .max_image_width(Some(800))
-                    .default_width(Some(600))
+                    .default_width(default_width)
                     .indentation_spaces(2)
                     .show_alt_text_on_hover(true)
                     .syntax_theme_dark("base16-ocean.dark")
@@ -3159,6 +3172,7 @@ impl eframe::App for MarkdownApp {
             dark_mode: Some(self.dark_mode),
             zoom_level: Some(self.zoom_level),
             show_outline: Some(self.show_outline),
+            full_width_content: Some(self.full_width_content),
             open_tabs: Some(self.get_open_tab_paths()),
             active_tab: Some(self.active_tab),
             show_explorer: Some(self.show_explorer),
@@ -3590,16 +3604,22 @@ impl eframe::App for MarkdownApp {
                     }
                 });
 
-                ui.menu_button("View", |ui| {
+                #[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
+                let view_menu = ui.menu_button("View", |ui| {
                     let theme_text = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
                         "🌙 Dark Mode"
                     };
-                    if ui
-                        .add(egui::Button::new(theme_text).shortcut_text("Ctrl+D"))
-                        .clicked()
-                    {
+                    let theme_btn = ui.add(egui::Button::new(theme_text).shortcut_text("Ctrl+D"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Dark Mode",
+                        "button",
+                        &theme_btn,
+                        Some(if self.dark_mode { "dark" } else { "light" }),
+                    );
+                    if theme_btn.clicked() {
                         self.dark_mode = !self.dark_mode;
                         ui.close();
                     }
@@ -3609,10 +3629,16 @@ impl eframe::App for MarkdownApp {
                     } else {
                         "Show Explorer"
                     };
-                    if ui
-                        .add(egui::Button::new(explorer_text).shortcut_text("Ctrl+Shift+E"))
-                        .clicked()
-                    {
+                    let explorer_btn =
+                        ui.add(egui::Button::new(explorer_text).shortcut_text("Ctrl+Shift+E"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Show Explorer",
+                        "button",
+                        &explorer_btn,
+                        Some(if self.show_explorer { "on" } else { "off" }),
+                    );
+                    if explorer_btn.clicked() {
                         self.show_explorer = !self.show_explorer;
                         ui.close();
                     }
@@ -3622,38 +3648,82 @@ impl eframe::App for MarkdownApp {
                     } else {
                         "Show Outline"
                     };
-                    if ui
-                        .add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O"))
-                        .clicked()
-                    {
+                    let outline_btn =
+                        ui.add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Show Outline",
+                        "button",
+                        &outline_btn,
+                        Some(if self.show_outline { "on" } else { "off" }),
+                    );
+                    if outline_btn.clicked() {
                         self.show_outline = !self.show_outline;
+                        ui.close();
+                    }
+
+                    let full_width_text = if self.full_width_content {
+                        "✓ Full Width"
+                    } else {
+                        "Full Width"
+                    };
+                    let full_width_btn = ui.add(egui::Button::new(full_width_text));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Full Width",
+                        "button",
+                        &full_width_btn,
+                        Some(if self.full_width_content { "on" } else { "off" }),
+                    );
+                    if full_width_btn.clicked() {
+                        self.full_width_content = !self.full_width_content;
                         ui.close();
                     }
 
                     ui.separator();
 
-                    if ui
-                        .add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"))
-                        .clicked()
-                    {
+                    let zoom_in_btn = ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Zoom In",
+                        "button",
+                        &zoom_in_btn,
+                        None,
+                    );
+                    if zoom_in_btn.clicked() {
                         self.zoom_level = (self.zoom_level + 0.1).min(3.0);
                         ui.close();
                     }
-                    if ui
-                        .add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"))
-                        .clicked()
-                    {
+                    let zoom_out_btn =
+                        ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Zoom Out",
+                        "button",
+                        &zoom_out_btn,
+                        None,
+                    );
+                    if zoom_out_btn.clicked() {
                         self.zoom_level = (self.zoom_level - 0.1).max(0.5);
                         ui.close();
                     }
-                    if ui
-                        .add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"))
-                        .clicked()
-                    {
+                    let reset_zoom_btn =
+                        ui.add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Reset Zoom",
+                        "button",
+                        &reset_zoom_btn,
+                        None,
+                    );
+                    if reset_zoom_btn.clicked() {
                         self.zoom_level = 1.0;
                         ui.close();
                     }
                 });
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Menu: View", "button", &view_menu.response, None);
 
                 // Navigation buttons (visible arrows for back/forward)
                 ui.separator();
@@ -3951,6 +4021,16 @@ Visit [egui](https://github.com/emilk/egui) for more information.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_content_width_uses_optimal_width() {
+        assert_eq!(content_default_width(false), Some(600));
+    }
+
+    #[test]
+    fn full_width_content_uses_available_width() {
+        assert_eq!(content_default_width(true), None);
+    }
 
     #[test]
     fn find_matches_empty_query_returns_none() {
