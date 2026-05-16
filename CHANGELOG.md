@@ -2,6 +2,12 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.8] - 2026-05-16
+
+### Packaging
+
+- New `md-viewer-bin` AUR package ships the prebuilt linux-x86_64 binary from GitHub Releases instead of compiling from source. `yay -S md-viewer-bin` is a ~5 s install (vs ~2-3 min compile via `md-viewer-git`), no Rust toolchain required. The two packages `conflict` with each other; pacman picks one. PKGBUILD pulls the `.desktop`, icon, and `LICENSE` from raw GitHub URLs pinned to the tagged commit since the release tarball is binary-only. CI: new `publish-aur-bin` job in `release.yml` mirrors `publish-aur` but rewrites both `pkgver=` *and* the four-element `sha256sums=( ... )` array on every tag. Same `AUR_SSH_PRIVATE_KEY` secret powers both publish jobs.
+
 ## [0.1.7] - 2026-05-16
 
 ### Bug Fixes
