@@ -3604,16 +3604,22 @@ impl eframe::App for MarkdownApp {
                     }
                 });
 
-                ui.menu_button("View", |ui| {
+                #[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
+                let view_menu = ui.menu_button("View", |ui| {
                     let theme_text = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
                         "🌙 Dark Mode"
                     };
-                    if ui
-                        .add(egui::Button::new(theme_text).shortcut_text("Ctrl+D"))
-                        .clicked()
-                    {
+                    let theme_btn = ui.add(egui::Button::new(theme_text).shortcut_text("Ctrl+D"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Dark Mode",
+                        "button",
+                        &theme_btn,
+                        Some(if self.dark_mode { "dark" } else { "light" }),
+                    );
+                    if theme_btn.clicked() {
                         self.dark_mode = !self.dark_mode;
                         ui.close();
                     }
@@ -3623,10 +3629,16 @@ impl eframe::App for MarkdownApp {
                     } else {
                         "Show Explorer"
                     };
-                    if ui
-                        .add(egui::Button::new(explorer_text).shortcut_text("Ctrl+Shift+E"))
-                        .clicked()
-                    {
+                    let explorer_btn =
+                        ui.add(egui::Button::new(explorer_text).shortcut_text("Ctrl+Shift+E"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Show Explorer",
+                        "button",
+                        &explorer_btn,
+                        Some(if self.show_explorer { "on" } else { "off" }),
+                    );
+                    if explorer_btn.clicked() {
                         self.show_explorer = !self.show_explorer;
                         ui.close();
                     }
@@ -3636,10 +3648,16 @@ impl eframe::App for MarkdownApp {
                     } else {
                         "Show Outline"
                     };
-                    if ui
-                        .add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O"))
-                        .clicked()
-                    {
+                    let outline_btn =
+                        ui.add(egui::Button::new(outline_text).shortcut_text("Ctrl+Shift+O"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Show Outline",
+                        "button",
+                        &outline_btn,
+                        Some(if self.show_outline { "on" } else { "off" }),
+                    );
+                    if outline_btn.clicked() {
                         self.show_outline = !self.show_outline;
                         ui.close();
                     }
@@ -3649,35 +3667,63 @@ impl eframe::App for MarkdownApp {
                     } else {
                         "Full Width"
                     };
-                    if ui.add(egui::Button::new(full_width_text)).clicked() {
+                    let full_width_btn = ui.add(egui::Button::new(full_width_text));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Full Width",
+                        "button",
+                        &full_width_btn,
+                        Some(if self.full_width_content { "on" } else { "off" }),
+                    );
+                    if full_width_btn.clicked() {
                         self.full_width_content = !self.full_width_content;
                         ui.close();
                     }
 
                     ui.separator();
 
-                    if ui
-                        .add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"))
-                        .clicked()
-                    {
+                    let zoom_in_btn = ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Zoom In",
+                        "button",
+                        &zoom_in_btn,
+                        None,
+                    );
+                    if zoom_in_btn.clicked() {
                         self.zoom_level = (self.zoom_level + 0.1).min(3.0);
                         ui.close();
                     }
-                    if ui
-                        .add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"))
-                        .clicked()
-                    {
+                    let zoom_out_btn =
+                        ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Zoom Out",
+                        "button",
+                        &zoom_out_btn,
+                        None,
+                    );
+                    if zoom_out_btn.clicked() {
                         self.zoom_level = (self.zoom_level - 0.1).max(0.5);
                         ui.close();
                     }
-                    if ui
-                        .add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"))
-                        .clicked()
-                    {
+                    let reset_zoom_btn =
+                        ui.add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Reset Zoom",
+                        "button",
+                        &reset_zoom_btn,
+                        None,
+                    );
+                    if reset_zoom_btn.clicked() {
                         self.zoom_level = 1.0;
                         ui.close();
                     }
                 });
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Menu: View", "button", &view_menu.response, None);
 
                 // Navigation buttons (visible arrows for back/forward)
                 ui.separator();
