@@ -2,6 +2,23 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.5] - 2026-05-16
+
+### Performance
+
+- End-to-end virtualization of the markdown renderer. Scroll frame time at 100 k lines drops from ~101 ms to below the 1-tick measurement floor (effectively 60+ FPS); first-paint settle on a 100 k-line / 6 MB doc drops from ~15 s to ~7 s. Achieved via the vendored `egui_commonmark` fork: dense `split_points` at every block-level event end (root cause of the upstream "buggy in scenarios more complex than the example" warning on `show_scrollable`), binary-search viewport range over split_points, parsed-events cache keyed by a per-`Tab` `content_version`, `layout_signature` invalidation that includes zoom and theme (not just width). The app's `render_tab_content` switches to the renderer-owned `ScrollArea` via the new `CommonMarkViewer::show_scrollable` builder that returns `ScrollAreaOutput<()>` so the selection-preserving wheel hack still works.
+- Lazy syntect highlighting. `CodeBlock::end` now hits a `(content, lang, theme, font_size)`-keyed `LayoutJob` cache before running syntect, so only visible code blocks pay the highlight cost on first paint and re-highlight is a hash-lookup after that.
+- Outline panel virtualized via `egui::ScrollArea::show_rows`. On a 100 k-line doc with ~15 k headers the outline cost drops from O(headers) to O(visible_rows).
+
+### Bug Fixes
+
+- Search-jump and outline-click on off-viewport targets no longer leave the viewport at the line-ratio estimate. When `pending_scroll_offset` is set, the renderer forces a one-frame full paint so `cache.active_search_y` / `header_position` get recorded; the two-stage corrective scroll then snaps precisely. Cost: one ~100 ms frame per jump action (steady-state scroll is unaffected).
+
+### Documentation
+
+- New `docs/devlog/020-virtualize-large-docs.md` with the implementation walk, perf measurements, and the full MCP test pass (T-A through T-J: outline click, wheel scroll, search, zoom, theme, multi-tab isolation, file-explorer click, live reload, outline fold, selection-during-scroll).
+- New `docs/LESSONS.md` entries covering the virtualization gotchas: why `show_scrollable` was upstream-tagged "buggy" (sparse split_points), `layout_signature` must include zoom + theme, the renderer's selection-preserving wheel hack needs `ScrollAreaOutput`, and the lazy-syntect cache-key composition.
+
 ## [0.1.4] - 2026-05-15
 
 ### Features
