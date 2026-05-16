@@ -2,6 +2,17 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.7] - 2026-05-16
+
+### Bug Fixes
+
+- Outline-click on duplicate-titled headers (#17). Two `## Installation` sections used to both resolve to the same y because `CommonMarkCache::header_positions` is keyed by lowercased title; the second occurrence's `insert()` clobbered the first. Fix: composite key `(normalized_title, nth_with_same_text)` rendered as `"installation"` for the 0th occurrence and `"installation#N"` for the Nth duplicate. Parser assigns the index, renderer mirrors it under the same scheme. Includes a corrective two-stage scroll (`pending_header_click_key`) modeled on the existing search-jump corrective so the bootstrap full paint's precise y wins over the line-ratio first-frame estimate.
+- Bootstrap branch in `show_scrollable` corrupted recorded positions when triggered by a non-zero `pending_scroll_offset` (search-jump, outline-click landing deep in doc). Root cause: `cache.set_scroll_offset(0.0)` was unconditional, but the inner `.show()` runs inside a ScrollArea that has already been scrolled to the pending offset, so `ui.cursor().top()` is viewport-relative. Every `record_header_position` / `record_active_search_y_viewport` got shifted by the negative scroll offset, then the corrective scroll snapped to those wrong values. Fix: pass `pending_scroll_offset.unwrap_or(0.0)` instead. This is the missing piece that makes the duplicate-headers disambiguation work end-to-end.
+
+### Features
+
+- Click-to-enlarge lightbox now works for regular markdown images too, not just mermaid diagrams (#17). `![alt](url)` images get `Sense::click()` + a `cache.clicked_image` slot that the main app consumes alongside `take_clicked_mermaid` to open the existing lightbox overlay. Pointer cursor on hover, X close button, escape closes.
+
 ## [0.1.6] - 2026-05-16
 
 ### Features
