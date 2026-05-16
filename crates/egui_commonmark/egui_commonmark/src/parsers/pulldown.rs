@@ -501,6 +501,19 @@ impl CommonMarkViewerInternal {
                 sc.split_points.clear();
                 sc.available_size = available_size;
             }
+            // When the caller wants to jump to a specific scroll position
+            // (outline click, search-jump), we must paint *every* event
+            // this frame — not just the viewport-clipped subset. Otherwise
+            // a far target's block doesn't paint, the cache.active_search_y
+            // / header_position never gets recorded, and the two-stage
+            // corrective scroll (src/main.rs:scroll_to_active_match) can't
+            // snap to the precise y. Forcing the bootstrap branch costs one
+            // full-paint frame (~100 ms at 100k lines) per jump, which is
+            // acceptable for a one-off action.
+            if pending_scroll_offset.is_some() {
+                sc.page_size = None;
+                sc.split_points.clear();
+            }
         }
 
         // Helper: build the renderer-owned ScrollArea with caller config.
