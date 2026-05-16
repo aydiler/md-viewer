@@ -147,6 +147,20 @@ struct PersistedState {
     explorer_sort_order: Option<SortOrder>,
 }
 
+/// Build the composite cache key for a header position lookup. Combines the
+/// normalized (lowercased) title with the occurrence index so duplicate-titled
+/// headers map to distinct entries in `CommonMarkCache::header_positions`.
+/// Both the parser (which assigns `nth_with_same_text` to each `Header`) and
+/// the renderer (which records positions while painting) use this function so
+/// keys agree across the read/write boundary.
+pub fn header_position_key(normalized_title: &str, nth_with_same_text: usize) -> String {
+    if nth_with_same_text == 0 {
+        normalized_title.to_string()
+    } else {
+        format!("{normalized_title}#{nth_with_same_text}")
+    }
+}
+
 /// Represents a markdown header for the outline
 #[derive(Clone)]
 struct Header {
@@ -156,6 +170,11 @@ struct Header {
     display_title: String,
     /// Pre-computed lowercase key for header position cache lookups
     normalized_title: String,
+    /// Occurrence index among headers with the same `normalized_title`.
+    /// The first `## Installation` is 0, the second is 1, etc. Combined
+    /// with `normalized_title` into the composite cache key so duplicates
+    /// scroll to the correct (different) y positions.
+    nth_with_same_text: usize,
     line_number: usize,
 }
 
@@ -596,6 +615,12 @@ struct Tab {
     collapsed_headers: HashSet<usize>,
     scroll_offset: f32,
     pending_scroll_offset: Option<f32>,
+    /// Composite header-position key (see `header_position_key`) waiting for
+    /// a corrective scroll. Set when the outline-click handler used the
+    /// line-ratio fallback because the cache didn't yet have the precise y
+    /// for this key. Cleared once the post-render corrective step has
+    /// snapped the viewport to the recorded position.
+    pending_header_click_key: Option<String>,
     last_content_height: f32,
     last_viewport_height: f32,
     content_lines: usize,
@@ -644,6 +669,7 @@ impl Tab {
             collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
             pending_scroll_offset: None,
+            pending_header_click_key: None,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
             content_lines,
@@ -679,6 +705,7 @@ impl Tab {
             collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
             pending_scroll_offset: None,
+            pending_header_click_key: None,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
             content_lines,
@@ -893,7 +920,7 @@ fn truncate_display_name(s: &str, max_len: usize) -> String {
 /// Parse markdown headers from content, skipping code blocks.
 fn parse_headers(content: &str) -> ParsedHeaders {
     let re = &*HEADER_RE;
-    let mut all_headers = Vec::new();
+    let mut all_headers: Vec<Header> = Vec::new();
     let mut in_code_block = false;
 
     for (line_number, line) in content.lines().enumerate() {
@@ -910,11 +937,18 @@ fn parse_headers(content: &str) -> ParsedHeaders {
             let title = caps[2].trim().to_string();
             let normalized_title = title.to_lowercase();
             let display_title = truncate_display_name(&title, 35);
+            // Count prior headers with the same normalized title so each
+            // duplicate gets a distinct composite cache key.
+            let nth_with_same_text = all_headers
+                .iter()
+                .filter(|h| h.normalized_title == normalized_title)
+                .count();
             all_headers.push(Header {
                 level: caps[1].len() as u8,
                 title,
                 display_title,
                 normalized_title,
+                nth_with_same_text,
                 line_number,
             });
         }
@@ -2389,17 +2423,27 @@ impl MarkdownApp {
         // Calculate scroll target if header was clicked
         if let Some(idx) = clicked_header_index {
             if let Some(header) = tab.outline_headers.get(idx) {
-                // Try to get actual rendered position from cache first
-                if let Some(y_pos) = tab.cache.get_header_position(&header.normalized_title) {
-                    // Use exact position if available (header has been rendered)
+                // Composite key disambiguates duplicate-titled headers (e.g. two
+                // `## Installation` sections). Each occurrence has its own
+                // `nth_with_same_text` index assigned at parse time, and the
+                // renderer records positions under the same composite scheme.
+                let key = header_position_key(&header.normalized_title, header.nth_with_same_text);
+                // Try to get actual rendered position from cache first.
+                // With virtualization, the cache may hold a stale value from a
+                // partial render — record the key for the post-render
+                // corrective step which re-checks after the bootstrap full paint.
+                if let Some(y_pos) = tab.cache.get_header_position(&key) {
                     tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
                 } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
                     // Fallback: estimate position based on line number ratio
-                    // This works for headers that haven't been rendered yet
                     let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
                         * tab.last_content_height;
                     tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
                 }
+                // Remember the click target — once the bootstrap full paint
+                // triggered by `pending_scroll_offset` populates the cache, the
+                // corrective step in `render_tab_content` snaps to the precise y.
+                tab.pending_header_click_key = Some(key);
             }
         }
     }
@@ -2494,6 +2538,23 @@ impl MarkdownApp {
                         let inset = tab.last_viewport_height * 0.35;
                         let want_scroll = (actual_y - inset).max(0.0);
                         // Avoid stomping if we're already at the target (within a frame)
+                        if (want_scroll - current_scroll).abs() > 2.0 {
+                            tab.pending_scroll_offset = Some(want_scroll);
+                        }
+                    }
+                }
+
+                // Corrective scroll for outline-click. The bootstrap full paint
+                // triggered above by `pending_scroll_offset` recorded every
+                // heading's precise y under its composite cache key. If the
+                // line-ratio first-frame estimate left the target outside the
+                // viewport (common in image-heavy docs and the failure mode for
+                // duplicate-titled headers before this), snap the next frame to
+                // the recorded y. Mirrors the search-match corrective above.
+                if let Some(key) = tab.pending_header_click_key.take() {
+                    if let Some(actual_y) = tab.cache.get_header_position(&key) {
+                        let current_scroll = scroll_output.state.offset.y;
+                        let want_scroll = (actual_y - 50.0).max(0.0);
                         if (want_scroll - current_scroll).abs() > 2.0 {
                             tab.pending_scroll_offset = Some(want_scroll);
                         }

@@ -281,6 +281,11 @@ pub struct CommonMarkViewerInternal {
     current_heading_text: String,
     /// Accumulate heading RichText fragments for single render at end
     current_heading_rich_texts: Vec<egui::RichText>,
+    /// Per-render-pass counter: number of headings seen so far with each
+    /// normalized title. Used to build composite cache keys that
+    /// disambiguate duplicate-titled headers (e.g. multiple `## Installation`).
+    /// Reset at the start of each `show*` call so the count restarts at 0.
+    heading_occurrence_counts: std::collections::HashMap<String, usize>,
 }
 
 pub(crate) struct CheckboxClickEvent {
@@ -308,6 +313,7 @@ impl CommonMarkViewerInternal {
             current_heading_y: None,
             current_heading_text: String::new(),
             current_heading_rich_texts: Vec::new(),
+            heading_occurrence_counts: std::collections::HashMap::new(),
         }
     }
 }
@@ -1364,11 +1370,25 @@ impl CommonMarkViewerInternal {
                         }
                     });
                 }
-                // Record header position for scroll navigation (use normalized key)
+                // Record header position for scroll navigation. Composite key
+                // is `normalized_title` for the 0th occurrence and
+                // `normalized_title#N` for the Nth duplicate (matches the key
+                // built by the app's `header_position_key` helper), so multiple
+                // headings with the same title get distinct cache entries.
                 if let Some(y) = self.current_heading_y.take() {
                     if !self.current_heading_text.is_empty() {
                         let normalized = self.current_heading_text.trim().to_lowercase();
-                        cache.record_header_position(&normalized, y);
+                        let nth = self
+                            .heading_occurrence_counts
+                            .entry(normalized.clone())
+                            .or_insert(0);
+                        let key = if *nth == 0 {
+                            normalized.clone()
+                        } else {
+                            format!("{normalized}#{nth}")
+                        };
+                        *nth += 1;
+                        cache.record_header_position(&key, y);
                     }
                 }
                 self.current_heading_text.clear();
