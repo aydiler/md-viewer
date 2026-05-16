@@ -4,9 +4,7 @@ use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(any(feature = "mermaid", feature = "math"))]
 use std::collections::hash_map::DefaultHasher;
-#[cfg(any(feature = "mermaid", feature = "math"))]
 use std::hash::{Hash, Hasher};
 #[cfg(any(feature = "mermaid", feature = "math"))]
 use std::sync::mpsc;

@@ -99,11 +99,68 @@ jobs:
             md-viewer-*.sha256
             RELEASE_NOTES.md
 
-  # NOTE: crates.io publish is intentionally not automated. The repo consumes a
-  # vendored fork of `egui_commonmark_extended` (path patch in crates/) with a
-  # custom `math` feature that doesn't exist on the upstream crate. `cargo
-  # publish` resolves deps against crates.io and rejects this combination. See
-  # PUBLISHING.md for the path to re-enable (publish the fork under a new name).
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    env:
+      CARGO_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      # Step-level gating, same pattern as publish-aur. GitHub Actions disallows
+      # secrets.* and env.* in job-level `if:` — see LESSONS.md.
+      - name: Check crates.io token
+        id: check
+        run: |
+          if [ -z "$CARGO_TOKEN" ]; then
+            echo "::notice::CARGO_REGISTRY_TOKEN not set; skipping crates.io publish (see PUBLISHING.md for setup)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.proceed == 'true'
+
+      - name: Install system dependencies
+        if: steps.check.outputs.proceed == 'true'
+        # md-viewer's `cargo publish` verify step compiles the packaged crate
+        # against crates.io deps (no patch), which links eframe/rfd/etc. Same
+        # apt set as the build job.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
+            libgtk-3-dev libfontconfig1-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.proceed == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.proceed == 'true'
+        with:
+          key: publish-crates
+
+      - name: Remove local-only MCP dependency
+        # Mirrors the build job's transform (no-op if the lines are already
+        # commented out). The publish step must not see any path-only dep
+        # that doesn't exist on crates.io.
+        if: steps.check.outputs.proceed == 'true'
+        shell: python
+        run: |
+          import pathlib, re
+          p = pathlib.Path("Cargo.toml")
+          t = p.read_text()
+          t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
+          t = re.sub(r'(?m)^egui-mcp-bridge = .*\n', '', t)
+          p.write_text(t)
+
+      - name: Publish fork crates and md-viewer
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: bash scripts/publish-crates.sh
 
   publish-snap:
     runs-on: ubuntu-latest

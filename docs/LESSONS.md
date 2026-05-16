@@ -469,15 +469,21 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 **Fix:** Drop Intel Mac from the matrix. Modern Macs are all Apple Silicon — `aarch64-apple-darwin` covers the bulk. Direct Intel Mac users to `cargo install`.
 **Files:** `.github/workflows/release.yml`
 
-### `cargo publish` rejects vendored forks with custom features
-**Context:** Trying to publish md-viewer to crates.io as part of the release pipeline
-**Problem:** `Cargo.toml` consumes `egui_commonmark_extended` with feature `math` via a `[patch.crates-io]` local path-patch to the vendored fork in `crates/egui_commonmark/`. `cargo publish` resolves dependencies against crates.io (ignoring `[patch]`) where upstream `egui_commonmark_extended 0.22.2` has no `math` feature. Result:
+### Vendored forks must publish to crates.io with feature parity, under renamed identifiers
+**Context:** Restoring crates.io auto-publish after it was removed in PR #11.
+**Problem:** `cargo publish` ignores `[patch.crates-io]` during its verify step (resolves deps against the registry directly). If the registry version of a patched crate lacks a feature the consumer asks for, publish fails:
 ```
 package `md-viewer` depends on `egui_commonmark_extended` with feature `math`
 but `egui_commonmark_extended` does not have that feature
 ```
-**Workaround:** crates.io publish is disabled (`publish-crates` job removed from release.yml). To re-enable, either upstream the `math` feature into `egui_commonmark_extended` and drop the patch, or publish the fork to crates.io under a unique name (e.g., `egui_commonmark_extended_aydiler`) and update `Cargo.toml` to depend on the renamed crate. Git URLs are NOT a workaround — `cargo publish` rejects any dependency not on crates.io.
-**Files:** `Cargo.toml`, `.github/workflows/release.yml`, `PUBLISHING.md`
+**Fix:** Publish the vendored fork under renamed identifiers (`*_extended` suffix here) so they don't conflict with upstream `lampsitter/egui_commonmark`, and *keep registry feature parity*. When you add a feature to the local fork, bump the fork's workspace version and publish the new version *before* tagging md-viewer — otherwise md-viewer's publish-verify will fail against the older registry version.
+**Operational details (see `scripts/publish-crates.sh` + `publish-crates` job in `release.yml`):**
+- Publish order: backend → macros → extended → md-viewer.
+- Sparse-index settle delay (45 s) between publishes — otherwise dependents fail to resolve the new version.
+- "Already uploaded" treated as success → idempotent on re-tags.
+- `[patch.crates-io]` stays in root `Cargo.toml`. It's neutral for publish (ignored) and keeps local dev fast when iterating between fork bumps.
+- Pitfall: git URLs are NOT a workaround — `cargo publish` rejects any dep not on crates.io.
+**Files:** `Cargo.toml`, `crates/egui_commonmark/Cargo.toml`, `.github/workflows/release.yml`, `scripts/publish-crates.sh`, `PUBLISHING.md`
 
 ### Flathub linter rejects `--filesystem=home:ro` (exception pattern)
 **Context:** Tightening sandbox permissions for the Flatpak manifest

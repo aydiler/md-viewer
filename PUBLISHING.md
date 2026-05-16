@@ -19,22 +19,41 @@ This document covers the **one-time setup** for each channel and the **per-relea
 
 ## Crates.io
 
-**Crates.io publishing is intentionally NOT automated** in `release.yml`. `cargo publish` rejects this repo because `Cargo.toml` consumes `egui_commonmark_extended` with a custom `math` feature (added in the vendored fork at `crates/egui_commonmark/`). The upstream `egui_commonmark_extended` on crates.io does not have that feature, so dependency resolution against the registry fails:
+Every `v*` tag auto-publishes via the `publish-crates` job in `release.yml`. The job is **gated on `CARGO_REGISTRY_TOKEN`** — if the secret isn't set, the job no-ops with a notice and the rest of the release still ships.
 
-```
-package `md-viewer` depends on `egui_commonmark_extended` with feature `math`
-but `egui_commonmark_extended` does not have that feature
-```
+The vendored fork at `crates/egui_commonmark/` is published to crates.io under renamed identifiers (`egui_commonmark_extended`, `egui_commonmark_backend_extended`, `egui_commonmark_macros_extended`) so the consumer can resolve features like `math` that don't exist upstream in `lampsitter/egui_commonmark`. `scripts/publish-crates.sh` publishes in dep order (backend → macros → extended → md-viewer) with a 45 s settle delay between each, and treats "already uploaded" as success so re-tagging the same version doesn't fail.
 
-To re-enable crates.io publishing, you would need to either:
-- Publish the vendored fork to crates.io under a new name (e.g., `egui_commonmark_extended_aydiler`) and update `Cargo.toml` to depend on the renamed crate. Ongoing fork maintenance becomes a separate publishing pipeline.
-- Or, upstream the `math` feature into `egui_commonmark_extended` and drop the local patch.
+### One-time setup to enable automation
 
-Manual publish (if you do address one of the above):
+1. **Generate a crates.io token** at https://crates.io/settings/tokens with scope `publish-update` (covers `publish-new` + version updates). Optionally restrict to the four crates listed above.
+2. **Add it as a GitHub repo secret** named `CARGO_REGISTRY_TOKEN`
+   (Settings → Secrets and variables → Actions → New repository secret).
+
+### Bumping the fork
+
+When the vendored fork at `crates/egui_commonmark/` changes:
+
+1. Bump the workspace version in `crates/egui_commonmark/Cargo.toml`:
+   ```toml
+   [workspace.package]
+   version = "0.NEW.0"
+
+   [workspace.dependencies]
+   egui_commonmark_backend_extended = { version = "0.NEW.0", path = "...", ... }
+   egui_commonmark_macros_extended = { version = "0.NEW.0", path = "...", ... }
+   ```
+2. Update the root `Cargo.toml` consumer line: `egui_commonmark_extended = { version = "0.NEW.0", ... }`.
+3. Push the next `v*` tag. CI publishes the fork crates at the new version, then md-viewer.
+
+The root `[patch.crates-io]` block stays — it's neutral for `cargo publish` (which ignores patches) and useful locally between fork bumps.
+
+### Manual fallback
+
+If you need to publish manually (e.g., the CI job is unavailable):
 
 ```bash
-cargo login              # one-time
-cargo publish            # from repo root
+export CARGO_REGISTRY_TOKEN=<your token>
+bash scripts/publish-crates.sh
 ```
 
 ## AUR (Arch User Repository)
@@ -199,6 +218,6 @@ The repo currently ships a **placeholder** icon at `data/io.github.aydiler.md-vi
 - [ ] Watch `release.yml`. Expected outputs:
   - 4 prebuilt binaries (Linux x86_64, macOS x86_64, macOS arm64, Windows x86_64) + matching `.sha256`
   - GitHub Release with `RELEASE_NOTES.md` body
-  - crates.io publish (skipped if version already there)
+  - crates.io publish (gated on `CARGO_REGISTRY_TOKEN`; idempotent on re-tag)
   - Snap Store stable channel publish
   - AUR push (gated on `AUR_SSH_PRIVATE_KEY`)

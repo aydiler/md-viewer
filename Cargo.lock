@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_backend_extended"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "egui",
  "egui_extras",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_extended"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "egui",
  "egui_commonmark_backend_extended",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "md-viewer"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "eframe",
@@ -7937,4 +7937,4 @@ dependencies = [
 
 [[patch.unused]]
 name = "egui_commonmark_macros_extended"
-version = "0.22.2"
+version = "0.23.0"

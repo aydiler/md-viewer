@@ -1,6 +1,6 @@
 name: md-viewer
 base: core22
-version: '0.1.8'
+version: '0.1.9'
 summary: Fast, lightweight markdown viewer for Linux
 description: |
   A fast, lightweight markdown viewer built with Rust and egui.

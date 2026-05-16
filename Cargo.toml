@@ -1,6 +1,6 @@
 [package]
 name = "md-viewer"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 rust-version = "1.80"
 description = "Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload"
@@ -34,7 +34,7 @@ egui = { version = "0.33", features = ["accesskit"] }
 # egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
 
 # Markdown rendering with syntax highlighting (fork with typography support)
-egui_commonmark_extended = { version = "0.22.2", features = [
+egui_commonmark_extended = { version = "0.23.0", features = [
     "better_syntax_highlighting",
     "svg",
     "svg_text",
