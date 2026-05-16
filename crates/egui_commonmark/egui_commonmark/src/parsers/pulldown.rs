@@ -245,6 +245,66 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
     }
 }
 
+/// Hash the layout-affecting render context.
+///
+/// `split_points` cache y-positions, which become invalid when anything that
+/// affects layout changes. The previous code (parsers/pulldown.rs invalidation
+/// block) only watched `available_size`, so zooming (Ctrl++/-) or toggling
+/// dark mode would leave stale split_points in place and the viewport-skip
+/// math would render the wrong content range.
+fn compute_layout_signature(ui: &egui::Ui, options: &CommonMarkOptions) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Width drives wrap and is the dominant layout input.
+    ui.available_width().to_bits().hash(&mut h);
+    // Body text height already encodes egui's zoom factor and any explicit
+    // font-size override, so we don't need to read pixels_per_point separately.
+    ui.text_style_height(&egui::TextStyle::Body)
+        .to_bits()
+        .hash(&mut h);
+    ui.text_style_height(&egui::TextStyle::Monospace)
+        .to_bits()
+        .hash(&mut h);
+    // Theme doesn't change widget heights, but it does change the resolved
+    // syntect theme — invalidating here keeps split_points and the syntect
+    // cache (added later) coherent.
+    ui.style().visuals.dark_mode.hash(&mut h);
+    // Caller-configured constraints that affect block widths.
+    options.default_width.hash(&mut h);
+    options.indentation_spaces.hash(&mut h);
+    h.finish()
+}
+
+/// Whether a TagEnd marks a safe block-level boundary for viewport-skip.
+///
+/// At a block end the renderer's transient inline state (heading rich-text
+/// accumulator, list nesting, emphasis flags) is neutral, so a future frame
+/// can start rendering from the next event without losing context.
+///
+/// Inline ends (Emphasis, Strong, Link, Image, Superscript, Subscript) are
+/// rejected — splitting mid-paragraph would orphan inline formatting state.
+/// Table-internal ends (TableHead, TableRow, TableCell) are rejected because
+/// tables are pre-parsed and rendered as a single atomic unit.
+fn is_block_end_tag(tag: &pulldown_cmark::TagEnd) -> bool {
+    use pulldown_cmark::TagEnd;
+    matches!(
+        tag,
+        TagEnd::Paragraph
+            | TagEnd::Heading(_)
+            | TagEnd::BlockQuote(_)
+            | TagEnd::CodeBlock
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::FootnoteDefinition
+            | TagEnd::Table
+            | TagEnd::HtmlBlock
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+    )
+}
+
 /// Detect if text parsed as inline math (`$...$`) is actually NOT a real LaTeX
 /// formula. Returns true for currency amounts and other false positives like:
 /// - `$17.57` → parsed as InlineMath("17.57")
@@ -343,8 +403,17 @@ impl CommonMarkViewerInternal {
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
-                let is_element_end = matches!(e, pulldown_cmark::Event::End(_));
-                let should_add_split_point = self.list.is_inside_a_list() && is_element_end;
+                // Add a viewport-skip waypoint at every block-level end (not
+                // just list-internal ends as the original code did). Without
+                // this, docs whose content is mostly headings + paragraphs
+                // produce empty split_points, the viewport-skip math falls
+                // back to Pos2::ZERO, and rendered content overlaps. This is
+                // the root cause of the "buggy in scenarios more complex
+                // than the example application" warning on show_scrollable.
+                let should_add_split_point = matches!(
+                    &e,
+                    pulldown_cmark::Event::End(end) if is_block_end_tag(end)
+                );
 
                 if events.peek().is_none() {
                     self.line.should_end_newline_forced = false;
@@ -384,6 +453,7 @@ impl CommonMarkViewerInternal {
         (re, std::mem::take(&mut self.checkbox_events))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn show_scrollable(
         &mut self,
         source_id: Id,
@@ -391,37 +461,104 @@ impl CommonMarkViewerInternal {
         cache: &mut CommonMarkCache,
         options: &CommonMarkOptions,
         text: &str,
-    ) {
+        content_version: Option<u64>,
+        pending_scroll_offset: Option<f32>,
+        scroll_source: Option<egui::scroll_area::ScrollSource>,
+    ) -> egui::scroll_area::ScrollAreaOutput<()> {
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
+        let layout_sig = compute_layout_signature(ui, options);
 
-        let Some(page_size) = scroll_cache(cache, &source_id).page_size else {
-            egui::ScrollArea::vertical()
+        // Ensure parsed events are cached on the ScrollableCache, keyed by a
+        // content version. The caller can provide a monotonic version (bumped
+        // on every reload) — when omitted we fall back to hashing the content,
+        // which still beats reparsing but is O(N) per frame for the hash.
+        // The big win either way is avoiding pulldown_cmark::Parser::new_ext +
+        // collect on every frame (~52 ms at 100k lines).
+        let version = content_version.unwrap_or_else(|| Self::hash_content(text));
+        {
+            let sc = scroll_cache(cache, &source_id);
+            if sc.events.is_empty() || sc.content_version != version {
+                sc.events = pulldown_cmark::Parser::new_ext(
+                    text,
+                    parser_options_math(options.math_fn.is_some()),
+                )
+                .into_offset_iter()
+                .map(|(e, r)| (e.into_static(), r))
+                .collect();
+                sc.content_version = version;
+                // Content changed — cached split_points y-coords are no
+                // longer valid for this content. Drop them so the first
+                // post-change frame falls into the bootstrap branch below.
+                sc.page_size = None;
+                sc.split_points.clear();
+            }
+            // Width/zoom/theme change: y-coordinates are invalid for the
+            // new layout, even though parsed events are still good.
+            if sc.layout_signature != layout_sig {
+                sc.layout_signature = layout_sig;
+                sc.page_size = None;
+                sc.split_points.clear();
+                sc.available_size = available_size;
+            }
+            // When the caller wants to jump to a specific scroll position
+            // (outline click, search-jump), we must paint *every* event
+            // this frame — not just the viewport-clipped subset. Otherwise
+            // a far target's block doesn't paint, the cache.active_search_y
+            // / header_position never gets recorded, and the two-stage
+            // corrective scroll (src/main.rs:scroll_to_active_match) can't
+            // snap to the precise y. Forcing the bootstrap branch costs one
+            // full-paint frame (~100 ms at 100k lines) per jump, which is
+            // acceptable for a one-off action.
+            if pending_scroll_offset.is_some() {
+                sc.page_size = None;
+                sc.split_points.clear();
+            }
+        }
+
+        // Helper: build the renderer-owned ScrollArea with caller config.
+        let make_scroll_area = || {
+            let mut sa = egui::ScrollArea::vertical()
                 .id_salt(scroll_id)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    self.show(ui, cache, options, text, Some(source_id));
-                });
-            // Prevent repopulating points twice at startup
-            scroll_cache(cache, &source_id).available_size = available_size;
-            return;
+                .auto_shrink([false, true]);
+            if let Some(offset) = pending_scroll_offset {
+                sa = sa.vertical_scroll_offset(offset);
+            }
+            if let Some(src) = scroll_source {
+                sa = sa.scroll_source(src);
+            }
+            sa
         };
 
-        let events =
-            pulldown_cmark::Parser::new_ext(text, parser_options_math(options.math_fn.is_some()))
-                .into_offset_iter()
-                .collect::<Vec<_>>();
+        let page_size_opt = scroll_cache(cache, &source_id).page_size;
+        let Some(page_size) = page_size_opt else {
+            let out = make_scroll_area().show(ui, |ui| {
+                // The inner show() runs in normal ScrollArea content space
+                // (no viewport translation), so 0.0 is the right baseline
+                // for record_header_position / record_active_search_y.
+                cache.set_scroll_offset(0.0);
+                self.show(ui, cache, options, text, Some(source_id));
+            });
+            // Prevent repopulating points twice at startup
+            scroll_cache(cache, &source_id).available_size = available_size;
+            return out;
+        };
+
+        // Clone owned events out of the cache so we can iterate while
+        // process_event mutably borrows the cache for syntect/header state.
+        // The clone is O(events) but uses Event<'static>'s cheap refcounted
+        // CowStr internals — measured ~11 ms at 100k lines vs ~52 ms parse.
+        let events = scroll_cache(cache, &source_id).events.clone();
 
         let num_rows = events.len();
 
-        egui::ScrollArea::vertical()
-            .id_salt(scroll_id)
-            // Elements have different widths, so the scroll area cannot try to shrink to the
-            // content, as that will mean that the scroll bar will move when loading elements
-            // with different widths.
-            .auto_shrink([false, true])
+        make_scroll_area()
             .show_viewport(ui, |ui, viewport| {
                 ui.set_height(page_size.y);
+                // ui.cursor().top() inside show_viewport is viewport-relative;
+                // record_header_position and record_active_search_y_viewport
+                // add this offset to recover content-relative y.
+                cache.set_scroll_offset(viewport.min.y);
                 let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
 
                 let max_width = options.max_width(ui);
@@ -429,21 +566,33 @@ impl CommonMarkViewerInternal {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     let scroll_cache = scroll_cache(cache, &source_id);
 
-                    // finding the first element that's not in the viewport anymore
-                    let (first_event_index, _, first_end_position) = scroll_cache
-                        .split_points
-                        .iter()
-                        .filter(|(_, _, end_position)| end_position.y < viewport.min.y)
-                        .nth_back(1)
-                        .copied()
-                        .unwrap_or((0, Pos2::ZERO, Pos2::ZERO));
+                    // split_points are populated in event order, which matches
+                    // top-to-bottom layout order, so y-coords are monotonic
+                    // non-decreasing. Binary-search instead of linear filter:
+                    // O(log N) vs the old O(N) at 15k+ split points (100k-line doc).
 
-                    // finding the last element that's just outside the viewport
+                    // First waypoint: the second-to-last split point whose
+                    // end.y is still above the viewport. Picking "second-to-last"
+                    // gives us a safety frame above the viewport top to avoid
+                    // clipping inline-flow content that started just above.
+                    let above = scroll_cache
+                        .split_points
+                        .partition_point(|(_, _, end)| end.y < viewport.min.y);
+                    let (first_event_index, _, first_end_position) = if above >= 2 {
+                        scroll_cache.split_points[above - 2]
+                    } else {
+                        (0, Pos2::ZERO, Pos2::ZERO)
+                    };
+
+                    // Last waypoint: the second split point whose start.y is
+                    // strictly below the viewport bottom. Same safety idea on
+                    // the bottom edge.
+                    let below = scroll_cache
+                        .split_points
+                        .partition_point(|(_, start, _)| start.y <= viewport.max.y);
                     let last_event_index = scroll_cache
                         .split_points
-                        .iter()
-                        .filter(|(_, start_position, _)| start_position.y > viewport.max.y)
-                        .nth(1)
+                        .get(below + 1)
                         .map(|(index, _, _)| *index)
                         .unwrap_or(num_rows);
 
@@ -469,15 +618,11 @@ impl CommonMarkViewerInternal {
                         }
                     }
                 });
-            });
-
-        // Forcing full re-render to repopulate split points for the new size
-        let scroll_cache = scroll_cache(cache, &source_id);
-        if available_size != scroll_cache.available_size {
-            scroll_cache.available_size = available_size;
-            scroll_cache.page_size = None;
-            scroll_cache.split_points.clear();
-        }
+            })
+        // No trailing invalidation needed — layout_signature is checked at
+        // the top of show_scrollable, so a width/zoom/theme change in the
+        // same frame falls into the bootstrap branch above immediately
+        // instead of one frame later.
     }
 
     #[allow(clippy::too_many_arguments)]

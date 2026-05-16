@@ -8,6 +8,19 @@ pub struct ScrollableCache {
     pub available_size: Vec2,
     pub page_size: Option<Vec2>,
     pub split_points: Vec<(usize, Pos2, Pos2)>,
+    /// Parsed pulldown events, owned (Event<'static>) so they outlive the
+    /// borrow of the source text. Repopulated only when `content_version`
+    /// changes, replacing the per-frame `Parser::new_ext(text).collect()`
+    /// that previously ran at every paint.
+    pub events: Vec<(pulldown_cmark::Event<'static>, Range<usize>)>,
+    /// Last content version this cache was populated for. The caller
+    /// (typically a `Tab`) bumps a u64 on every load/reload; when the
+    /// renderer sees a mismatch it re-parses and clears split_points.
+    pub content_version: u64,
+    /// Hash of the layout-affecting context (width, font size, line height,
+    /// theme is_dark). When this changes, split_points must be cleared —
+    /// their y-positions are no longer valid for the new layout.
+    pub layout_signature: u64,
 }
 
 pub type EventIteratorItem<'e> = (usize, (pulldown_cmark::Event<'e>, Range<usize>));

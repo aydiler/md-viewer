@@ -597,6 +597,11 @@ struct Tab {
     history_forward: Vec<PathBuf>,
     /// Cached matches for the current search query; empty when bar is closed or query is empty
     search_matches: Vec<SearchMatch>,
+    /// Monotonic counter bumped on every content load/reload. Used as the
+    /// invalidation key for the renderer's per-document scroll cache so
+    /// parsed events and split_points can survive across frames without
+    /// re-hashing the entire content.
+    content_version: u64,
 }
 
 impl Tab {
@@ -638,6 +643,7 @@ impl Tab {
             history_back: Vec::new(),
             history_forward: Vec::new(),
             search_matches: Vec::new(),
+            content_version: 1,
         }
     }
 
@@ -671,6 +677,7 @@ impl Tab {
             history_back: Vec::new(),
             history_forward: Vec::new(),
             search_matches: Vec::new(),
+            content_version: 1,
         }
     }
 
@@ -691,6 +698,7 @@ impl Tab {
             self.content_lines = content.lines().count();
             self.content = content.into_owned();
             self.cache = CommonMarkCache::default();
+            self.content_version = self.content_version.wrapping_add(1);
             self.base_uri = Self::compute_base_uri(&self.path);
 
             let parsed = parse_headers(&self.content);
@@ -725,6 +733,7 @@ impl Tab {
             self.path = path.clone();
             self.id = egui::Id::new(path);
             self.cache = CommonMarkCache::default();
+            self.content_version = self.content_version.wrapping_add(1);
             self.scroll_offset = 0.0;
             self.pending_scroll_offset = None;
             self.base_uri = Self::compute_base_uri(&self.path);
@@ -2253,18 +2262,31 @@ impl MarkdownApp {
                     });
                     ui.separator();
                 }
+                // Pre-compute the visible header indices (skip those hidden
+                // by collapsed ancestors). This lets us virtualize via
+                // show_rows, paying O(visible-on-screen) instead of
+                // O(total-headers) per frame. On a 100k-line doc with ~15k
+                // headers this is the difference between visibly laggy and
+                // smooth outline interactions.
+                let visible_indices: Vec<usize> = (0..tab.outline_headers.len())
+                    .filter(|&i| {
+                        !header_is_hidden(&tab.outline_headers, i, &tab.collapsed_headers)
+                    })
+                    .collect();
+                let show_fold_indicators = any_header_has_children(&tab.outline_headers);
+                // Row height: fold indicator is 20px tall, fold-indicator-less
+                // rows fall back to the standard interact_size which is
+                // typically 18–20px anyway. A small fudge keeps neighboring
+                // rows from clipping into each other.
+                let row_height = ui.spacing().interact_size.y.max(20.0);
+
                 egui::ScrollArea::vertical()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .id_salt("outline")
-                    .show(ui, |ui| {
+                    .show_rows(ui, row_height, visible_indices.len(), |ui, row_range| {
                         let mut toggle_index: Option<usize> = None;
-                        // Only reserve space for fold indicators if any header has children
-                        let show_fold_indicators = any_header_has_children(&tab.outline_headers);
-                        for (idx, header) in tab.outline_headers.iter().enumerate() {
-                            // Skip headers hidden by collapsed ancestors
-                            if header_is_hidden(&tab.outline_headers, idx, &tab.collapsed_headers) {
-                                continue;
-                            }
+                        for &idx in &visible_indices[row_range] {
+                            let header = &tab.outline_headers[idx];
 
                             let has_children = header_has_children(&tab.outline_headers, idx);
                             let is_collapsed = tab.collapsed_headers.contains(&idx);
@@ -2412,41 +2434,36 @@ impl MarkdownApp {
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
-                let mut scroll_area = egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
+                // The renderer owns the ScrollArea now (via show_scrollable),
+                // so we configure scroll_source / pending offset / content
+                // version through builder methods. The returned ScrollAreaOutput
+                // exposes state.offset and inner_rect for the post-render
+                // selection-preserving wheel hack below.
+                let pending = tab.pending_scroll_offset.take();
+                let mut scroll_output = CommonMarkViewer::new()
+                    .default_implicit_uri_scheme(&tab.base_uri)
+                    .max_image_width(Some(800))
+                    .default_width(Some(600))
+                    .indentation_spaces(2)
+                    .show_alt_text_on_hover(true)
+                    .syntax_theme_dark("base16-ocean.dark")
+                    .syntax_theme_light("base16-ocean.light")
+                    .line_height(1.5)
+                    .code_line_height(1.3)
+                    .paragraph_spacing(2.0)
+                    .heading_spacing_above(2.0)
+                    .heading_spacing_below(0.75)
+                    .content_version(tab.content_version)
+                    .pending_scroll_offset(pending)
                     .scroll_source(egui::scroll_area::ScrollSource {
                         scroll_bar: true,
                         drag: false,
                         mouse_wheel: true,
                     })
-                    .id_salt(tab.id);
+                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
 
-                // Apply pending scroll offset from header clicks
-                if let Some(offset) = tab.pending_scroll_offset.take() {
-                    scroll_area = scroll_area.vertical_scroll_offset(offset);
-                }
-
-                let mut scroll_output = scroll_area.show_viewport(ui, |ui, viewport| {
-                    tab.scroll_offset = viewport.min.y;
-                    tab.last_viewport_height = viewport.height();
-                    tab.cache.set_scroll_offset(viewport.min.y);
-
-                    CommonMarkViewer::new()
-                        .default_implicit_uri_scheme(&tab.base_uri)
-                        .max_image_width(Some(800))
-                        .default_width(Some(600))
-                        .indentation_spaces(2)
-                        .show_alt_text_on_hover(true)
-                        .syntax_theme_dark("base16-ocean.dark")
-                        .syntax_theme_light("base16-ocean.light")
-                        .line_height(1.5)
-                        .code_line_height(1.3)
-                        .paragraph_spacing(2.0)
-                        .heading_spacing_above(2.0)
-                        .heading_spacing_below(0.75)
-                        .show(ui, &mut tab.cache, &tab.content);
-                });
-
+                tab.scroll_offset = scroll_output.state.offset.y;
+                tab.last_viewport_height = scroll_output.inner_rect.height();
                 tab.last_content_height = scroll_output.content_size.y;
 
                 // If the renderer recorded an exact y for the active match, check

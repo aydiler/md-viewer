@@ -97,6 +97,19 @@ use egui_commonmark_backend_extended::*;
 #[derive(Debug, Default)]
 pub struct CommonMarkViewer<'f> {
     options: CommonMarkOptions<'f>,
+    /// Caller-provided content version. When `Some`, the renderer uses this
+    /// as the per-document cache key instead of hashing the entire text on
+    /// every frame. Bump this counter on every load/reload.
+    content_version: Option<u64>,
+    /// Vertical scroll offset to apply this frame. Set this in place of the
+    /// caller's old `ScrollArea::vertical_scroll_offset` — when the renderer
+    /// owns the ScrollArea (via `show_scrollable`) the caller can no longer
+    /// configure it directly.
+    pending_scroll_offset: Option<f32>,
+    /// Scroll source config for the renderer-owned ScrollArea. Useful when
+    /// the caller needs to disable drag-scroll (e.g. to keep text selection
+    /// working) while preserving wheel-scroll.
+    scroll_source: Option<egui::scroll_area::ScrollSource>,
 }
 
 impl<'f> CommonMarkViewer<'f> {
@@ -377,6 +390,34 @@ impl<'f> CommonMarkViewer<'f> {
         self
     }
 
+    /// Caller-provided content version. Bumped by the caller on every
+    /// load/reload of the source text. Only consulted by `show_scrollable`;
+    /// `show` falls back to its internal content-hash cache.
+    pub fn content_version(mut self, version: u64) -> Self {
+        self.content_version = Some(version);
+        self
+    }
+
+    /// Vertical scroll offset to apply this frame. Pass `None` (or omit the
+    /// call) to leave the scroll position untouched.
+    ///
+    /// Use this instead of the caller setting `vertical_scroll_offset` on an
+    /// outer `ScrollArea` — `show_scrollable` owns the ScrollArea internally.
+    pub fn pending_scroll_offset(mut self, offset: Option<f32>) -> Self {
+        self.pending_scroll_offset = offset;
+        self
+    }
+
+    /// Configure which scroll inputs the renderer-owned ScrollArea reacts to.
+    ///
+    /// Default is whatever `egui::ScrollArea::vertical()` provides. Callers
+    /// can pass e.g. `ScrollSource { drag: false, scroll_bar: true,
+    /// mouse_wheel: true }` to preserve text selection while scrolling.
+    pub fn scroll_source(mut self, source: egui::scroll_area::ScrollSource) -> Self {
+        self.scroll_source = Some(source);
+        self
+    }
+
     /// Shows rendered markdown
     pub fn show(
         self,
@@ -432,20 +473,22 @@ impl<'f> CommonMarkViewer<'f> {
         inner_response
     }
 
-    /// Shows markdown inside a [`ScrollArea`].
-    /// This function is much more performant than just calling [`show`] inside a [`ScrollArea`],
-    /// because it only renders elements that are visible.
+    /// Shows markdown inside a [`ScrollArea`] with viewport-clipped rendering.
     ///
-    /// # Caveat
+    /// Renders only the events whose layout y-positions intersect the visible
+    /// viewport, using waypoints (split_points) populated on the first paint
+    /// and a layout signature (width / font size / theme) that invalidates
+    /// them when the rendering context changes.
     ///
-    /// This assumes that the markdown is static. If it does change, you have to clear the cache
-    /// by using [`clear_scrollable_with_id`](CommonMarkCache::clear_scrollable_with_id) or
-    /// [`clear_scrollable`](CommonMarkCache::clear_scrollable). If the content changes every frame,
-    /// it's faster to call [`show`] directly.
+    /// # Content change contract
+    ///
+    /// Pass a monotonic [`content_version`] that the caller bumps on every
+    /// content reload, so the renderer can drop the per-document cache without
+    /// hashing the entire text on every frame. When `content_version` is
+    /// unset, the renderer falls back to a content hash.
     ///
     /// [`ScrollArea`]: egui::ScrollArea
-    /// [`show`]: crate::CommonMarkViewer::show
-    #[doc(hidden)] // Buggy in scenarios more complex than the example application
+    /// [`content_version`]: CommonMarkViewer::content_version
     #[cfg(feature = "pulldown_cmark")]
     pub fn show_scrollable(
         self,
@@ -453,7 +496,7 @@ impl<'f> CommonMarkViewer<'f> {
         ui: &mut egui::Ui,
         cache: &mut CommonMarkCache,
         text: &str,
-    ) {
+    ) -> egui::scroll_area::ScrollAreaOutput<()> {
         egui_commonmark_backend_extended::prepare_show(cache, ui.ctx());
         parsers::pulldown::CommonMarkViewerInternal::new().show_scrollable(
             Id::new(source_id),
@@ -461,7 +504,10 @@ impl<'f> CommonMarkViewer<'f> {
             cache,
             &self.options,
             text,
-        );
+            self.content_version,
+            self.pending_scroll_offset,
+            self.scroll_source,
+        )
     }
 }
 
