@@ -127,6 +127,36 @@ fn inline_code_wrap_segments(text: &str) -> Vec<String> {
     segments
 }
 
+/// Count the visual lines a markdown table cell will occupy when rendered.
+/// Used by the `fn table` renderer to compute heterogeneous row heights so
+/// long inline-code paths (chunked by `inline_code_wrap_segments`) don't get
+/// clipped by a fixed row height. Only `Event::Code` chunking adds visual
+/// lines today; other inline events flow on a single line within a cell.
+fn cell_visual_lines(cell: &[(pulldown_cmark::Event, Range<usize>)]) -> usize {
+    let mut max_lines = 1usize;
+    for (event, _) in cell {
+        if let pulldown_cmark::Event::Code(text) = event {
+            let chunks = inline_code_wrap_segments(text).len();
+            if chunks > max_lines {
+                max_lines = chunks;
+            }
+        }
+    }
+    max_lines
+}
+
+/// Heuristic visual-line count for an HTML-table cell (rendered as a plain
+/// `RichText` string, not as a markdown event stream). Counts explicit
+/// newlines and adds a crude wrap estimate of ~60 chars per visual line.
+/// Over-estimates slightly by design — extra row height is preferable to
+/// clipping. Exact estimation would require knowing the rendered column
+/// width up front, which TableBuilder doesn't expose before render.
+fn html_cell_visual_lines(cell: &str) -> usize {
+    let explicit_lines = cell.lines().count().max(1);
+    let wrap_est = cell.len().saturating_sub(1) / 60;
+    explicit_lines.saturating_add(wrap_est).max(1)
+}
+
 /// Newline logic is constructed by the following:
 /// All elements try to insert a newline before them (if they are allowed)
 /// and end their own line.
@@ -794,53 +824,131 @@ impl CommonMarkViewerInternal {
             let id = ui.id().with("_table").with(self.curr_table);
             self.curr_table += 1;
 
-            // Wrap table in horizontal scroll to handle overflow
+            // Consume events into header/rows up front so we know the column count
+            // (TableBuilder requires the column count declared before rendering).
+            // `header` is a Vec<Cell> for a single header row, so `header.len()` is
+            // the column count. Each row in `rows` is itself a Vec<Cell>.
+            let Table { header, rows } = parse_table(events);
+            // Drop trailing empty rows that pulldown_cmark sometimes appends.
+            let rows: Vec<_> = rows.into_iter().filter(|r| !r.is_empty()).collect();
+            let num_cols = if !header.is_empty() {
+                header.len()
+            } else {
+                rows.first().map(|r| r.len()).unwrap_or(0)
+            };
+            let line_h = ui.text_style_height(&egui::TextStyle::Body);
+
+            if num_cols == 0 {
+                self.is_table = false;
+                if events.peek().is_none() {
+                    self.line.should_end_newline_forced = false;
+                }
+                self.line.try_insert_end(ui);
+                return;
+            }
+            // Per-line cell height; rows grow taller when cells contain multi-chunk
+            // inline-code wraps (computed below via `cell_visual_lines`).
+            let cell_h = line_h * 1.5;
+            // Header is one row; its height grows if any header cell has wrapped code.
+            let header_lines = header
+                .iter()
+                .map(|c| cell_visual_lines(c))
+                .max()
+                .unwrap_or(1);
+            let header_h = cell_h * header_lines as f32;
+            // Pre-compute per-body-row height so multi-chunk cells aren't clipped.
+            let body_heights: Vec<f32> = rows
+                .iter()
+                .map(|row| {
+                    let max_lines = row
+                        .iter()
+                        .map(|c| cell_visual_lines(c))
+                        .max()
+                        .unwrap_or(1);
+                    cell_h * max_lines as f32
+                })
+                .collect();
+            // Outer ScrollArea::horizontal handles the case where columns
+            // (auto-sized to content) total wider than the parent ui; without it,
+            // narrow windows clip the rightmost columns.
+            // ui.vertical(...) is essential: TableBuilder's body() positions itself
+            // relative to the parent's cursor, but the parent here is a horizontal-
+            // flow Ui from the markdown renderer. Without the vertical scope the
+            // body's first row overlaps the header row.
             egui::ScrollArea::horizontal()
                 .id_salt(id.with("_scroll"))
                 .max_width(max_width)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                let Table { header, rows } = parse_table(events);
-
-                egui::Grid::new(id).striped(true).show(ui, |ui| {
-                    for col in header {
-                        ui.horizontal(|ui| {
-                            for (e, src_span) in col {
-                                let tmp_start =
-                                    std::mem::replace(&mut self.line.should_start_newline, false);
-                                let tmp_end =
-                                    std::mem::replace(&mut self.line.should_end_newline, false);
-                                self.event(ui, e, src_span, cache, options, max_width);
-                                self.line.should_start_newline = tmp_start;
-                                self.line.should_end_newline = tmp_end;
-                            }
-                        });
-                    }
-
-                    ui.end_row();
-
-                    for row in rows {
-                        for col in row {
-                            ui.horizontal(|ui| {
-                                for (e, src_span) in col {
-                                    let tmp_start = std::mem::replace(
-                                        &mut self.line.should_start_newline,
-                                        false,
-                                    );
-                                    let tmp_end =
-                                        std::mem::replace(&mut self.line.should_end_newline, false);
-                                    self.event(ui, e, src_span, cache, options, max_width);
-                                    self.line.should_start_newline = tmp_start;
-                                    self.line.should_end_newline = tmp_end;
+                    ui.vertical(|ui| {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            let table = egui_extras::TableBuilder::new(ui)
+                                .id_salt(id)
+                                .striped(true)
+                                .resizable(true)
+                                .vscroll(false)
+                                .auto_shrink([false, true])
+                                .min_scrolled_height(0.0)
+                                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                .columns(
+                                    egui_extras::Column::auto().resizable(true).at_least(40.0),
+                                    num_cols,
+                                )
+                                .header(header_h, |mut row| {
+                                    for col in header {
+                                        row.col(|ui| {
+                                            let col_w = ui.available_width();
+                                            for (e, src_span) in col {
+                                                let tmp_start = std::mem::replace(
+                                                    &mut self.line.should_start_newline,
+                                                    false,
+                                                );
+                                                let tmp_end = std::mem::replace(
+                                                    &mut self.line.should_end_newline,
+                                                    false,
+                                                );
+                                                self.event(
+                                                    ui, e, src_span, cache, options, col_w,
+                                                );
+                                                self.line.should_start_newline = tmp_start;
+                                                self.line.should_end_newline = tmp_end;
+                                            }
+                                        });
+                                    }
+                                });
+                            table.body(|mut body| {
+                                for (row_idx, row) in rows.into_iter().enumerate() {
+                                    let h = body_heights
+                                        .get(row_idx)
+                                        .copied()
+                                        .unwrap_or(cell_h);
+                                    body.row(h, |mut row_ui| {
+                                        for col in row {
+                                            row_ui.col(|ui| {
+                                                let col_w = ui.available_width();
+                                                for (e, src_span) in col {
+                                                    let tmp_start = std::mem::replace(
+                                                        &mut self.line.should_start_newline,
+                                                        false,
+                                                    );
+                                                    let tmp_end = std::mem::replace(
+                                                        &mut self.line.should_end_newline,
+                                                        false,
+                                                    );
+                                                    self.event(
+                                                        ui, e, src_span, cache, options, col_w,
+                                                    );
+                                                    self.line.should_start_newline = tmp_start;
+                                                    self.line.should_end_newline = tmp_end;
+                                                }
+                                            });
+                                        }
+                                    });
                                 }
                             });
-                        }
-
-                        ui.end_row();
-                    }
+                        });
                     });
                 });
-            });
 
             self.is_table = false;
             if events.peek().is_none() {
@@ -1327,85 +1435,148 @@ impl CommonMarkViewerInternal {
             .map(|r| r.len())
             .unwrap_or(0);
 
+        let line_h = ui.text_style_height(&egui::TextStyle::Body);
+        let cell_h = line_h * 1.5;
+
+        if num_cols == 0 {
+            self.line.try_insert_end(ui);
+            return;
+        }
+
+        // Heuristic per-row heights: count explicit newlines + crude wrap est at
+        // ~60 chars/visual-line. Over-estimates slightly (extra row height is
+        // preferable to clipping). Header rows use the same heuristic.
+        let row_height_for = |cells: &[String]| -> f32 {
+            let max_lines = cells
+                .iter()
+                .map(|c| html_cell_visual_lines(c))
+                .max()
+                .unwrap_or(1);
+            cell_h * max_lines as f32
+        };
+        let header_h = table
+            .header
+            .first()
+            .map(|row| row_height_for(row))
+            .unwrap_or(cell_h);
+        let extra_header_heights: Vec<f32> = table
+            .header
+            .iter()
+            .skip(1)
+            .map(|row| row_height_for(row))
+            .collect();
+        let body_heights: Vec<f32> = table.rows.iter().map(|row| row_height_for(row)).collect();
+
+        // Outer ScrollArea::horizontal handles wide tables that exceed parent width;
+        // ui.vertical() prevents the header/body Y-overlap quirk.
         egui::ScrollArea::horizontal()
             .id_salt(id.with("_scroll"))
             .max_width(max_width)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    let border_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+                ui.vertical(|ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        let builder = egui_extras::TableBuilder::new(ui)
+                            .id_salt(id)
+                            .striped(true)
+                            .resizable(true)
+                            .vscroll(false)
+                            .auto_shrink([false, true])
+                            .min_scrolled_height(0.0)
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                            .columns(
+                                egui_extras::Column::auto().resizable(true).at_least(40.0),
+                                num_cols,
+                            );
 
-                    let grid_response = egui::Grid::new(id)
-                        .striped(true)
-                        .min_col_width(40.0)
-                        .spacing(egui::vec2(0.0, 0.0))
-                        .show(ui, |ui| {
-                            // Render header rows
-                            for row in &table.header {
-                                for (i, cell) in row.iter().enumerate() {
-                                    egui::Frame::NONE
-                                        .inner_margin(egui::Margin::symmetric(8, 4))
-                                        .show(ui, |ui| {
-                                            ui.strong(cell);
-                                        });
-                                    if i + 1 < num_cols {
-                                        Self::paint_vertical_separator(ui, border_color);
+                        let render_cell_strong = |ui: &mut Ui, cell: &str| {
+                            egui::Frame::NONE
+                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                .show(ui, |ui| {
+                                    ui.strong(cell);
+                                });
+                        };
+
+                        if let Some(first_header) = table.header.first() {
+                            builder
+                                .header(header_h, |mut row| {
+                                    for cell in first_header {
+                                        row.col(|ui| render_cell_strong(ui, cell));
                                     }
-                                }
-                                ui.end_row();
-                            }
-
-                            // Render body rows
-                            for row in &table.rows {
-                                for (i, cell) in row.iter().enumerate() {
-                                    egui::Frame::NONE
-                                        .inner_margin(egui::Margin::symmetric(8, 4))
-                                        .show(ui, |ui| {
-                                            let rich_text = self
-                                                .text_style
-                                                .to_richtext_with_typography(
-                                                    ui,
-                                                    cell,
-                                                    Some(&options.typography),
-                                                );
-                                            ui.label(rich_text);
+                                })
+                                .body(|mut body| {
+                                    // Extra header rows after the first render as bold
+                                    // body rows (TableBuilder has only one native header row).
+                                    for (idx, extra) in table.header.iter().skip(1).enumerate() {
+                                        let h = extra_header_heights
+                                            .get(idx)
+                                            .copied()
+                                            .unwrap_or(cell_h);
+                                        body.row(h, |mut row_ui| {
+                                            for cell in extra {
+                                                row_ui.col(|ui| render_cell_strong(ui, cell));
+                                            }
                                         });
-                                    if i + 1 < num_cols {
-                                        Self::paint_vertical_separator(ui, border_color);
                                     }
+                                    for (row_idx, row) in table.rows.iter().enumerate() {
+                                        let h = body_heights
+                                            .get(row_idx)
+                                            .copied()
+                                            .unwrap_or(cell_h);
+                                        body.row(h, |mut row_ui| {
+                                            for cell in row {
+                                                row_ui.col(|ui| {
+                                                    egui::Frame::NONE
+                                                        .inner_margin(egui::Margin::symmetric(
+                                                            8, 4,
+                                                        ))
+                                                        .show(ui, |ui| {
+                                                            let rich_text = self
+                                                                .text_style
+                                                                .to_richtext_with_typography(
+                                                                    ui,
+                                                                    cell,
+                                                                    Some(&options.typography),
+                                                                );
+                                                            ui.label(rich_text);
+                                                        });
+                                                });
+                                            }
+                                        });
+                                    }
+                                });
+                        } else {
+                            builder.body(|mut body| {
+                                for (row_idx, row) in table.rows.iter().enumerate() {
+                                    let h = body_heights
+                                        .get(row_idx)
+                                        .copied()
+                                        .unwrap_or(cell_h);
+                                    body.row(h, |mut row_ui| {
+                                        for cell in row {
+                                            row_ui.col(|ui| {
+                                                egui::Frame::NONE
+                                                    .inner_margin(egui::Margin::symmetric(8, 4))
+                                                    .show(ui, |ui| {
+                                                        let rich_text = self
+                                                            .text_style
+                                                            .to_richtext_with_typography(
+                                                                ui,
+                                                                cell,
+                                                                Some(&options.typography),
+                                                            );
+                                                        ui.label(rich_text);
+                                                    });
+                                            });
+                                        }
+                                    });
                                 }
-                                ui.end_row();
-                            }
-                        });
-
-                    // Draw horizontal line between header and body
-                    if !table.header.is_empty() && !table.rows.is_empty() {
-                        let rect = grid_response.response.rect;
-                        // Estimate header height from total rows
-                        let total_rows = table.header.len() + table.rows.len();
-                        let header_fraction =
-                            table.header.len() as f32 / total_rows as f32;
-                        let separator_y = rect.top() + rect.height() * header_fraction;
-                        ui.painter().hline(
-                            rect.left()..=rect.right(),
-                            separator_y,
-                            egui::Stroke::new(1.0, border_color),
-                        );
-                    }
+                            });
+                        }
+                    });
                 });
             });
 
         self.line.try_insert_end(ui);
-    }
-
-    fn paint_vertical_separator(ui: &mut Ui, color: egui::Color32) {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(1.0, ui.available_height()),
-            egui::Sense::hover(),
-        );
-        ui.painter().vline(
-            rect.center().x,
-            rect.top()..=rect.bottom(),
-            egui::Stroke::new(1.0, color),
-        );
     }
 }
