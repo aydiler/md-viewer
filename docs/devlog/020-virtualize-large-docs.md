@@ -118,7 +118,24 @@ Verified manually on Xvfb :99:
 
 - Unit tests for `is_block_end_tag` dense coverage, `layout_signature` invalidation, and the `syntax_layouts` cache hit path.
 - Selection regression test: must be manual on a real desktop session (Xvfb's selection model is degenerate per `docs/LESSONS.md`).
-- Outline-click / search-jump scroll-to verification for off-viewport targets: the planned mitigation (clear `split_points` for one frame when `pending_scroll_offset` lands outside the viewport) is documented in LESSONS.md but not yet needed in practice — the existing two-stage line-ratio + recorded-y approach still works because at the start of a scroll-to action the target is usually within or close to the current viewport.
+
+### MCP test pass (T-A through T-I)
+
+Run via `cargo build --release --features mcp` + `mcp__egui__*` tools on Xvfb :99 (parallel session contention noted but managed by killing only our own processes). Per-test artifacts under `/tmp/md-bench/mcp/T-*/`.
+
+| Test | Surface | Result |
+|---|---|---|
+| T-A | outline-click → scroll-to-header (sections 1, 5, 8 in `doc_100000.md`) | PASS — viewport scrolls to clicked header; outline highlights clicked entry |
+| T-B | wheel scroll via `egui_scroll` (down then up) | PASS — pre/post viewports differ in scroll direction |
+| T-C | search Ctrl+F → fill → cycle (README "License" + `doc_100000.md` "Voluptate tempor") | **PASS after fix** — initial regression: virtualization skipped over off-viewport match blocks, so `cache.active_search_y` never recorded, two-stage scroll couldn't snap. Fix in `parsers/pulldown.rs`: when `pending_scroll_offset.is_some()`, clear `page_size` + `split_points` to force the bootstrap (full-paint) branch this frame. README cycling now lands orange `HL_ACTIVE` on every match. |
+| T-D | zoom Ctrl++/Ctrl+0 | PASS — 130% indicator appears, text scales cleanly, no rendering artifacts; `layout_signature` invalidates correctly |
+| T-E | dark-mode toggle Ctrl+D | INDETERMINATE — `egui_key{key:"D", modifiers:["ctrl"]}` sent twice, no visible theme change. Other Ctrl+ shortcuts in T-D worked. Handler is wired at `src/main.rs:3362`. Likely an MCP key-routing edge case for the "D" key specifically; needs manual verification on a real desktop. |
+| T-F | multi-tab scroll-state isolation (README + CHANGELOG) | PASS — scroll CHANGELOG → switch to README → switch back to CHANGELOG: prior scroll position preserved. Per-`source_id` `ScrollableCache` does what it should. |
+| T-G | file explorer click → open tab | PASS (verified as side-effect of T-F) — clicking `File: CHANGELOG.md` opens new tab, sets it active, marks file as `"open"` in explorer. |
+| T-H | live reload via file watcher | PASS — `echo … >>` to a watched file triggers reload within ~1 s; outline repopulates with new headers; no flicker. |
+| T-I | outline collapse/expand fold indicators | PASS — clicking `Toggle: …` flips state expanded↔collapsed; `visible_indices` recomputes; `show_rows` adjusts row count (visible h3 children disappear; off-screen sections appear to fill the freed space). |
+
+The C-T regression fix (one extra commit on the branch: `Fix: search-jump and outline-click on off-viewport targets miss after virtualization`) costs one full-paint frame (~100 ms at 100k lines) per scroll-to action. Acceptable for a one-off click/Enter; steady-state scroll is unaffected.
 
 ## Future Improvements
 
