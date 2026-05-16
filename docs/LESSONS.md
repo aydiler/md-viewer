@@ -673,6 +673,34 @@ ui.vertical(|ui| {
 **Fix:** Blind fixed-size char-count cut. Each chunk has a known upper bound (56 chars) so it always fits the column. Mid-identifier breaks are a cosmetic cost, but functionally correct at every width.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`inline_code_wrap_segments`)
 
+### `publish-aur-bin` races `create-release` — pull tarball sha256 from build artifact, not Release URL
+**Context:** v0.1.8 first run. The new `publish-aur-bin` job was wired as `needs: build` so it could parallelise with `publish-snap` and `publish-aur`. Its first step `curl -fsSL ".../releases/download/v${VERSION}/md-viewer-${VERSION}-linux-x86_64.tar.gz.sha256"` failed with curl exit 22 (HTTP 4xx) in 12 seconds.
+**Root cause:** The GitHub Release isn't *created* until `create-release` runs, which is `needs: [build, publish-snap]`. publish-aur-bin had no dependency on either snap or create-release, so it raced ahead of the Release URL existing. publish-aur doesn't hit this because the source-build PKGBUILD has `sha256sums=('SKIP')` — it never fetches the release asset.
+**Fix:** Use `actions/download-artifact@v4` to pull the `release-linux-x86_64` artifact (uploaded by the `build` matrix) directly inside `publish-aur-bin`. The artifact already contains `md-viewer-VERSION-linux-x86_64.tar.gz.sha256` — the same file that later ends up on the Release page. No ordering dependency on snap or create-release.
+**Alternative considered:** `needs: create-release` — adds ~20 min serial latency (snap is slow); rejected.
+**Aux files** (`.desktop`, icon, LICENSE) still come from `raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/...` — those URLs are valid as soon as the tag is pushed, no race.
+**Recovery for the failed v0.1.8 run:** rerunning the failed job from GitHub doesn't help — `gh run rerun` uses the workflow code as it existed at tag time. Either re-tag (destructive) or push the package manually. I did the manual push; CI fix landed as `c552f10` on main for v0.1.9+.
+**Files:** `.github/workflows/release.yml` (`publish-aur-bin`)
+
+### `sed 's/^version = "0.1.7"$/.../' Cargo.lock` bumps unrelated crates
+**Context:** Releasing v0.1.8 — needed to bump `md-viewer`'s entry in `Cargo.lock` to match the new `Cargo.toml` version.
+**Pitfall:** `sed -i 's/^version = "0.1.7"$/version = "0.1.8"/' Cargo.lock` rewrote 5 lines, not 1. Four other crates (`crypto-common`, etc.) happened to be at `0.1.7` and silently bumped to `0.1.8` — invalid versions, would have broken builds.
+**Fix:** Use `Edit` with surrounding context to scope to the `md-viewer` block:
+```
+old: name = "md-viewer"\nversion = "0.1.7"
+new: name = "md-viewer"\nversion = "0.1.8"
+```
+Or run `cargo update -p md-viewer --precise 0.1.8` from a clean tree (slower but unambiguous).
+**Recovery:** `git checkout Cargo.lock` and redo surgically. Always `git diff Cargo.lock` after touching it — anything other than one line under `[[package]] name = "md-viewer"` is a mistake.
+**Files:** `Cargo.lock`
+
+### `CHANGELOG.md` is hand-curated — do NOT `git-cliff -o CHANGELOG.md`
+**Context:** `.claude/rules/release-workflow.md` suggests running `git-cliff -o CHANGELOG.md` to generate changelog entries before tagging.
+**Problem:** git-cliff parses conventional commits. This repo's commit history doesn't conform (171/N commits skipped on the v0.1.8 attempt), so the generated CHANGELOG is sparse and drops entire versions (e.g. v0.1.4, v0.1.6, v0.1.7 vanished). Running `-o` overwrites the existing rich hand-written prose with the degraded version.
+**Fix:** For new versions, prepend a `## [X.Y.Z] - YYYY-MM-DD` section manually using the existing entry style (rich prose with PR refs, root-cause + fix structure). git-cliff can be used as a *starting point* (`git-cliff --tag vX.Y.Z` to stdout) but the output requires heavy editing and shouldn't overwrite the file.
+**Recovery:** `git checkout CHANGELOG.md` if you accidentally regenerated.
+**Files:** `CHANGELOG.md`, `.claude/rules/release-workflow.md` (rule could be tightened with a "git-cliff for inspiration only" note).
+
 ---
 
 ## Virtualization

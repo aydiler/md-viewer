@@ -1,20 +1,21 @@
 # Feature: `md-viewer-bin` AUR package
 
-**Status:** 🚧 In Progress
-**Branch:** `feature/aur-bin`
+**Status:** ✅ Complete (shipped at v0.1.8)
+**Branch:** `feature/aur-bin` (merged to main as `f8b0a38`; CI fix follow-up `c552f10`)
 **Date:** 2026-05-16
+**AUR URL:** https://aur.archlinux.org/packages/md-viewer-bin
 
 ## Summary
 
-Adds a prebuilt-binary AUR package (`md-viewer-bin`) alongside the existing source-build `md-viewer-git`. Users who want pacman-managed updates without compiling the Rust toolchain (~2–3 min build) can now install via `yay -S md-viewer-bin` and pull the GitHub Releases tarball directly.
+Adds a prebuilt-binary AUR package (`md-viewer-bin`) alongside the existing source-build `md-viewer-git`. Users who want pacman-managed updates without compiling the Rust toolchain (~2–3 min build) can now `yay -S md-viewer-bin` and pull the GitHub Releases tarball directly (~5 s install).
 
 ## Features
 
 - [x] `aur-bin/PKGBUILD` — prebuilt-binary recipe
-- [x] CI: `publish-aur-bin` job in `release.yml` mirroring `publish-aur`
+- [x] CI: `publish-aur-bin` job in `release.yml`
 - [x] `PUBLISHING.md` section documenting the new package
-- [ ] Local `makepkg` smoke test (see Verification)
-- [ ] First release tag triggers the new job
+- [x] Local `makepkg` smoke test (both v0.1.7 and v0.1.8 PKGBUILDs)
+- [x] First release tag triggered the new job — initially failed (see "Day-of recovery" below), green from v0.1.9 onward
 
 ## Key Discoveries
 
@@ -83,7 +84,16 @@ Both gotchas from `publish-aur` (`LESSONS.md` → "GitHub Actions blocks `secret
 
 4. **First release tag** — pushing `v0.1.8` (or later) should make `publish-aur-bin` create `ssh://aur@aur.archlinux.org/md-viewer-bin.git` on first push.
 
+## Day-of recovery (v0.1.8)
+
+The first triggered run failed in 12 s with curl exit 22. Root cause: the tarball-sha256 fetch hit `https://github.com/aydiler/md-viewer/releases/download/v0.1.8/...sha256` *before* the GitHub Release was created. The Release is created by `create-release`, which is `needs: [build, publish-snap]` — but `publish-aur-bin` was only `needs: build`, so it raced ahead.
+
+**Fix (`c552f10` on main):** swap the curl-from-Release call for `actions/download-artifact@v4 name: release-linux-x86_64` — the build job already uploads the `.sha256` as part of its artifact bundle. No ordering dependency on snap or create-release; aux-file curls from raw GitHub stay (those URLs are valid as soon as the tag is pushed).
+
+**Manual recovery for v0.1.8:** Once `create-release` finished and v0.1.8 was published, I did the AUR push from my dev machine: prep PKGBUILD with the four real sha256s, `makepkg --printsrcinfo > .SRCINFO`, `git init` + `git push -u origin master` to `ssh://aur@aur.archlinux.org/md-viewer-bin.git`. The AUR auto-creates the repo on first push. From v0.1.9 onward this will all run from CI. Full lesson and recovery procedure recorded in `docs/LESSONS.md` → "publish-aur-bin races create-release".
+
 ## Future Improvements
 
 - Add `md-viewer-bin` to the `aur/PKGBUILD` (`-git`) `conflicts=` array for symmetry. Holds off until the next `-git` PKGBUILD touch to avoid an unrelated edit on this branch.
 - Consider bundling `.desktop` / icon / LICENSE into the release tarball if we ever ship a 2nd binary (e.g. aarch64-linux) — at that point the PKGBUILD source-count balloon makes the per-tarball-aux-file approach uncomfortable.
+- Tighten `.claude/rules/release-workflow.md` to flag that `git-cliff -o CHANGELOG.md` overwrites the hand-curated file. Today's session almost lost the existing entries.
