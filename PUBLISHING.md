@@ -75,6 +75,38 @@ git add PKGBUILD .SRCINFO && git commit -m "Update to $NEW_VERSION" && git push
 
 Test locally: `makepkg -si`.
 
+### AUR (`-bin` variant)
+
+A second AUR package, `md-viewer-bin`, ships the GitHub Releases prebuilt binary instead of compiling from source. Arch users pick one:
+
+- `md-viewer-bin` — fast install (~5 s), no Rust toolchain needed, x86_64 only.
+- `md-viewer-git` — compiles from git HEAD, picks up unreleased changes.
+
+The two packages `conflict` with each other; pacman won't allow both.
+
+Maintained by the `publish-aur-bin` job in `release.yml`, mirroring `publish-aur` with three differences:
+
+1. Pushes to `ssh://aur@aur.archlinux.org/md-viewer-bin.git`.
+2. Rewrites both `pkgver=` *and* the four-element `sha256sums=( ... )` array (Python inline, since multi-line `sed` is fragile). The tarball checksum comes from the release's `<asset>.sha256`; the three aux-file checksums (`.desktop`, icon, LICENSE) are fetched fresh from raw GitHub.
+3. First push to the brand-new AUR repo uses `git push -u origin HEAD:refs/heads/master`.
+
+Same `AUR_SSH_PRIVATE_KEY` secret powers both jobs; no separate setup. The job is independently gated, so a `-git`-only or `-bin`-only failure doesn't block the other.
+
+The PKGBUILD pulls the `.desktop`, icon, and `LICENSE` from raw GitHub URLs pinned to `v${pkgver}` because the release tarball is binary-only. If a future release ever bundles those files into the tarball, drop the three raw-GitHub `source=()` entries and read them out of `${srcdir}/` instead.
+
+#### Manual fallback (`-bin`)
+
+```bash
+git clone ssh://aur@aur.archlinux.org/md-viewer-bin.git
+cd md-viewer-bin
+cp /path/to/repo/aur-bin/PKGBUILD .
+# Edit PKGBUILD: bump pkgver=, then refresh all four sha256sums via
+# `updpkgsums` (from pacman-contrib) — it downloads each source and rewrites
+# the array in place.
+makepkg --printsrcinfo > .SRCINFO
+git add PKGBUILD .SRCINFO && git commit -m "Update to $NEW_VERSION" && git push
+```
+
 ## Snap Store
 
 1. **Create Snapcraft account**: https://snapcraft.io/account

@@ -206,6 +206,121 @@ jobs:
           git commit -m "Update to ${VERSION}"
           git push
 
+  publish-aur-bin:
+    name: Publish to AUR (-bin)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    env:
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      # Same step-level gating as publish-aur (see LESSONS.md → "GitHub Actions
+      # blocks `secrets.*` AND `env.*` in job-level `if:`").
+      - name: Check AUR secret
+        id: check
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY not set; skipping AUR -bin publish (see PUBLISHING.md for setup)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.proceed == 'true'
+
+      - name: Set version
+        if: steps.check.outputs.proceed == 'true'
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Set up SSH for AUR
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org > ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+              IdentityFile ~/.ssh/aur
+              User aur
+              StrictHostKeyChecking yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Clone AUR repo and update PKGBUILD
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          # On first run for this package, the repo doesn't exist yet — AUR
+          # creates it on first push. `git clone` of a not-yet-existing repo
+          # returns "warning: You appear to have cloned an empty repository."
+          # which is fine; we initialize it from the staged PKGBUILD.
+          git clone ssh://aur@aur.archlinux.org/md-viewer-bin.git aur-repo || true
+          if [ ! -d aur-repo ]; then
+            mkdir aur-repo
+            (cd aur-repo && git init -b master && \
+             git remote add origin ssh://aur@aur.archlinux.org/md-viewer-bin.git)
+          fi
+          cp aur-bin/PKGBUILD aur-repo/PKGBUILD
+
+          # Fetch all four sha256s for the source array.
+          mkdir -p sums
+          curl -fsSL -o sums/tarball.sha256 \
+            "https://github.com/aydiler/md-viewer/releases/download/v${VERSION}/md-viewer-${VERSION}-linux-x86_64.tar.gz.sha256"
+          curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/data/md-viewer.desktop" \
+            | sha256sum > sums/desktop.sha256
+          curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/data/io.github.aydiler.md-viewer.png" \
+            | sha256sum > sums/icon.sha256
+          curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/LICENSE" \
+            | sha256sum > sums/license.sha256
+
+          # Rewrite pkgver and the four-element sha256sums=( ... ) array.
+          # sed on a multi-line array is fragile, so use Python.
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("aur-repo/PKGBUILD")
+          sums = [open(f"sums/{n}.sha256").read().split()[0]
+                  for n in ("tarball", "desktop", "icon", "license")]
+          import os
+          version = os.environ["VERSION"]
+          text = p.read_text()
+          text = re.sub(r"^pkgver=.*$", f"pkgver={version}", text, count=1, flags=re.M)
+          block = "sha256sums=(\n    '" + "'\n    '".join(sums) + "'\n)"
+          text = re.sub(r"sha256sums=\([^)]*\)", block, text, count=1, flags=re.S)
+          p.write_text(text)
+          PY
+
+      - name: Regenerate .SRCINFO
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          docker run --rm -v "$PWD/aur-repo:/pkg" -w /pkg archlinux/archlinux:base-devel bash -c '
+            useradd -m builder &&
+            chown -R builder /pkg &&
+            sudo -u builder makepkg --printsrcinfo
+          ' > aur-repo/.SRCINFO
+
+      - name: Restore aur-repo ownership to runner
+        if: steps.check.outputs.proceed == 'true'
+        # See LESSONS.md → "Docker bind-mount `chown` breaks host runner ownership".
+        run: sudo chown -R "$(id -u):$(id -g)" aur-repo
+
+      - name: Commit and push to AUR
+        if: steps.check.outputs.proceed == 'true'
+        working-directory: aur-repo
+        run: |
+          git config user.name "md-viewer CI"
+          git config user.email "ci@noreply.aydiler"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "No changes to push to AUR."
+            exit 0
+          fi
+          git commit -m "Update to ${VERSION}"
+          # `-u origin HEAD:refs/heads/master` works for both first push
+          # (brand-new AUR repo without an upstream) and subsequent pushes.
+          git push -u origin HEAD:refs/heads/master
+
   create-release:
     runs-on: ubuntu-latest
     needs: [build, publish-snap]
