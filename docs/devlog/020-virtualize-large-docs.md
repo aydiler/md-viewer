@@ -117,7 +117,7 @@ Verified manually on Xvfb :99:
 ### Items still owed (deferred or out of scope)
 
 - Unit tests for `is_block_end_tag` dense coverage, `layout_signature` invalidation, and the `syntax_layouts` cache hit path.
-- Selection regression test (genuinely blocked through MCP): egui selection requires continuous mouse drag; `mcp__egui__*` exposes click/type/scroll/key but no drag primitive, and the auto-enforced `DISPLAY=:99` blocks dropping to a real desktop. The mechanical write — `scroll_output.state.offset.y = new_offset; state.store(...)` — *was* verified by T-B (wheel scroll moves the view via the exact same path on the returned `ScrollAreaOutput`). What MCP cannot verify is whether egui's internal selection-validation logic (the "both cursor endpoints must be seen this frame" check in `label_text_selection.rs`) deselects across that op. Must be confirmed manually on a real desktop session, or by adding a CLI debug flag that pre-selects a byte range and then drives a wheel scroll programmatically.
+- ~~Selection regression test (genuinely blocked through MCP)~~ — **NOW UNBLOCKED**: egui-mcp gained an `egui_drag` primitive (see `~/.claude/projects/-home-ahmet-dev-apps-markdown-viewer/memory/egui-mcp-drag-tool.md` for the bridge change). T-J added below.
 
 ### MCP test pass (T-A through T-I)
 
@@ -134,6 +134,7 @@ Run via `cargo build --release --features mcp` + `mcp__egui__*` tools on Xvfb :9
 | T-G | file explorer click → open tab | PASS (verified as side-effect of T-F) — clicking `File: CHANGELOG.md` opens new tab, sets it active, marks file as `"open"` in explorer. |
 | T-H | live reload via file watcher | PASS — `echo … >>` to a watched file triggers reload within ~1 s; outline repopulates with new headers; no flicker. |
 | T-I | outline collapse/expand fold indicators | PASS — clicking `Toggle: …` flips state expanded↔collapsed; `visible_indices` recomputes; `show_rows` adjusts row count (visible h3 children disappear; off-screen sections appear to fill the freed space). |
+| T-J | selection-during-scroll (drag then small wheel scroll) | **PASS** — uses the new `egui_drag` MCP primitive (added in egui-mcp, see [[egui-mcp-drag-tool]] memory). Drag from (220, 165) to (600, 165) in README produces a visible blue selection across `"fast, lightweight markdown viewer for Linux built with"`. `egui_scroll delta_y=-30` (small wheel scroll, paragraph stays in viewport): selection survives — same characters still highlighted at the new on-screen y. Confirms the selection-preserving wheel hack at `src/main.rs:2475-2496` correctly interacts with the renderer-owned `ScrollAreaOutput` post-virtualization (`scroll_output.state.offset.y` stomp + `state.store()` does not trigger egui's "both cursor endpoints must be seen this frame" deselection check). **Caveat (not a regression):** large scrolls (delta_y=-300) that take the selection fully off-viewport DO clear it — same behavior as pre-virtualization, per `docs/LESSONS.md` "Text selection clears when content leaves viewport (BY DESIGN)". |
 
 The C-T regression fix (one extra commit on the branch: `Fix: search-jump and outline-click on off-viewport targets miss after virtualization`) costs one full-paint frame (~100 ms at 100k lines) per scroll-to action. Acceptable for a one-off click/Enter; steady-state scroll is unaffected.
 
