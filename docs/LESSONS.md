@@ -579,6 +579,94 @@ Visual effect: one frame lands close (line-ratio), the next frame snaps precise 
 **Diagnostic that would have caught it sooner:** log the active range's byte position AND a content-context window around it before chasing renderer-side hypotheses. If `active = Some(2823..2829)` and `content[2790..2870]` is `![Syntax Highlighting](...)`, you know the match is in alt text *before* touching the renderer.
 **Files:** N/A (debugging discipline)
 
+### TableBuilder fixed-height rows clip multi-line cell content
+**Context:** Refactor of markdown-table renderer from `egui::Grid` to `egui_extras::TableBuilder`.
+**Symptom:** Long inline-code paths in table cells render only their first 56-char chunk. `inline_code_wrap_segments` still produces multiple chunks and `ui.end_row()` inside the cell still advances the cursor, but chunks 2+ are invisible.
+**Root cause:** `body.row(h, ...)` declares a *fixed* row height. The row's bounding clip rect is `h` tall. Cell content rendered at y > clip rect bottom is hidden. Grid had variable-height rows that grew to content; TableBuilder doesn't.
+**Fix:** Pre-compute per-row height from content, pass per-row to `body.row(h, ...)`. Helper:
+```rust
+fn cell_visual_lines(cell: &[(Event, Range<usize>)]) -> usize {
+    let mut max_lines = 1usize;
+    for (event, _) in cell {
+        if let Event::Code(text) = event {
+            let chunks = inline_code_wrap_segments(text).len();
+            if chunks > max_lines { max_lines = chunks; }
+        }
+    }
+    max_lines
+}
+
+let body_heights: Vec<f32> = rows.iter().map(|row| {
+    let max_lines = row.iter().map(|c| cell_visual_lines(c)).max().unwrap_or(1);
+    cell_h * max_lines as f32
+}).collect();
+
+table.body(|mut body| {
+    for (idx, row) in rows.into_iter().enumerate() {
+        let h = body_heights.get(idx).copied().unwrap_or(cell_h);
+        body.row(h, |mut row_ui| { /* render */ });
+    }
+});
+```
+**Edge case:** Cells with multiple wrapping codes — use `max(chunks)` not `sum(chunks)`. The rare case of two separate wrapping codes in one cell renders the second below the first; `sum` would over-allocate, `max` may under-allocate by 1-2 chunks. Pragmatic trade-off for the common case.
+**HTML tables:** No event stream, just plain strings. Use a heuristic: `cell.lines().count() + cell.len()/60`. Over-estimates → extra row height (safe). Documented approximation.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`cell_visual_lines`, `html_cell_visual_lines`, `fn table`, `fn render_html_table`)
+
+### TableBuilder columns clip on narrow window without outer ScrollArea::horizontal
+**Context:** Same refactor.
+**Symptom:** A wide 10-column table renders only C1-C8 when the window narrows; C9, C10 are clipped at the panel edge with no scrollbar.
+**Root cause:** Two factors compound:
+1. `Column::auto()` stores measured widths in egui's `TableState` keyed by `id_salt`. On subsequent frames the widths are reloaded from state — **they don't re-shrink when the parent narrows.**
+2. TableBuilder's `body()` has its own internal `ScrollArea::new([false, vscroll])` — `false` on horizontal. No horizontal scroll mechanism inside TableBuilder.
+
+The original Grid code was wrapped in `egui::ScrollArea::horizontal()`. Grid let columns grow without bound → outer scroll area handled overflow.
+**Fix:** Restore the outer `ScrollArea::horizontal()` wrapper around the TableBuilder chain:
+```rust
+egui::ScrollArea::horizontal()
+    .id_salt(id.with("_scroll"))
+    .max_width(max_width)
+    .auto_shrink([false, true])
+    .show(ui, |ui| {
+        ui.vertical(|ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                egui_extras::TableBuilder::new(ui).columns(...)...;
+            });
+        });
+    });
+```
+`auto_shrink([false, true])`: horizontal=false → ScrollArea takes max_width; vertical=true → shrinks to content. Keep `ui.vertical()` for the body/header alignment fix.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`fn table`, `fn render_html_table`)
+
+### TableBuilder body overlaps header when the parent ui isn't vertical-flow
+**Context:** Swapping `egui::Grid` for `egui_extras::TableBuilder` in the vendored markdown renderer.
+**Symptom:** Header row and first body row rendered on the same Y position; subsequent body rows correctly stacked below. With 2-column markdown tables this looked like a 4-column row at the top of the table.
+**Root cause:** `TableBuilder::header()` returns `Table<'_>`; `Table::body()` then captures `cursor_position = ui.cursor().min` for the body's internal `ScrollArea`. If the parent `Ui` isn't a clean vertical-flow scope (the markdown renderer's parent is a multi-purpose `Ui` from pulldown_cmark event processing where line/blockquote/etc. machinery has its own cursor logic), the cursor after the header doesn't advance vertically and the body's `ScrollArea` starts at the same Y as the header.
+**Fix:** Wrap the whole TableBuilder chain in `ui.vertical(|ui| { TableBuilder::new(ui)... })`. The vertical scope forces a fresh vertical-flow Ui whose cursor advances as expected between header and body.
+```rust
+ui.vertical(|ui| {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        let table = egui_extras::TableBuilder::new(ui)
+            .columns(Column::auto().resizable(true), num_cols)
+            .header(row_h, |row| { /* ... */ });
+        table.body(|body| { /* ... */ });
+    });
+});
+```
+**Diagnostic discipline:** Replace recursive cell rendering with stub labels (`ui.label(format!("R{}C{}", ri, ci))`) when debugging TableBuilder layout. Rich content hides whether the problem is in the data path or the layout path.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`table`, `render_html_table`)
+
+### parse_table's `header` is Vec<Cell>, not Vec<Row>
+**Context:** Computing the column count from a parsed markdown table.
+**Pitfall:** `parse_table(events).header` is a `Vec<Cell>` representing the cells of a *single* header row — not multiple rows. `header.first().map(|h| h.len())` therefore returns the **event count of the first cell** (e.g., `[Text("Status")]` has 1 event), NOT the column count. Using that as the TableBuilder column count panics with `Added more Table columns than were pre-allocated` as soon as `row.col()` is called more times than the wrong-counted columns.
+**Fix:** `num_cols = if !header.is_empty() { header.len() } else { rows.first().map(|r| r.len()).unwrap_or(0) }`.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`table`)
+
+### parse_table trailing empty row from pulldown_cmark
+**Context:** Debug-printing `rows.len()` after `parse_table(events)`.
+**Observation:** A markdown table with 3 data rows is returned as 4 rows from `parse_table` — the last one has 0 cells. Likely from how pulldown_cmark emits the closing `TableEnd`/blank-line events.
+**Mitigation:** Filter empty rows before rendering: `rows.into_iter().filter(|r| !r.is_empty()).collect::<Vec<_>>()`. Without this, TableBuilder's `body.row()` runs with no cells and may render a 0-cell phantom row (no visible effect, but wasted work).
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`table`)
+
 ### Inline-code wrap segmentation: blind char-count cut, not break-friendly chars
 **Context:** Issue #5 — long inline-code tokens (file paths) overflowed the content column, clipping leading characters and overlapping adjacent text. Fixed by splitting long tokens into chunks separated by `ui.end_row()` in `Event::Code` handling.
 **First attempt that regressed:** Splitting at break-friendly characters (`/ \ - _ . :`) past 56 chars to keep paths readable. At narrow window widths the variable-length segments (60-120 chars) still exceeded the column width, and egui's intra-widget wrap re-introduced the original clipping bug.
