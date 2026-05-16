@@ -11,9 +11,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    name: Validate tag matches versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag, Cargo.toml, snapcraft.yaml versions
+        # Fails fast if the pushed tag (v0.1.10) disagrees with either
+        # Cargo.toml's `version = "..."` or snapcraft.yaml's `version: '...'`.
+        # Extraction logic lifted verbatim from ci.yml:version-sync.
+        run: |
+          TAG_VER="${GITHUB_REF#refs/tags/v}"
+          CARGO_VER=$(awk -F'"' '/^version[[:space:]]*=[[:space:]]*"/{print $2; exit}' Cargo.toml)
+          SNAP_VER=$(sed -n "s/^version:[[:space:]]*['\"]\\?\\([0-9]\\+\\.[0-9]\\+\\.[0-9]\\+\\)['\"]\\?.*/\\1/p" snap/snapcraft.yaml)
+          echo "tag=$TAG_VER cargo=$CARGO_VER snap=$SNAP_VER"
+          if [ "$TAG_VER" != "$CARGO_VER" ] || [ "$CARGO_VER" != "$SNAP_VER" ]; then
+            echo "::error::Version mismatch: tag=v$TAG_VER cargo=$CARGO_VER snap=$SNAP_VER"
+            exit 1
+          fi
+
   build:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
+    needs: validate
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -51,13 +76,15 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Remove local-only MCP dependency
+        # Anchored to start-of-line so commented `# mcp = ...` / `# egui-mcp-bridge = ...`
+        # lines are untouched (regression caught in v0.1.9 publish-crates failure).
         shell: python
         run: |
           import pathlib, re
           p = pathlib.Path("Cargo.toml")
           t = p.read_text()
-          t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
-          t = re.sub(r'(?m)^egui-mcp-bridge = .*\n', '', t)
+          t = re.sub(r'(?m)^mcp\s*=\s*\["dep:egui-mcp-bridge"\]', 'mcp = []', t)
+          t = re.sub(r'(?m)^egui-mcp-bridge\s*=\s*.*\n', '', t)
           p.write_text(t)
 
       - name: Install git-cliff
@@ -102,7 +129,8 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate, build]
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
@@ -143,17 +171,18 @@ jobs:
           key: publish-crates
 
       - name: Remove local-only MCP dependency
-        # Mirrors the build job's transform (no-op if the lines are already
-        # commented out). The publish step must not see any path-only dep
-        # that doesn't exist on crates.io.
+        # Same anchored transform as the build job: strips an uncommented
+        # `mcp = [...]` / `egui-mcp-bridge = ...` line; leaves commented
+        # versions untouched (the working dir stays clean → cargo publish
+        # dirty-check passes).
         if: steps.check.outputs.proceed == 'true'
         shell: python
         run: |
           import pathlib, re
           p = pathlib.Path("Cargo.toml")
           t = p.read_text()
-          t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
-          t = re.sub(r'(?m)^egui-mcp-bridge = .*\n', '', t)
+          t = re.sub(r'(?m)^mcp\s*=\s*\["dep:egui-mcp-bridge"\]', 'mcp = []', t)
+          t = re.sub(r'(?m)^egui-mcp-bridge\s*=\s*.*\n', '', t)
           p.write_text(t)
 
       - name: Publish fork crates and md-viewer
@@ -163,15 +192,37 @@ jobs:
         run: bash scripts/publish-crates.sh
 
   publish-snap:
+    name: Publish to Snap Store
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate, build]
+    timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      SNAP_CREDS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
     steps:
+      # Step-level gating, same pattern as publish-aur and publish-crates.
+      # If SNAPCRAFT_STORE_CREDENTIALS isn't set, skip cleanly with a notice
+      # instead of erroring out the whole release.
+      - name: Check Snap Store credentials
+        id: check
+        run: |
+          if [ -z "$SNAP_CREDS" ]; then
+            echo "::notice::SNAPCRAFT_STORE_CREDENTIALS not set; skipping snap publish (see PUBLISHING.md for setup)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.proceed == 'true'
+
       - uses: snapcore/action-build@v1
+        if: steps.check.outputs.proceed == 'true'
         id: build
+
       - uses: snapcore/action-publish@v1
+        if: steps.check.outputs.proceed == 'true'
         with:
           snap: ${{ steps.build.outputs.snap }}
           release: stable
@@ -181,7 +232,8 @@ jobs:
   publish-aur:
     name: Publish to AUR
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate, build]
+    timeout-minutes: 10
     permissions:
       contents: read
     env:
@@ -266,7 +318,8 @@ jobs:
   publish-aur-bin:
     name: Publish to AUR (-bin)
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate, build]
+    timeout-minutes: 10
     permissions:
       contents: read
     env:
@@ -307,9 +360,9 @@ jobs:
           chmod 600 ~/.ssh/config
 
       # The tarball checksum comes from the build job's artifact rather than
-      # the GitHub Release. The Release is only created after `create-release`
-      # runs (needs: [build, publish-snap]), and this job is `needs: build` —
-      # so it races ahead of the Release. The artifact already contains the
+      # the GitHub Release. Both publish-aur-bin and create-release are
+      # `needs: [validate, build]` and run in parallel — so this job races
+      # ahead of the Release URL existing. The artifact already contains the
       # exact .sha256 file we'd otherwise fetch from the Release page.
       - name: Download linux build artifact (for tarball sha256)
         if: steps.check.outputs.proceed == 'true'
@@ -392,8 +445,14 @@ jobs:
           git push -u origin HEAD:refs/heads/master
 
   create-release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, publish-snap]
+    # Decoupled from publish-snap: the GH release page appears as soon as the
+    # build matrix finishes (~12 min sooner). publish-aur-bin already pulls its
+    # tarball from download-artifact (not the GH Release URL), so nothing else
+    # depends on this ordering.
+    needs: [validate, build]
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:

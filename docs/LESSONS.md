@@ -700,6 +700,22 @@ Or run `cargo update -p md-viewer --precise 0.1.8` from a clean tree (slower but
 **Recovery:** `git checkout Cargo.lock` and redo surgically. Always `git diff Cargo.lock` after touching it — anything other than one line under `[[package]] name = "md-viewer"` is a mistake.
 **Files:** `Cargo.lock`
 
+### MCP-strip Python transform must anchor regex to start-of-line
+**Context:** v0.1.9 release. After publishing the 3 fork crates, `publish-crates` failed at md-viewer's `cargo publish` with `1 files in the working directory contain changes that were not yet committed into git: Cargo.toml`.
+**Root cause:** the "Remove local-only MCP dependency" CI step used plain `str.replace`:
+```python
+t = t.replace('mcp = ["dep:egui-mcp-bridge"]', 'mcp = []')
+```
+The target string is a *substring* of the commented line `# mcp = ["dep:egui-mcp-bridge"]`, so the replace rewrites it to `# mcp = []`. The line is still a comment (identical effect on the build), but git sees it as a change → `cargo publish` dirty-check aborts the upload.
+**Fix:** anchor at start-of-line with a regex so commented lines (starting with `#`) are skipped:
+```python
+t = re.sub(r'(?m)^mcp\s*=\s*\["dep:egui-mcp-bridge"\]', 'mcp = []', t)
+t = re.sub(r'(?m)^egui-mcp-bridge\s*=\s*.*\n', '', t)
+```
+Belt-and-suspenders: keep `cargo publish --allow-dirty` in `scripts/publish-crates.sh` so a future maintainer who DOES uncomment the dep for local MCP testing (and forgets to recomment before tagging) still gets a clean publish — the transform strips the uncommented lines, working dir becomes dirty, `--allow-dirty` lets the publish through.
+**Recovery for v0.1.9:** the fork crates DID publish (their working dirs were unaffected by the root Cargo.toml mutation); only md-viewer's publish failed. Manual `cargo publish` from a clean local checkout shipped 0.1.9.
+**Files:** `.github/workflows/release.yml` (build job + publish-crates job — both have the transform), `scripts/publish-crates.sh`
+
 ### `CHANGELOG.md` is hand-curated — do NOT `git-cliff -o CHANGELOG.md`
 **Context:** `.claude/rules/release-workflow.md` suggests running `git-cliff -o CHANGELOG.md` to generate changelog entries before tagging.
 **Problem:** git-cliff parses conventional commits. This repo's commit history doesn't conform (171/N commits skipped on the v0.1.8 attempt), so the generated CHANGELOG is sparse and drops entire versions (e.g. v0.1.4, v0.1.6, v0.1.7 vanished). Running `-o` overwrites the existing rich hand-written prose with the degraded version.
