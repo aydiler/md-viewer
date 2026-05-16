@@ -2,6 +2,25 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.6] - 2026-05-16
+
+### Features
+
+- Full-width content toggle (#16, contributed by [@aki1ro](https://github.com/aki1ro)). New `View → Full Width` menu item flips between the default 600 px reading-cap (optimal line length per Dyson & Haselgrove 2001) and using the full available content pane. Persisted to `~/.local/share/md-viewer/app.ron` as `full_width_content: bool` so the choice survives restarts. Default remains capped.
+
+### Bug Fixes
+
+- Wide table horizontal scroll now responds to mouse wheel over the table body (#15, closes the second half of #4). egui 0.33's `ScrollArea::horizontal()` only consumes the X delta of `smooth_scroll_delta` and plain wheel only emits Y, so without intervention the page scrolled instead of the table — users had to drag the bottom scrollbar. The vendored fork now calls a post-render `forward_wheel_to_horizontal_scroll` that redirects Y delta into the inner area's X offset when the cursor is hovered, with edge pass-through (at left/right boundary the delta falls back through to the outer vertical area so the page can still scroll past the table).
+
+### Documentation
+
+- README + all 7 screenshots refreshed for v0.1.5 visuals (new `screenshots/search.png` and `screenshots/resizable-tables.png`, plus refreshed `dark-mode.png` / `light-mode.png` / `syntax-highlighting*.png` / `tables.png`). Features section now mentions search (Ctrl+F), resizable table columns, and viewport virtualization; new Search keyboard-shortcuts table.
+- New `docs/devlog/022-table-wheel-scroll.md` and `docs/devlog/023-full-width-toggle.md`.
+
+### Internal
+
+- All View menu items now register with the MCP bridge under `Menu: View → …` names with state-value tags (`"on"`/`"off"`, `"dark"`/`"light"`). The View menu button itself is registered as `Menu: View`. This closes the previously-documented "menus aren't in AccessKit" coverage gap — future E2E tests can drive theme/sidebar/zoom/full-width toggles through `egui_click` instead of state-file injection.
+
 ## [0.1.5] - 2026-05-16
 
 ### Features
