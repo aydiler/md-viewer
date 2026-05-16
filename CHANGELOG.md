@@ -4,6 +4,10 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [0.1.5] - 2026-05-16
 
+### Features
+
+- Resizable table columns (closes the column-width side of issue #4). Both markdown `|...|` tables and HTML `<table>` blocks now render via `egui_extras::TableBuilder` instead of `egui::Grid`. Drag the divider between any two columns to resize; cells re-wrap their content to fit. Striping and the outer border are preserved. Wide tables exceeding the panel width get a horizontal scrollbar instead of clipping. Long inline-code paths inside cells wrap to multiple visual lines per row (per-row height auto-computed). See `docs/devlog/021-table-columns-resizable.md` for the verification matrix and the known edge case (tables with many narrow columns at ≤800 px windows can drop right-side columns).
+
 ### Performance
 
 - End-to-end virtualization of the markdown renderer. Scroll frame time at 100 k lines drops from ~101 ms to below the 1-tick measurement floor (effectively 60+ FPS); first-paint settle on a 100 k-line / 6 MB doc drops from ~15 s to ~7 s. Achieved via the vendored `egui_commonmark` fork: dense `split_points` at every block-level event end (root cause of the upstream "buggy in scenarios more complex than the example" warning on `show_scrollable`), binary-search viewport range over split_points, parsed-events cache keyed by a per-`Tab` `content_version`, `layout_signature` invalidation that includes zoom and theme (not just width). The app's `render_tab_content` switches to the renderer-owned `ScrollArea` via the new `CommonMarkViewer::show_scrollable` builder that returns `ScrollAreaOutput<()>` so the selection-preserving wheel hack still works.
@@ -17,7 +21,8 @@ All notable changes to markdown-viewer will be documented in this file.
 ### Documentation
 
 - New `docs/devlog/020-virtualize-large-docs.md` with the implementation walk, perf measurements, and the full MCP test pass (T-A through T-J: outline click, wheel scroll, search, zoom, theme, multi-tab isolation, file-explorer click, live reload, outline fold, selection-during-scroll).
-- New `docs/LESSONS.md` entries covering the virtualization gotchas: why `show_scrollable` was upstream-tagged "buggy" (sparse split_points), `layout_signature` must include zoom + theme, the renderer's selection-preserving wheel hack needs `ScrollAreaOutput`, and the lazy-syntect cache-key composition.
+- New `docs/devlog/021-table-columns-resizable.md` for the TableBuilder refactor and verification matrix.
+- New `docs/LESSONS.md` entries covering virtualization gotchas (sparse split_points, layout_signature scope, selection-preserving wheel hack needs `ScrollAreaOutput`, lazy-syntect cache key) and TableBuilder gotchas (fixed row heights clip multi-line cells, outer `ScrollArea::horizontal` required, header/body Y alignment needs `ui.vertical()`).
 
 ## [0.1.4] - 2026-05-15
 
