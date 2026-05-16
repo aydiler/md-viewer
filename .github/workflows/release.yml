@@ -249,6 +249,18 @@ jobs:
           EOF
           chmod 600 ~/.ssh/config
 
+      # The tarball checksum comes from the build job's artifact rather than
+      # the GitHub Release. The Release is only created after `create-release`
+      # runs (needs: [build, publish-snap]), and this job is `needs: build` —
+      # so it races ahead of the Release. The artifact already contains the
+      # exact .sha256 file we'd otherwise fetch from the Release page.
+      - name: Download linux build artifact (for tarball sha256)
+        if: steps.check.outputs.proceed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: dist/
+
       - name: Clone AUR repo and update PKGBUILD
         if: steps.check.outputs.proceed == 'true'
         run: |
@@ -264,10 +276,11 @@ jobs:
           fi
           cp aur-bin/PKGBUILD aur-repo/PKGBUILD
 
-          # Fetch all four sha256s for the source array.
+          # Tarball sha256 comes from the downloaded artifact (see comment above).
+          # The three aux files (.desktop, icon, LICENSE) come from raw.github
+          # at the tagged commit — those URLs are valid as soon as the tag exists.
           mkdir -p sums
-          curl -fsSL -o sums/tarball.sha256 \
-            "https://github.com/aydiler/md-viewer/releases/download/v${VERSION}/md-viewer-${VERSION}-linux-x86_64.tar.gz.sha256"
+          cp "dist/md-viewer-${VERSION}-linux-x86_64.tar.gz.sha256" sums/tarball.sha256
           curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/data/md-viewer.desktop" \
             | sha256sum > sums/desktop.sha256
           curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/data/io.github.aydiler.md-viewer.png" \
