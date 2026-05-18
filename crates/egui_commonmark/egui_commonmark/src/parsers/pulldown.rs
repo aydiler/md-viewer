@@ -627,9 +627,22 @@ impl CommonMarkViewerInternal {
             // snap to the precise y. Forcing the bootstrap branch costs one
             // full-paint frame (~100 ms at 100k lines) per jump, which is
             // acceptable for a one-off action.
+            //
+            // Critically, we DO NOT clear split_points here even though
+            // `page_size = None` forces a bootstrap. Reason: split_points
+            // store screen-y coordinates which are only meaningful at the
+            // scroll position they were captured at. The original scroll=0
+            // bootstrap stored values where screen-y ≈ content-y + panel
+            // chrome (~44 px). Clearing here lets the forced bootstrap at
+            // non-zero scroll re-populate them with screen-y values that
+            // diverge from content-y by the scroll amount, breaking every
+            // subsequent skip-paint's partition_point / allocate_space math
+            // by hundreds of pixels (visible as outline-click landing at
+            // the wrong heading and blank space at viewport top after
+            // scrolling). The push-site dedup-by-event-index keeps the
+            // original (good) values intact even though bootstrap re-runs.
             if pending_scroll_offset.is_some() {
                 sc.page_size = None;
-                sc.split_points.clear();
             }
         }
         // Header positions are content-keyed; new content means the cached

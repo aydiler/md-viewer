@@ -878,9 +878,20 @@ let iter = events_range.into_iter().enumerate()
 
 Same scroll=229, but the skip-paint after an outline-click renders title 185px higher than the same scroll position via wheel — because the split_points used by the skip-paint were stored at scroll=229 with screen-y values.
 
+**Pragmatic fix shipped (the one-line removal):**
+The pending_scroll_offset invalidation block (lines 630-634 area) previously cleared `sc.split_points` in addition to `sc.page_size = None`. The page_size clear forces bootstrap to fire; the split_points clear was THERE to re-populate them with the new scroll's positions. Removing the split_points.clear() means:
+- `page_size = None` still forces bootstrap → all events painted → header / search positions recorded.
+- The push-site dedup-by-event-index in `show()`'s loop keeps the existing (good, scroll=0) split_points intact during the forced re-bootstrap.
+- Subsequent skip-paints use the consistent original values, so partition_point and allocate_space math stays correct.
+
+Verified: outline-click on far heading lands the heading at viewport top; scroll-up after outline-click no longer leaves blank space at top; search Ctrl+F + Enter still works (bootstrap still records active_search_y).
+
+**Known remaining edge case** (acceptable, documented):
+When the user changes layout_signature (Ctrl+/-, theme toggle, window resize) while scrolled deep, the *layout_signature change* branch (above) clears split_points (correctly — they're for the old layout). The next paint is a bootstrap at the user's current non-zero scroll, repopulating with new bad screen-y values. Outline-click after that scenario will be off until the user scrolls back to top and the original bootstrap-style split_points are re-established. Workaround: scroll to top before zooming/theming. Real fix requires the deeper coord-system work tracked below.
+
 **Open future work:**
 1. Audit ALL split_points consumers to confirm whether they interpret values as screen-y or content-y. The `allocate_space(first_end_position.to_vec2())` call at `:737` advances the cursor by Y; the right value depends on whether the cursor's reference frame uses screen-y or content-y semantics. Compile-time enforcement of the coord system (newtype wrapper around `f32`) would prevent future regressions.
-2. Alternative outline-click fix: avoid forced bootstraps at non-zero scroll. E.g., scroll-to-zero, run bootstrap, then snap back to target scroll. Costs two extra frames but the split_points stay valid forever.
+2. Alternative outline-click fix: avoid forced bootstraps at non-zero scroll. E.g., scroll-to-zero, run bootstrap, then snap back to target scroll. Costs two extra frames but the split_points stay valid forever, including across layout_signature changes.
 3. Alternative fix: store the bootstrap scroll alongside each split_point (4-tuple instead of 3-tuple), have skip-paint compensate via `end.y - bootstrap_scroll + viewport.scroll`. More complex but doesn't change semantic.
 
-**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show`'s split-point push block, lines 486 + 528)
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (the pending_scroll_offset invalidation block + the `show` split-point push at lines 486 + 528)
