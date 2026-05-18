@@ -333,11 +333,7 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
 /// block) only watched `available_size`, so zooming (Ctrl++/-) or toggling
 /// dark mode would leave stale split_points in place and the viewport-skip
 /// math would render the wrong content range.
-fn compute_layout_signature(
-    ui: &egui::Ui,
-    options: &CommonMarkOptions,
-    last_content_h: f32,
-) -> u64 {
+fn compute_layout_signature(ui: &egui::Ui, options: &CommonMarkOptions) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // Width drives wrap and is the dominant layout input. Quantize to the
@@ -358,17 +354,14 @@ fn compute_layout_signature(
     // Caller-configured constraints that affect block widths.
     options.default_width.hash(&mut h);
     options.indentation_spaces.hash(&mut h);
-    // Previous-frame content height, bucketed at 1024 px. When async image
-    // / font loading grows the doc by ≥1024 px after the initial bootstrap,
-    // the bucket flips and triggers a single re-bootstrap so split_points
-    // get re-recorded at the correct (post-load) y values. Without this,
-    // skip-paint's partition_point uses stale y values; with viewport.min.y
-    // larger than the stale stored anchors, it picks first_event_index too
-    // deep in the doc and leaves empty space at the viewport top (or bottom
-    // when scrolling the other direction).
-    ((last_content_h / 1024.0).round() as i32).hash(&mut h);
     h.finish()
 }
+
+/// Threshold for content-height drift from the last bootstrap that triggers a
+/// re-bootstrap to refresh split_points. Larger than the known ~44px egui
+/// oscillation between show()/show_viewport() content-size reporting, but
+/// small enough to catch real image-load growth.
+const CONTENT_H_DRIFT_THRESHOLD: f32 = 1024.0;
 
 /// Whether a TagEnd marks a safe block-level boundary for viewport-skip.
 ///
@@ -582,8 +575,7 @@ impl CommonMarkViewerInternal {
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
-        let last_content_h = scroll_cache(cache, &source_id).last_content_h;
-        let layout_sig = compute_layout_signature(ui, options, last_content_h);
+        let layout_sig = compute_layout_signature(ui, options);
 
         // Ensure parsed events are cached on the ScrollableCache, keyed by a
         // content version. The caller can provide a monotonic version (bumped
@@ -659,6 +651,23 @@ impl CommonMarkViewerInternal {
             if pending_scroll_offset.is_some() {
                 sc.page_size = None;
             }
+            // Content-height drift check: if the previous frame's content
+            // height has drifted from when split_points were captured by
+            // more than CONTENT_H_DRIFT_THRESHOLD, the y-positions are stale
+            // (typically because async image/font loading shifted the doc
+            // after the initial bootstrap). Invalidate to trigger ONE
+            // re-bootstrap with refreshed positions. Uses absolute-drift
+            // hysteresis instead of bucketing because egui's `show()` vs
+            // `show_viewport()` content_size.y reporting differs by ~44 px
+            // (panel chrome) for the same content — any bucket-boundary
+            // approach would oscillate; only |drift| > threshold breaks
+            // out of that cycle.
+            if sc.bootstrap_content_h > 0.0
+                && (sc.last_content_h - sc.bootstrap_content_h).abs() > CONTENT_H_DRIFT_THRESHOLD
+            {
+                sc.page_size = None;
+                sc.split_points.clear();
+            }
         }
         // Header positions are content-keyed; new content means the cached
         // y values point at the wrong headings. Done outside the `sc` borrow
@@ -684,24 +693,15 @@ impl CommonMarkViewerInternal {
         let page_size_opt = scroll_cache(cache, &source_id).page_size;
         let Some(page_size) = page_size_opt else {
             let out = make_scroll_area().show(ui, |ui| {
-                // The inner show() runs inside a scrolled ScrollArea. The
-                // cursor is viewport-relative, so we add the *current scroll
-                // offset* — not 0 — to convert to content-relative y when
-                // recording header / active-search positions. A non-zero
-                // pending_scroll_offset means the caller jumped to that
-                // position this frame; without this, the bootstrap records
-                // every position shifted by -pending, corrupting the cache.
                 cache.set_scroll_offset(pending_scroll_offset.unwrap_or(0.0));
                 self.show(ui, cache, options, text, Some(source_id));
             });
-            // Prevent repopulating points twice at startup
             let sc = scroll_cache(cache, &source_id);
             sc.available_size = available_size;
-            // Capture content height for next-frame layout_signature: if a
-            // late image/font load grows the doc by ≥1024 px, the bucketed
-            // signature flips and the next paint re-bootstraps with refreshed
-            // split_points.
             sc.last_content_h = out.content_size.y;
+            // Pin the drift baseline: future paints compare last_content_h
+            // against THIS value with hysteresis (see CONTENT_H_DRIFT_THRESHOLD).
+            sc.bootstrap_content_h = out.content_size.y;
             return out;
         };
 

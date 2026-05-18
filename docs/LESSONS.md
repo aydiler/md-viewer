@@ -911,3 +911,25 @@ When the user changes layout_signature (Ctrl+/-, theme toggle, window resize) wh
 **Lesson:** `f32.to_bits()` is a footgun for cache-keys in immediate-mode UI. Float values participating in layout will fluctuate sub-pixel between paints whenever ANY async resource loads (images, fonts, possibly even GPU pipeline first-frame compilation). Quantize to a granularity that matches the layout's actual sensitivity.
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`compute_layout_signature` at line 336)
+
+### content_h-drift detection needs HYSTERESIS, not bucketing
+**Context:** After the quantize-layout_signature fix above, scrolling still showed empty viewport edges. Diagnostic logs revealed split_points stored at the initial bootstrap had stale y values — async image loading after the initial paint had shifted blocks down (~1100 px by the time the user scrolled to mid-doc on a 14k-event changelog).
+
+**First attempt that didn't work**: fold the previous frame's `content_size.y` into `layout_signature`, bucketed at 1024 px. The intent was that when async loads grew content significantly, a bucket boundary crossing would trigger ONE re-bootstrap with refreshed positions.
+
+**Why it failed**: egui's `ScrollArea::show()` (bootstrap path) and `ScrollArea::show_viewport()` (skip-paint path) report `content_size.y` differing by ~44 px (panel chrome offset) for the same content. Any quantization that puts those two values in adjacent buckets enters a perpetual bootstrap loop: bootstrap reports 146916 → bucket A; next skip-paint reports 146960 → bucket B; bucket mismatch → invalidate → bootstrap reports 146916 → bucket A; ... forever. Measured 76 bootstraps in a 30-second test on T470.
+
+**Fix**: replace bucketing with **absolute-drift hysteresis**. Track `bootstrap_content_h` on `ScrollableCache` — the content height captured at the most recent bootstrap. Each paint, compare `|last_content_h - bootstrap_content_h|` against `CONTENT_H_DRIFT_THRESHOLD = 1024.0`. Only when the drift EXCEEDS the threshold do we invalidate split_points. The 44-px egui oscillation falls under the threshold; real image-load growth (typically thousands of px on a content-rich doc) exceeds it once, triggers ONE re-bootstrap, then the new baseline stabilizes.
+
+**Empirical evidence** (same T470 + same 7-step scroll test, comparing the two approaches):
+
+| Approach | Bootstraps | Slow frames | Visual artifacts |
+|---|---|---|---|
+| Quantize-bucket only (round to 1024) | 76 | 77 | empty viewport edges |
+| Quantize + abs-drift hysteresis | **2** | **3** | none across 7 screenshots |
+
+The 2 bootstraps are the initial paint + one image-load convergence. After that, drift stays under threshold for the remainder of the session.
+
+**General lesson**: when a fluctuating value drives cache invalidation, NEVER use round/floor bucketing if the fluctuation amplitude is comparable to the bucket size. Use a Schmitt-trigger-style threshold (only flip state if change exceeds a hysteresis band wider than the noise). Bucketing fails on values that sit exactly at a boundary; hysteresis is unconditionally stable.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (drift check in show_scrollable's invalidation block, `CONTENT_H_DRIFT_THRESHOLD` constant), `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`bootstrap_content_h` field on ScrollableCache)
