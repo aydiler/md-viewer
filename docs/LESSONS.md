@@ -895,3 +895,19 @@ When the user changes layout_signature (Ctrl+/-, theme toggle, window resize) wh
 3. Alternative fix: store the bootstrap scroll alongside each split_point (4-tuple instead of 3-tuple), have skip-paint compensate via `end.y - bootstrap_scroll + viewport.scroll`. More complex but doesn't change semantic.
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (the pending_scroll_offset invalidation block + the `show` split-point push at lines 486 + 528)
+
+### `layout_signature` must quantize floats — sub-pixel jitter caused massive jitter on slow CPUs
+**Context:** On T470 (i5-7200U, 2 cores), scrolling a 3800-line doc with embedded images felt extremely janky — visible stuttering, dropped frames throughout the first ~30 seconds. Measured with per-frame timing eprintln: **32 full bootstraps** fired during 30s of scrolling, each taking 100-800 ms on T470 (vs 5 ms for skip-paint). After ~30s, things settled and steady-state was sub-millisecond per frame.
+
+**Root cause:** `compute_layout_signature` at `pulldown.rs:336` hashed `f32.to_bits()` of `ui.available_width()`, body font height, and monospace font height. Async image loading and font fallback resolution caused these floats to fluctuate by *sub-pixel amounts* every frame. Since `to_bits()` exposes every bit, even a 0.0001-px change flipped the hash, invalidating `split_points` + `page_size` → next paint routed to bootstrap branch → ~14k events re-iterated → 100-800 ms wasted. After all images finished decoding (~30s on slow hardware), the floats stopped fluctuating, signature stabilized, skip-paint resumed.
+
+**Empirical evidence:** with quantized signature, same workload on same T470:
+- Bootstraps during 30s scroll: 32 → **1**
+- SLOW frames: 35 → **1** (just the unavoidable initial-load frame)
+- Steady-state frame time: 100-800 ms → **0.4-1.1 ms**
+
+**Fix:** quantize the float inputs before hashing — round width to nearest pixel (`(w.round() as i32).hash(&mut h)`), round font heights to 0.1 px (`((h*10.0).round() as i32).hash(&mut h)`). Real changes (window resize, zoom, theme toggle) shift the int bucket by enough to invalidate; sub-pixel async-load jitter stays in one bucket.
+
+**Lesson:** `f32.to_bits()` is a footgun for cache-keys in immediate-mode UI. Float values participating in layout will fluctuate sub-pixel between paints whenever ANY async resource loads (images, fonts, possibly even GPU pipeline first-frame compilation). Quantize to a granularity that matches the layout's actual sensitivity.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`compute_layout_signature` at line 336)

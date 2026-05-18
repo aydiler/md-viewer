@@ -336,16 +336,17 @@ fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
 fn compute_layout_signature(ui: &egui::Ui, options: &CommonMarkOptions) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    // Width drives wrap and is the dominant layout input.
-    ui.available_width().to_bits().hash(&mut h);
-    // Body text height already encodes egui's zoom factor and any explicit
-    // font-size override, so we don't need to read pixels_per_point separately.
-    ui.text_style_height(&egui::TextStyle::Body)
-        .to_bits()
-        .hash(&mut h);
-    ui.text_style_height(&egui::TextStyle::Monospace)
-        .to_bits()
-        .hash(&mut h);
+    // Width drives wrap and is the dominant layout input. Quantize to the
+    // nearest pixel so sub-pixel float jitter from per-frame egui rounding
+    // (very common during image/font async loading) doesn't invalidate the
+    // cache. Real width changes (resize, zoom) flip the int bucket; tiny
+    // float fluctuations don't.
+    (ui.available_width().round() as i32).hash(&mut h);
+    // Body / monospace text heights — quantize to 0.1 px for the same
+    // reason. A real font/zoom change shifts heights by multiple px; sub-
+    // pixel rounding from per-frame ppp resolution stays in one bucket.
+    ((ui.text_style_height(&egui::TextStyle::Body) * 10.0).round() as i32).hash(&mut h);
+    ((ui.text_style_height(&egui::TextStyle::Monospace) * 10.0).round() as i32).hash(&mut h);
     // Theme doesn't change widget heights, but it does change the resolved
     // syntect theme — invalidating here keeps split_points and the syntect
     // cache (added later) coherent.
