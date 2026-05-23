@@ -1025,3 +1025,26 @@ Smooth ≤ ~3k events; borderline ~5–10k; laggy ~20k; near-unusable at 100k. A
 **Why `_if_absent` existed:** the prior author intended "pin the first sighting so click targets are stable." Stable but stale. The right trade-off here is "always fresh," especially since the disable-virtualization fix means every paint records every heading anyway — cost is negligible.
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`TagEnd::Heading` handler — line ~1587)
+
+### `record_active_search_y_viewport` keeps firing for off-screen matches once virtualization is disabled
+**Context:** Issue #19 — with the find bar open, wheel-scrolling away from the active match snapped back to it every frame. Esc to close the find bar restored scrolling. The corrective scroll block in `render_tab_content` (the one that uses `cache.active_search_y()` to snap precisely to the active match) was re-firing every frame.
+
+**Root cause:** Two facts compounded.
+1. `record_active_search_y_viewport` is called by the renderer for every Active highlight segment it walks past (`crates/egui_commonmark/.../pulldown.rs:1372`). egui's clip rect culls *painting*, not widget layout — the renderer's event loop runs `record_*` for off-screen matches just like on-screen ones. So `cache.active_search_y()` returns a fresh, accurate value every frame for as long as the active match exists.
+2. With virtualization disabled (commit `21d43c5`), the renderer walks the entire event stream every paint. The pre-virtualization version only walked the viewport slice, so off-screen matches didn't re-record — `active_search_y` went stale once you scrolled past, and the corrective block effectively self-disabled.
+3. The corrective block in `render_tab_content` had no guard for "user just scrolled" — it only checked `if let Some(actual_y) = tab.cache.active_search_y()`. Permanent snap-back loop as soon as the user's wheel moved the match out of viewport.
+
+**Fix:** one-shot `correct_active_search_pending: bool` on `Tab`. Set by `scroll_to_active_match` (called from `jump_match` / `maybe_rebuild_search` / search-open). Gates the corrective block, which clears the flag after running once. Two-stage scroll still converges in 1–2 frames after a jump; subsequent frames have flag=false so the block no-ops on user wheel.
+
+**Pre-existing pattern this mirrors:** the outline-click corrective uses `tab.pending_header_click_key.take()` — the `Option<String>` is consumed on first read for the same one-shot semantics. The search-corrective could have used `Option<()>` but a named `bool` reads better.
+
+**Empirical evidence** (Xvfb + `xdotool` 500 wheel-down events on `/tmp/search-repro.md`):
+
+| Build | Net scroll (500 wheel-downs) | FIRING events |
+|---|---|---|
+| Pre-fix (`active_search_y` always fresh) | 16 px | 213 |
+| Fix (one-shot guard) | ~2 800 px | 0 (after initial paint) |
+
+**General lesson:** when a "side path" caches values mid-render for downstream consumers (here, `active_search_y` for the corrective scroll), audit ALL the code paths that *populate* the cache when you change rendering behavior. The disable-virtualization fix in `21d43c5` was correctness-first for paint, but it silently changed the semantics of `active_search_y` from "valid while visible" to "valid forever," and the corrective block was implicitly assuming the old semantics.
+
+**Files:** `src/main.rs` (`Tab.correct_active_search_pending`, `scroll_to_active_match`, `render_tab_content` corrective block), `docs/devlog/031-search-scroll-lock.md`

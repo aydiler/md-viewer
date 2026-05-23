@@ -621,6 +621,14 @@ struct Tab {
     /// for this key. Cleared once the post-render corrective step has
     /// snapped the viewport to the recorded position.
     pending_header_click_key: Option<String>,
+    /// One-shot permission for the post-render corrective scroll that snaps
+    /// the active search match into view. Set by `scroll_to_active_match`
+    /// (jump_match / search-open / tab-switch / query-rebuild) and cleared
+    /// after the corrective block runs once. Without this gate, the block
+    /// would re-fire every frame while `active_search_y` remains populated,
+    /// fighting the user's wheel input and locking the view to the active
+    /// match — see issue #19 / docs/devlog/031-search-scroll-lock.md.
+    correct_active_search_pending: bool,
     last_content_height: f32,
     last_viewport_height: f32,
     content_lines: usize,
@@ -670,6 +678,7 @@ impl Tab {
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             pending_header_click_key: None,
+            correct_active_search_pending: false,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
             content_lines,
@@ -706,6 +715,7 @@ impl Tab {
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             pending_header_click_key: None,
+            correct_active_search_pending: false,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
             content_lines,
@@ -2055,6 +2065,11 @@ impl MarkdownApp {
             100.0
         };
         tab.pending_scroll_offset = Some((estimated_y - margin).max(0.0));
+        // Grant the post-render corrective block one frame of permission to
+        // snap to the renderer-recorded `active_search_y`. The block clears
+        // the flag after it runs, so subsequent frames (e.g. user wheeling
+        // away from the match) won't re-trigger snap-back. See Tab field doc.
+        tab.correct_active_search_pending = true;
     }
 
     /// Rebuild the active tab's search matches if the query or active tab has changed.
@@ -2539,22 +2554,33 @@ impl MarkdownApp {
                 // whether the current scroll position keeps it visible. If not,
                 // schedule a corrective scroll using the recorded y — this fixes
                 // line-ratio overshoot/undershoot in image-heavy documents.
-                if let Some(actual_y) = tab.cache.active_search_y() {
-                    let current_scroll = scroll_output.state.offset.y;
-                    let viewport_top = current_scroll;
-                    let viewport_bottom = current_scroll + tab.last_viewport_height;
-                    // Consider "not visible" if outside the viewport with a small margin
-                    let margin_outside = 20.0_f32;
-                    let needs_correction = actual_y < viewport_top + margin_outside
-                        || actual_y > viewport_bottom - margin_outside;
-                    if needs_correction && tab.last_viewport_height > 0.0 {
-                        // Place the active match ~35% from the top of the viewport
-                        let inset = tab.last_viewport_height * 0.35;
-                        let want_scroll = (actual_y - inset).max(0.0);
-                        // Avoid stomping if we're already at the target (within a frame)
-                        if (want_scroll - current_scroll).abs() > 2.0 {
-                            tab.pending_scroll_offset = Some(want_scroll);
+                // Corrective scroll for search-match jump. Gated by the
+                // one-shot `correct_active_search_pending` flag (set by
+                // `scroll_to_active_match`) so it fires at most once per
+                // jump — without this gate the block would re-trigger every
+                // frame the active match is off-screen, fighting the user's
+                // wheel input and locking the view (issue #19).
+                if tab.correct_active_search_pending {
+                    if let Some(actual_y) = tab.cache.active_search_y() {
+                        let current_scroll = scroll_output.state.offset.y;
+                        let viewport_top = current_scroll;
+                        let viewport_bottom = current_scroll + tab.last_viewport_height;
+                        // Consider "not visible" if outside the viewport with a small margin
+                        let margin_outside = 20.0_f32;
+                        let needs_correction = actual_y < viewport_top + margin_outside
+                            || actual_y > viewport_bottom - margin_outside;
+                        if needs_correction && tab.last_viewport_height > 0.0 {
+                            // Place the active match ~35% from the top of the viewport
+                            let inset = tab.last_viewport_height * 0.35;
+                            let want_scroll = (actual_y - inset).max(0.0);
+                            // Avoid stomping if we're already at the target (within a frame)
+                            if (want_scroll - current_scroll).abs() > 2.0 {
+                                tab.pending_scroll_offset = Some(want_scroll);
+                            }
                         }
+                        // Clear the one-shot regardless of which branch ran;
+                        // the corrective block has now had its chance to snap.
+                        tab.correct_active_search_pending = false;
                     }
                 }
 
