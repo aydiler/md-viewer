@@ -2,6 +2,16 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.11] - 2026-05-24
+
+### Bug Fixes
+
+- Wide tables no longer get nudged sideways by ordinary page scrolling (#22, PR #23, contributed by [@aki1ro](https://github.com/aki1ro)). The post-render `forward_wheel_to_horizontal_scroll` helper introduced for #4 redirected any hovered-table `smooth_scroll_delta.y` into the inner `ScrollArea::horizontal` X offset. The intent was that wheel-over-table would scroll the table sideways without users having to grab the bottom scrollbar; the cost was that whenever the cursor merely crossed a wide table during normal document scrolling, the table jumped left/right. Edge pass-through reduced but did not remove the surprise. Fix: remove the helper and both call sites entirely; plain wheel input stays with the outer document scroller.
+
+### Features
+
+- Shift+wheel over a wide table now scrolls it horizontally (PR #24). Restores the #4 ergonomic that PR #23 had to drop, but gated on the Shift modifier so it can't collide with normal page scrolling. New helper `forward_shift_wheel_to_horizontal_scroll` in `crates/egui_commonmark/.../pulldown.rs` mirrors the prior helper's edge-passthrough logic and only acts when `ui.ctx().input(|i| i.modifiers.shift)` is true. Shift+wheel for horizontal scroll matches the browser convention; Ctrl was already taken by zoom. Documented in `docs/devlog/033-table-shift-wheel.md`.
+
 ## [0.1.10] - 2026-05-24
 
 ### Bug Fixes
