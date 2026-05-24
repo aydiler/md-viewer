@@ -1,0 +1,50 @@
+name: Push Snap Store Metadata
+
+# Manual-only workflow that pushes the snap/snapcraft.yaml description and
+# summary to the Snap Store listing. The release.yml publish-snap job does
+# this automatically on every release tag from v0.1.12 onward; this workflow
+# exists for one-off resyncs (e.g. v0.1.11 shipped before that auto-push
+# step was wired in, so the store description lagged the yaml).
+#
+# Trigger via: gh workflow run snap-push-metadata.yml
+
+on:
+  workflow_dispatch:
+
+jobs:
+  push-metadata:
+    name: Push snap metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SNAP_CREDS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+    steps:
+      - name: Check Snap Store credentials
+        id: check
+        run: |
+          if [ -z "$SNAP_CREDS" ]; then
+            echo "::error::SNAPCRAFT_STORE_CREDENTIALS not set"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install snapcraft + snap CLI
+        run: |
+          sudo snap install snapcraft --classic
+          # `snap download` is part of snapd on the runner
+
+      - name: Download latest published snap
+        run: |
+          snap download md-viewer --channel=stable
+          ls -lh md-viewer_*.snap
+
+      - name: Push metadata from snapcraft.yaml
+        run: |
+          SNAP_FILE=$(ls md-viewer_*.snap | head -1)
+          echo "Pushing metadata from snap file: $SNAP_FILE"
+          snapcraft push-metadata "$SNAP_FILE" --from-yaml --force
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
