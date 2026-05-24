@@ -229,16 +229,22 @@ jobs:
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
 
-      # Push the store-listing description / summary from snapcraft.yaml.
-      # `snapcraft upload` only ships the .snap artifact; the Snap Store
-      # listing description is curated separately and won't pick up changes to
-      # the yaml unless we explicitly push-metadata. --force overwrites any
-      # web-UI edits with the yaml as source of truth.
+      # Push the store-listing description / summary embedded in the snap.
+      # snapcore/action-publish above only ships the .snap artifact to a
+      # channel; the Snap Store listing description is curated separately and
+      # won't pick up changes unless we explicitly push-metadata. --force
+      # overwrites any web-UI edits, treating snap/snapcraft.yaml in the repo
+      # as source of truth.
+      #
+      # Note: snapcraft 8.x removed `--from-yaml`. Metadata is read from the
+      # .snap file's embedded yaml (which came from snap/snapcraft.yaml at
+      # build time), so the freshly-built snap from steps.build already
+      # carries the current description.
       - name: Push snap store listing metadata
         if: steps.check.outputs.proceed == 'true'
         run: |
           sudo snap install snapcraft --classic
-          snapcraft push-metadata "${SNAP_FILE}" --from-yaml --force
+          snapcraft push-metadata "${SNAP_FILE}" --force
         env:
           SNAP_FILE: ${{ steps.build.outputs.snap }}
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
