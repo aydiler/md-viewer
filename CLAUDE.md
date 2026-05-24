@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 | CLI | clap |
 | Allocator | mimalloc |
 
-**Binary:** ~8.7MB (includes syntax highlighting, image support, Wayland+X11)
+**Binary:** ~35 MB release build (includes syntect, mermaid renderer, math rendering, image support, Wayland+X11). ~7 MB compressed as snap.
 
 ## Before You Code
 

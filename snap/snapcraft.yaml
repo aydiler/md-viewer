@@ -3,16 +3,40 @@ base: core22
 version: '0.1.11'
 summary: Fast, lightweight markdown viewer for Linux
 description: |
-  A fast, lightweight markdown viewer built with Rust and egui.
+  A fast, lightweight markdown viewer for Linux built with Rust and egui.
+  Designed for distraction-free reading with excellent typography and syntax highlighting.
 
-  Features:
-  - GitHub Flavored Markdown with syntax highlighting (200+ languages)
-  - Tab system for multiple documents
-  - File explorer sidebar
-  - Outline/table of contents sidebar
-  - Dark and light themes
-  - Live reload on file changes
-  - Session persistence
+  Rendering:
+  - GitHub Flavored Markdown (tables, task lists, footnotes)
+  - Syntax highlighting for 200+ languages
+  - Mermaid diagrams (flowcharts, sequence diagrams) rendered natively, click to enlarge
+  - Math rendering (LaTeX via typst)
+  - Resizable table columns - drag dividers to fit content
+  - HTML tables with proper cell padding
+  - Images and SVG support (PNG, JPEG, GIF, SVG, HTTP URLs) - click images to enlarge
+  - Unicode support with system font fallbacks (emojis, CJK, non-Latin scripts)
+  - 60 FPS rendering with viewport-based lazy rendering
+  - WCAG 2.1 compliant typography (1.5x line height)
+
+  Navigation:
+  - Tab system for multiple documents (Ctrl+Click links to open in new tab)
+  - In-document search (Ctrl+F) with inline highlights and Enter/Shift+Enter to cycle
+  - File explorer sidebar with hierarchical directory tree
+  - Outline sidebar with click-to-navigate table of contents
+  - Per-tab back/forward history (Alt+Left/Right)
+  - Internal links between markdown files
+
+  View:
+  - Dark and light themes (Ctrl+D)
+  - Zoom 50%-300% (Ctrl++/-/0 or Ctrl+Scroll)
+  - Full-width content toggle (View menu) to use the entire content pane
+  - Shift+Scroll over a wide table scrolls it horizontally
+  - Live reload on file changes (enabled by default)
+
+  Usability:
+  - Drag and drop files to open
+  - Native file dialogs
+  - Session persistence (tabs, theme, zoom, sidebar state)
   - Native X11 and Wayland support
 
 grade: stable

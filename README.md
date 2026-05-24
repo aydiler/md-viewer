@@ -122,6 +122,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 | Ctrl+- | Zoom out |
 | Ctrl+0 | Reset zoom to 100% |
 | Ctrl+Scroll | Zoom with mouse wheel |
+| Shift+Scroll over a wide table | Scroll the table horizontally |
 
 ### File Operations
 
