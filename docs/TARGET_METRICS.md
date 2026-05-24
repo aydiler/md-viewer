@@ -1,6 +1,6 @@
 # Target Metrics
 
-- Binary size: ~8.7MB (includes full syntax highlighting via syntect, image support, Wayland+X11)
+- Binary size: ~35 MB release build (includes full syntax highlighting via syntect, mermaid renderer, math rendering, image support, Wayland+X11). ~7 MB compressed as snap.
 - Startup time: < 200ms
 - Render: 60 FPS with viewport-based lazy rendering
 - Platform: Linux X11 and Wayland

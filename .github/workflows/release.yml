@@ -229,6 +229,20 @@ jobs:
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
 
+      # Push the store-listing description / summary from snapcraft.yaml.
+      # `snapcraft upload` only ships the .snap artifact; the Snap Store
+      # listing description is curated separately and won't pick up changes to
+      # the yaml unless we explicitly push-metadata. --force overwrites any
+      # web-UI edits with the yaml as source of truth.
+      - name: Push snap store listing metadata
+        if: steps.check.outputs.proceed == 'true'
+        run: |
+          sudo snap install snapcraft --classic
+          snapcraft push-metadata "${SNAP_FILE}" --from-yaml --force
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+
   publish-aur:
     name: Publish to AUR
     runs-on: ubuntu-latest
