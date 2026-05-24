@@ -49,3 +49,4 @@ The find bar also has on-screen `↑` and `↓` buttons next to the match count 
 | Ctrl+- | Zoom out |
 | Ctrl+0 | Reset zoom to 100% |
 | Ctrl+Scroll | Zoom in/out with mouse wheel |
+| Shift+Scroll over a wide table | Scroll the table horizontally |

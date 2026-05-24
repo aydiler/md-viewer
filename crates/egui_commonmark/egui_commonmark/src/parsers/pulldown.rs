@@ -157,6 +157,50 @@ fn html_cell_visual_lines(cell: &str) -> usize {
     explicit_lines.saturating_add(wrap_est).max(1)
 }
 
+/// Redirect Shift+vertical-wheel over a hovered wide-table into its inner
+/// horizontal scroll offset. Plain vertical wheel is left untouched so the
+/// outer document scroller keeps scrolling the page (this is the behavior
+/// users expect; the unconditional redirect from #4 caused #22).
+///
+/// The Shift modifier acts as an explicit opt-in for sideways table scrolling
+/// without dragging the bottom scrollbar. Native horizontal trackpad input is
+/// already consumed by `ScrollArea::horizontal()` inside its `.show()` call,
+/// so this helper only ever touches the Y delta.
+///
+/// Edge pass-through: when the table is at either side and the wheel direction
+/// would push past the edge, the delta is left for the outer scroller.
+fn forward_shift_wheel_to_horizontal_scroll<R>(
+    ui: &Ui,
+    out: &mut egui::containers::scroll_area::ScrollAreaOutput<R>,
+) {
+    if !ui.rect_contains_pointer(out.inner_rect) {
+        return;
+    }
+    if !ui.ctx().input(|i| i.modifiers.shift) {
+        return;
+    }
+    let dy = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+    if dy.abs() < 0.1 {
+        return;
+    }
+    let max_x = (out.content_size.x - out.inner_rect.width()).max(0.0);
+    if max_x <= 0.0 {
+        return;
+    }
+    let at_left = out.state.offset.x <= 0.0 && dy > 0.0;
+    let at_right = out.state.offset.x >= max_x && dy < 0.0;
+    if at_left || at_right {
+        return;
+    }
+    let new_x = (out.state.offset.x - dy).clamp(0.0, max_x);
+    if (new_x - out.state.offset.x).abs() > f32::EPSILON {
+        out.state.offset.x = new_x;
+        out.state.store(ui.ctx(), out.id);
+        ui.ctx().input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+        ui.ctx().request_repaint();
+    }
+}
+
 /// Newline logic is constructed by the following:
 /// All elements try to insert a newline before them (if they are allowed)
 /// and end their own line.
@@ -1035,14 +1079,14 @@ impl CommonMarkViewerInternal {
                 .collect();
             // Outer ScrollArea::horizontal handles the case where columns
             // (auto-sized to content) total wider than the parent ui; without it,
-            // narrow windows clip the rightmost columns. Vertical wheel input stays
-            // with the outer document scroller so scrolling past wide tables does
-            // not nudge their horizontal offset.
+            // narrow windows clip the rightmost columns. Plain vertical wheel
+            // remains with the outer document scroller (#22); Shift+wheel opts in
+            // to horizontal table scrolling via `forward_shift_wheel_to_horizontal_scroll`.
             // ui.vertical(...) is essential: TableBuilder's body() positions itself
             // relative to the parent's cursor, but the parent here is a horizontal-
             // flow Ui from the markdown renderer. Without the vertical scope the
             // body's first row overlaps the header row.
-            egui::ScrollArea::horizontal()
+            let mut scroll_out = egui::ScrollArea::horizontal()
                 .id_salt(id.with("_scroll"))
                 .max_width(max_width)
                 .auto_shrink([false, true])
@@ -1116,6 +1160,7 @@ impl CommonMarkViewerInternal {
                         });
                     });
                 });
+            forward_shift_wheel_to_horizontal_scroll(ui, &mut scroll_out);
             self.is_table = false;
             if events.peek().is_none() {
                 self.line.should_end_newline_forced = false;
@@ -1683,10 +1728,10 @@ impl CommonMarkViewerInternal {
         let body_heights: Vec<f32> = table.rows.iter().map(|row| row_height_for(row)).collect();
 
         // Outer ScrollArea::horizontal handles wide tables that exceed parent width;
-        // ui.vertical() prevents the header/body Y-overlap quirk. Vertical wheel
-        // input stays with the outer document scroller so scrolling past wide tables
-        // does not nudge their horizontal offset.
-        egui::ScrollArea::horizontal()
+        // ui.vertical() prevents the header/body Y-overlap quirk. Plain vertical wheel
+        // stays with the outer document scroller (#22); Shift+wheel opts in to
+        // horizontal table scrolling via `forward_shift_wheel_to_horizontal_scroll`.
+        let mut scroll_out = egui::ScrollArea::horizontal()
             .id_salt(id.with("_scroll"))
             .max_width(max_width)
             .auto_shrink([false, true])
@@ -1793,6 +1838,7 @@ impl CommonMarkViewerInternal {
                     });
                 });
             });
+        forward_shift_wheel_to_horizontal_scroll(ui, &mut scroll_out);
         self.line.try_insert_end(ui);
     }
 }
