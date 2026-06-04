@@ -123,6 +123,40 @@ const OUTLINE_DEFAULT_WIDTH: f32 = 208.0; // 200 + 8 margins
 const PANEL_SEPARATORS: f32 = 16.0;
 const OPTIMAL_WINDOW_HEIGHT: f32 = 750.0;
 
+// Keyboard document scroll deltas are centralized so shortcut wiring and tests
+// share the same line/page behavior.
+const KEYBOARD_LINE_SCROLL_STEP: f32 = 48.0;
+const KEYBOARD_PAGE_SCROLL_RATIO: f32 = 0.9;
+
+// App-level keyboard scroll actions; kept private until shortcut wiring needs
+// to pass them through `MarkdownApp::update`.
+#[derive(Clone, Copy, Debug)]
+enum KeyboardScrollAction {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+}
+
+// Compute the next clamped document scroll offset without touching egui state.
+fn keyboard_scroll_target(
+    current_offset: f32,
+    viewport_height: f32,
+    content_height: f32,
+    action: KeyboardScrollAction,
+) -> f32 {
+    let page_step = viewport_height * KEYBOARD_PAGE_SCROLL_RATIO;
+    let delta = match action {
+        KeyboardScrollAction::LineUp => -KEYBOARD_LINE_SCROLL_STEP,
+        KeyboardScrollAction::LineDown => KEYBOARD_LINE_SCROLL_STEP,
+        KeyboardScrollAction::PageUp => -page_step,
+        KeyboardScrollAction::PageDown => page_step,
+    };
+    let max_scroll = (content_height - viewport_height).max(0.0);
+
+    (current_offset + delta).clamp(0.0, max_scroll)
+}
+
 fn content_default_width(full_width_content: bool) -> Option<usize> {
     if full_width_content {
         None
@@ -3380,6 +3414,7 @@ impl eframe::App for MarkdownApp {
         let mut next_match = false;
         let mut prev_match = false;
         let mut close_search_kb = false;
+        let mut keyboard_scroll_action: Option<KeyboardScrollAction> = None;
 
         // Ctrl+/- zoom: applies to lightbox when open, document otherwise
         ctx.input(|i| {
@@ -3518,6 +3553,26 @@ impl eframe::App for MarkdownApp {
                         close_search_kb = true;
                     }
                 }
+                // Plain document scroll keys reuse the existing pending-scroll pipeline.
+                // Arrow keys stay available for search navigation while the find bar is open.
+                let no_scroll_modifier =
+                    !i.modifiers.ctrl && !i.modifiers.alt && !i.modifiers.command;
+                if no_scroll_modifier {
+                    if !self.search.is_open {
+                        if i.key_pressed(egui::Key::ArrowUp) {
+                            keyboard_scroll_action = Some(KeyboardScrollAction::LineUp);
+                        }
+                        if i.key_pressed(egui::Key::ArrowDown) {
+                            keyboard_scroll_action = Some(KeyboardScrollAction::LineDown);
+                        }
+                    }
+                    if i.key_pressed(egui::Key::PageUp) {
+                        keyboard_scroll_action = Some(KeyboardScrollAction::PageUp);
+                    }
+                    if i.key_pressed(egui::Key::PageDown) {
+                        keyboard_scroll_action = Some(KeyboardScrollAction::PageDown);
+                    }
+                }
             });
         } // end lightbox guard
 
@@ -3581,6 +3636,17 @@ impl eframe::App for MarkdownApp {
         }
         if close_search_kb {
             self.close_search();
+        }
+        if let Some(action) = keyboard_scroll_action {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                let target = keyboard_scroll_target(
+                    tab.scroll_offset,
+                    tab.last_viewport_height,
+                    tab.last_content_height,
+                    action,
+                );
+                tab.pending_scroll_offset = Some(target);
+            }
         }
 
         // Handle drag and drop
@@ -4261,5 +4327,49 @@ mod tests {
         let m2 = find_matches(content, "two");
         // Two raw "two" matches in alt + 1 in visible text → only 1 survives
         assert_eq!(m2.len(), 1);
+    }
+
+    #[test]
+    fn keyboard_scroll_target_moves_by_line_step() {
+        assert_eq!(
+            keyboard_scroll_target(100.0, 500.0, 2_000.0, KeyboardScrollAction::LineDown),
+            148.0
+        );
+        assert_eq!(
+            keyboard_scroll_target(100.0, 500.0, 2_000.0, KeyboardScrollAction::LineUp),
+            52.0
+        );
+    }
+
+    #[test]
+    fn keyboard_scroll_target_moves_by_page_step() {
+        assert_eq!(
+            keyboard_scroll_target(1_000.0, 500.0, 3_000.0, KeyboardScrollAction::PageDown),
+            1_450.0
+        );
+        assert_eq!(
+            keyboard_scroll_target(1_000.0, 500.0, 3_000.0, KeyboardScrollAction::PageUp),
+            550.0
+        );
+    }
+
+    #[test]
+    fn keyboard_scroll_target_clamps_to_document_bounds() {
+        assert_eq!(
+            keyboard_scroll_target(10.0, 500.0, 2_000.0, KeyboardScrollAction::PageUp),
+            0.0
+        );
+        assert_eq!(
+            keyboard_scroll_target(1_490.0, 500.0, 2_000.0, KeyboardScrollAction::PageDown),
+            1_500.0
+        );
+    }
+
+    #[test]
+    fn keyboard_scroll_target_handles_short_documents() {
+        assert_eq!(
+            keyboard_scroll_target(25.0, 500.0, 300.0, KeyboardScrollAction::LineDown),
+            0.0
+        );
     }
 }
