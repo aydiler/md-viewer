@@ -51,7 +51,7 @@ Manual UI validation on 2026-06-04:
 
 - `docs/KEYBOARD_SHORTCUTS.md`
 - `docs/ARCHITECTURE.md`
-- `docs/devlog/034-keyboard-scroll-keys.md`
+- `docs/devlog/035-keyboard-scroll-keys.md`
 - `docs/LESSONS.md`
 
 ## Future Improvements

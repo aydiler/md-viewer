@@ -217,7 +217,7 @@ if raw_scroll.abs() > 0.0 {
 **Context:** Issue #29 keyboard document scrolling added Up/Down and Page Up/Page Down document movement.
 **Problem:** Arrow keys already have a mode-specific meaning in the find bar: Up/Down cycle search matches. A global document-scroll handler that consumes the same keys unconditionally would make focused/mode shortcuts feel broken.
 **Fix:** Gate document-level shortcut handling on UI state and modifiers. Let search consume arrows while the find bar is open, and ignore Ctrl/Alt/Command-modified keypresses so existing app and system shortcuts keep priority. Defer the chosen scroll action through `pending_scroll_offset` rather than mutating renderer-owned scroll state directly.
-**Files:** `src/main.rs`, `docs/devlog/034-keyboard-scroll-keys.md`
+**Files:** `src/main.rs`, `docs/devlog/035-keyboard-scroll-keys.md`
 
 ### Resize handle and scrollbar overlap causes jitter
 **Context:** Resizing outline panel caused mouse jitter when near content scrollbar
