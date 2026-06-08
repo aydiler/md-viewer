@@ -33,6 +33,9 @@ pub use misc::CommonMarkCache;
 #[cfg(feature = "math")]
 pub use misc::render_math;
 
+#[cfg(feature = "math")]
+pub use misc::warm_math_fonts;
+
 /// Takes [`egui::Ui`], the math text to be rendered and whether it is inline
 pub type RenderMathFn = dyn Fn(&mut egui::Ui, &str, bool);
 /// Takes [`egui::Ui`] and the html text to be rendered/used

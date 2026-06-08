@@ -31,9 +31,10 @@ typst-as-lib = { version = "0.15", features = ["typst-kit-fonts"], optional = tr
 typst-svg = { version = "0.14", optional = true }
 typst-render = { version = "0.14", optional = true }
 typst = { version = "0.14", optional = true }
+typst-kit = { version = "0.14", optional = true, default-features = false, features = ["fonts", "embed-fonts"] }
 
 [features]
 better_syntax_highlighting = ["dep:syntect"]
 embedded_image = ["dep:data-url"]
 mermaid = ["dep:merman", "dep:resvg"]
-math = ["dep:mitex", "dep:typst-as-lib", "dep:typst-render", "dep:typst"]
+math = ["dep:mitex", "dep:typst-as-lib", "dep:typst-render", "dep:typst", "dep:typst-kit"]

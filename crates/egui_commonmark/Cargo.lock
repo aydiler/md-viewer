@@ -1151,6 +1151,7 @@ dependencies = [
  "syntect",
  "typst",
  "typst-as-lib",
+ "typst-kit",
  "typst-render",
  "typst-svg",
 ]

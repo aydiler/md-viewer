@@ -398,11 +398,12 @@ fn is_block_end_tag(tag: &pulldown_cmark::TagEnd) -> bool {
 /// - `$3,000–$4,000` → parsed as InlineMath("3,000–")
 /// - `$/t is worse because...total_usd...` → long English sentence with `_` in identifiers
 ///
-/// The approach: real LaTeX math ALWAYS contains structural syntax (backslash
-/// commands, superscripts, subscripts, braces, or known math operators).
-/// Anything without these markers is almost certainly a misparse.
-/// Additionally, very long "math" containing multiple English words is almost
-/// certainly a false positive from `$` being used as currency.
+/// The approach: real LaTeX math contains structural syntax (backslash
+/// commands, braces, sub/superscripts) OR math operators/grouping (`= < >`,
+/// parens, brackets) OR is a signed number / short variable. Anything with
+/// none of those markers is almost certainly a misparse. Additionally, very
+/// long "math" containing multiple English words is almost certainly a false
+/// positive from `$` being used as currency.
 fn is_likely_currency(tex: &str) -> bool {
     let trimmed = tex.trim();
     if trimmed.is_empty() {
@@ -418,6 +419,38 @@ fn is_likely_currency(tex: &str) -> bool {
     // Braces are strong LaTeX indicators (grouping: {x+1}, subscript: _{n})
     let has_braces = trimmed.contains('{') || trimmed.contains('}');
     if has_braces {
+        return false;
+    }
+
+    // Relational / grouping operators that a closed `$...$` currency amount
+    // never contains: `w(z)`, `f(R)`, `D>0`, `p=P`, `[-1.1,-1.0]`, `=0`.
+    // Their presence means real math, not a `$5`-style misparse.
+    if trimmed.contains(|c: char| matches!(c, '=' | '<' | '>' | '(' | ')' | '[' | ']')) {
+        return false;
+    }
+
+    // A signed number is math (`-1.38`, `+2.6`); closed currency is unsigned
+    // (`$5`, never `$-5$`). Leading `+`/`-` followed by a digit.
+    let mut leading = trimmed.chars();
+    if matches!(leading.next(), Some('+' | '-'))
+        && leading.next().is_some_and(|c| c.is_ascii_digit())
+    {
+        return false;
+    }
+
+    // A short all-letters token is a variable name (`G`, `w`, `D`).
+    if trimmed.len() <= 3 && trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    // A clean numeric literal with no internal whitespace is an intentional
+    // `$number$` (e.g. a χ² value `$8.5$`), not currency. Currency only reaches
+    // InlineMath by spanning two `$` across prose, so its mis-parsed content
+    // carries spaces or dashes (`"8.5 to "`, `"3,000–"`) — which fail this test
+    // and fall through to the currency branch below.
+    if trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+        && trimmed.chars().any(|c| c.is_ascii_digit())
+    {
         return false;
     }
 
@@ -1272,6 +1305,12 @@ impl CommonMarkViewerInternal {
                 }
             }
             pulldown_cmark::Event::DisplayMath(tex) => {
+                // Display math (`$$…$$`) is a block: force it onto its own line
+                // even when the source keeps it in the same paragraph as the
+                // preceding text (`obeys\n$$…$$`). Without the breaks it flows to
+                // the right of that text and, being taller than a line, gets
+                // pushed down by the row's bottom-alignment.
+                newline(ui);
                 #[cfg(feature = "math")]
                 {
                     crate::render_math(ui, cache, &tex, false);
@@ -1280,6 +1319,7 @@ impl CommonMarkViewerInternal {
                 if let Some(math_fn) = options.math_fn {
                     math_fn(ui, &tex, false);
                 }
+                newline(ui);
             }
         }
     }
