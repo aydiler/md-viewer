@@ -208,12 +208,17 @@ sudo pacman -S --needed \
 ## Usage
 
 ```bash
-# Open a file (live reload is enabled by default)
+# Open a file and return the terminal prompt (live reload is enabled by default)
 md-viewer README.md
+
+# Keep the viewer attached to the terminal for debugging/logs
+md-viewer --foreground README.md
 
 # Disable live reload
 md-viewer README.md --no-watch
 ```
+
+When launched from a terminal, `md-viewer` detaches by default so the shell prompt is available while the window stays open. Use `--foreground` when you want terminal logs or blocking process behavior.
 
 ## Technical Details
 

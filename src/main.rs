@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -1181,12 +1184,85 @@ struct Args {
     /// Disable live reload (watching is enabled by default)
     #[arg(long)]
     no_watch: bool,
+
+    /// Keep the GUI process attached to the terminal for debugging/logs
+    #[arg(long)]
+    foreground: bool,
+
+    /// Internal marker used by the detached child process to avoid respawn loops
+    #[arg(long, hide = true)]
+    no_detach: bool,
+}
+
+fn should_detach(args: &Args, launched_from_terminal: bool) -> bool {
+    launched_from_terminal && !args.foreground && !args.no_detach
+}
+
+fn launched_from_terminal() -> bool {
+    std::io::stdin().is_terminal()
+        || std::io::stdout().is_terminal()
+        || std::io::stderr().is_terminal()
+}
+
+fn child_args_with_no_detach<I>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut child_args: Vec<OsString> = args.into_iter().skip(1).collect();
+    let marker_position = child_args
+        .iter()
+        .position(|arg| arg == OsStr::new("--"))
+        .unwrap_or(child_args.len());
+    child_args.insert(marker_position, OsString::from("--no-detach"));
+    child_args
+}
+
+fn spawn_detached_child() -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let child_args = child_args_with_no_detach(std::env::args_os());
+    let mut command = Command::new(exe);
+
+    command
+        .args(child_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+
+        // Start a new process group/session so the child survives after the
+        // launching terminal hands control back to the shell.
+        command.pre_exec(|| {
+            extern "C" {
+                fn setsid() -> i32;
+            }
+
+            if setsid() == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+
+    command.spawn()?;
+    Ok(())
 }
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
     let args = Args::parse();
+
+    if should_detach(&args, launched_from_terminal()) {
+        if let Err(err) = spawn_detached_child() {
+            eprintln!("Failed to detach md-viewer process: {err}. Running in foreground.");
+        } else {
+            return Ok(());
+        }
+    }
 
     // Calculate optimal window width assuming both sidebars are shown (the default)
     let optimal_width =
@@ -4132,6 +4208,75 @@ Visit [egui](https://github.com/emilk/egui) for more information.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_terminal_launch_detaches() {
+        let args = Args::try_parse_from(["md-viewer", "README.md"]).unwrap();
+        assert!(should_detach(&args, true));
+    }
+
+    #[test]
+    fn non_terminal_launch_does_not_detach() {
+        let args = Args::try_parse_from(["md-viewer", "README.md"]).unwrap();
+        assert!(!should_detach(&args, false));
+    }
+
+    #[test]
+    fn foreground_flag_disables_detach() {
+        let args = Args::try_parse_from(["md-viewer", "--foreground", "README.md"]).unwrap();
+        assert!(!should_detach(&args, true));
+    }
+
+    #[test]
+    fn hidden_no_detach_marker_disables_detach() {
+        let args = Args::try_parse_from(["md-viewer", "--no-detach", "README.md"]).unwrap();
+        assert!(!should_detach(&args, true));
+    }
+
+    #[test]
+    fn child_args_preserve_user_args_and_append_marker() {
+        let child_args = child_args_with_no_detach([
+            OsString::from("md-viewer"),
+            OsString::from("README.md"),
+            OsString::from("--no-watch"),
+        ]);
+
+        assert_eq!(
+            child_args,
+            vec![
+                OsString::from("README.md"),
+                OsString::from("--no-watch"),
+                OsString::from("--no-detach"),
+            ]
+        );
+    }
+
+    #[test]
+    fn child_args_insert_marker_before_double_dash() {
+        let child_args = child_args_with_no_detach([
+            OsString::from("md-viewer"),
+            OsString::from("--"),
+            OsString::from("README.md"),
+        ]);
+
+        assert_eq!(
+            child_args,
+            vec![
+                OsString::from("--no-detach"),
+                OsString::from("--"),
+                OsString::from("README.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_no_detach_marker_is_not_in_help() {
+        use clap::CommandFactory;
+
+        let help = Args::command().render_long_help().to_string();
+        assert!(help.contains("--foreground"));
+        assert!(!help.contains("--no-detach"));
+    }
 
     #[test]
     fn capped_content_width_uses_optimal_width() {
