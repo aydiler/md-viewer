@@ -16,6 +16,8 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `watcher` + `watcher_rx` - file watching via mpsc channel
   - `watched_paths: HashSet<PathBuf>` - unified watcher for all open tabs
   - `hovered_tab: Option<usize>` - for showing close button on hover
+  - `recent_files: Vec<RecentEntry>` - recently opened files for the welcome page
+  - `welcome_show_all: bool` - whether the welcome page's recent list is expanded
 
 - **Tab**: Per-tab state for a document. Each tab has:
   - `id: egui::Id` - unique identifier
@@ -37,6 +39,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `expanded_dirs: Option<Vec<PathBuf>>` - expanded directories in explorer
   - `open_tabs: Option<Vec<PathBuf>>` - restore tabs on startup
   - `active_tab: Option<usize>` - restore active tab position
+  - `recent_files: Option<Vec<RecentEntry>>` - recently opened files (welcome page)
 
 - **FileExplorer**: Left sidebar showing markdown files in a directory tree:
   - `root: Option<PathBuf>` - root directory to display
@@ -103,6 +106,7 @@ The tab system uses a simple `Vec<Tab>` with an `active_tab` index:
 - Regular click navigates within the current tab
 - Each tab maintains independent navigation history (Alt+Left/Right)
 - Session restore opens previously open tabs and restores active tab
+- Closing the last tab is allowed; `tabs` may be empty, which renders the **welcome page** (issue #28). `render_welcome` (shown from `render_tab_content` when no tab is active) has Open File / Open Folder buttons and a recent-files list. `push_recent`/`record_recent` maintain `recent_files` (deduped, capped at `RECENT_FILES_CAP`, persisted). A fresh launch with no file shows it too — the old built-in sample document was removed.
 
 ## File Explorer
 
