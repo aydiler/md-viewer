@@ -2,6 +2,19 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.12] - 2026-06-09
+
+### Features
+
+- **LaTeX math rendering — correct, fast, and baseline-aligned (#35).** Inline `$…$` and display `$$…$$` equations render through typst + mitex. This release overhauls them across three axes:
+  - *Correctness:* added `\tfrac`, `\dfrac`, `\boxed`, `\!`, and `\xrightarrow`/`\xleftarrow` to the typst preamble (mitex emits these as calls typst didn't define → red error boxes), and loosened the currency heuristic so real formulas (`$w(z)$`, `$-1.38$`, `$D>0$`, `$8.5$`) render instead of being downgraded to literal `$text`. A 405-formula physics paper now renders 405/405.
+  - *Speed:* load only typst's embedded fonts (New Computer Modern) instead of scanning every system font per formula — removing a ~13 s first-formula stall — render formulas in parallel, repaint on completion instead of on a fixed tick, and composite via a 256-entry alpha LUT. A math-heavy document settles in ~3 s instead of ~30 s.
+  - *Typography:* inline `$…$` now renders at inline (textstyle) size; display `$$…$$` breaks onto its own centered line even mid-paragraph; short symbols no longer carry doubled horizontal spacing; and each formula's baseline is aligned to the text baseline using egui's actual font metrics (`line_height − font_ascent`) rather than a tuned constant. Devlogs `038`–`040`.
+- **Welcome / idle page with recent files (#28, PR #34).** Closing the last tab — or launching with no file — now shows a welcome page with Open File / Open Folder buttons and a recent-files list (deduped, capped, persisted). The old built-in sample document was removed.
+- **File → Open Folder… to re-point the file explorer (#28, PR #33).** Repoint the explorer at any directory at runtime without restarting.
+- **Keyboard document scrolling (#29, PR #32, contributed by [@aki1ro](https://github.com/aki1ro)).** Up/Down scroll by line and Page Up/Page Down by page, deferred through the renderer-owned scroll pipeline. Arrow keys stay reserved for search-result navigation while the find bar is open, and Ctrl/Alt/Command-modified keys are ignored so existing shortcuts keep priority.
+- **Detached terminal launches by default (#30, PR #31, contributed by [@aki1ro](https://github.com/aki1ro)).** `md-viewer file.md` now returns the shell prompt immediately while the window stays open; pass `--foreground` to keep the blocking behavior for logs/scripts.
+
 ## [0.1.11] - 2026-05-24
 
 ### Bug Fixes

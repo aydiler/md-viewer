@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "md-viewer"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "clap",
  "eframe",
