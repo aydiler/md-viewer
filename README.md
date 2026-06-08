@@ -6,14 +6,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/aydiler/md-viewer)](https://github.com/aydiler/md-viewer/stargazers)
 
-A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed for distraction-free reading with excellent typography and syntax highlighting.
+A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed for distraction-free reading with excellent typography, syntax highlighting, and LaTeX math — from quick notes to scientific papers.
 
-![Dark Mode](screenshots/dark-mode.png)
+![md-viewer rendering a LaTeX-heavy scientific paper](screenshots/math-rendering.png)
 
 ## Features
 
 ### Rendering
 - **GitHub Flavored Markdown** - Full GFM support including tables, task lists, and footnotes
+- **LaTeX Math** - Inline `$…$` and display `$$…$$` equations rendered via typst + mitex — fractions, sub/superscripts, `\boxed`, accents, matrices, and more — sized and baseline-aligned to the surrounding text
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, and more rendered natively via [merman](https://github.com/Latias94/merman) (click to enlarge)
 - **Resizable Table Columns** - Drag column dividers to fit content (new in v0.1.5)
@@ -45,27 +46,37 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ## Screenshots
 
-### Dark Mode
-*Mermaid flowchart, tech stack table, file explorer, and outline sidebar*
+### Scientific paper — math, tables, figures, and navigation
+*A DESI dark-energy paper: display & inline LaTeX equations, a data table with math headers, an embedded figure, the file explorer, and the click-to-navigate outline — all at once*
+
+![Scientific paper in dark mode](screenshots/math-rendering.png)
+
+### Same document, light mode
+*The χ² comparison table, inline math, and the BAO-fit figure rendered on the light theme*
+
+![Scientific paper in light mode](screenshots/math-light.png)
+
+### Figures, equations, and lists together
+*Embedded plots with math captions, a checklist with inline equations and emoji, and both sidebars*
+
+![Math, figures and lists](screenshots/model-doc.png)
+
+### Dark Mode — Diagrams & Tables
+*Mermaid flowchart, tech-stack table, file explorer, and outline sidebar*
 
 ![Dark Mode](screenshots/dark-mode.png)
 
-### Dark Mode -- Syntax Highlighting
-*Rust and YAML code blocks with semantic coloring, mermaid sequence diagram*
+### Syntax Highlighting
+*Rust and YAML code blocks with semantic coloring and a mermaid sequence diagram*
 
 ![Syntax Highlighting](screenshots/syntax-highlighting.png)
 
-### Light Mode
+### Light Mode — Prose & Code
 *Documentation with bullet lists, blockquotes, inline code, and bash code blocks*
 
 ![Light Mode](screenshots/light-mode.png)
 
-### Light Mode -- API Docs
-*JSON syntax highlighting, inline code rendering, and outline navigation*
-
-![Syntax Highlighting Light](screenshots/syntax-highlighting-light.png)
-
-### Light Mode -- Tables & Lists
+### Tables & Lists
 *Troubleshooting table with inline code in cells, ordered list, and resizable columns (drag dividers)*
 
 ![Tables](screenshots/tables.png)
@@ -76,7 +87,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ![Search](screenshots/search.png)
 
 ### Resizable Table Columns
-*Drag column dividers to fit wide content (new in v0.1.5)*
+*Drag column dividers to fit wide content*
 
 ![Resizable Tables](screenshots/resizable-tables.png)
 
@@ -231,7 +242,8 @@ When launched from a terminal, `md-viewer` detaches by default so the shell prom
 ### Built With
 
 - [eframe/egui](https://github.com/emilk/egui) - Immediate mode GUI framework
-- [egui_commonmark](https://github.com/lampsitter/egui_commonmark) - Markdown rendering (vendored fork with typography improvements)
+- [egui_commonmark](https://github.com/lampsitter/egui_commonmark) - Markdown rendering (vendored fork with typography, math, and alignment improvements)
+- [typst](https://github.com/typst/typst) + [mitex](https://github.com/mitex-rs/mitex) - LaTeX math rendering (LaTeX → typst → rasterized inline)
 - [merman](https://github.com/Latias94/merman) - Mermaid diagram rendering
 - [syntect](https://github.com/trishume/syntect) - Syntax highlighting
 - [notify](https://github.com/notify-rs/notify) - File watching
