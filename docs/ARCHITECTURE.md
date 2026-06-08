@@ -108,6 +108,7 @@ The tab system uses a simple `Vec<Tab>` with an `active_tab` index:
 
 Left sidebar showing all markdown files in a hierarchical directory tree:
 - Root directory determined by: CLI file → persisted state → first open tab → cwd
+- Can be re-pointed at runtime via File → Open Folder… (`open_folder_dialog` → `FileExplorer::set_root`)
 - Recursive scanning with 10 level depth limit
 - Filters: .md, .markdown, .txt files only
 - Skip hidden files (starting with .)
