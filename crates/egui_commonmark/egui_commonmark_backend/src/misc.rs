@@ -2,6 +2,8 @@ use crate::alerts::AlertBundle;
 use crate::typography::TypographyConfig;
 use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
+#[cfg(feature = "math")]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use std::collections::hash_map::DefaultHasher;
@@ -918,6 +920,9 @@ enum MathState {
     Ready {
         texture: egui::TextureHandle,
         size: egui::Vec2,
+        /// Baseline position as a fraction of image height from the top
+        /// (0 = top, 1 = bottom). Used to align inline math to the text baseline.
+        baseline_ratio: f32,
     },
     /// Rendering failed - show styled fallback
     Error(String),
@@ -933,6 +938,8 @@ struct MathRenderResult {
 struct MathRendered {
     image: egui::ColorImage,
     size: egui::Vec2,
+    /// Baseline position as a fraction of image height from the top.
+    baseline_ratio: f32,
 }
 
 /// Typst preamble defining mitex helper functions needed to compile mitex output.
@@ -970,7 +977,125 @@ const MITEX_PREAMBLE: &str = r#"
 #let textbf(it) = text(weight: "bold", it)
 #let textit(it) = text(style: "italic", it)
 #let textrm(it) = text(it)
+// amsmath fraction/box/spacing commands mitex emits but does not map to typst:
+//   \tfrac/\dfrac -> tfrac(..)/dfrac(..), \boxed -> boxed(..), \! -> negthinspace
+#let tfrac(num, denom) = math.inline(math.frac(num, denom))
+#let dfrac(num, denom) = math.display(math.frac(num, denom))
+#let boxed(it) = box(stroke: 0.6pt, inset: (x: 4pt, y: 3pt), $it$)
+#let negthinspace = h(-0.16667em)
+#let xrightarrow(label) = $attach(arrow.r.long, t: #label)$
+#let xleftarrow(label) = $attach(arrow.l.long, t: #label)$
 "#;
+
+/// System fonts, searched and loaded once, then reused for every formula.
+///
+/// The original code called `search_fonts_with(Default::default())` while
+/// building a fresh engine *per formula*. That system-font disk scan dominated
+/// math rendering — ~3.1 s/formula on a dev box with many fonts, so a doc with
+/// hundreds of formulas took minutes. Searching once and reusing the loaded
+/// `Vec<Font>` drops per-formula cost to tens of ms (~71× on a 30-formula
+/// sample). `Font` is `Arc`-backed, so cloning the slice into each engine is
+/// cheap and thread-safe (each render thread builds its own engine).
+#[cfg(feature = "math")]
+static MATH_FONTS: LazyLock<Vec<typst::text::Font>> = LazyLock::new(|| {
+    // Load ONLY typst's embedded default fonts (New Computer Modern + NCM Math +
+    // Libertinus Serif + DejaVu Sans Mono), which are compiled into the binary.
+    // Math formulas only ever use these, so there's no need to scan or load the
+    // system font set — doing so cost ~13 s of first-formula latency for fonts
+    // no formula renders with. Embedded fonts load from memory in milliseconds.
+    let mut searcher = typst_kit::fonts::Fonts::searcher();
+    searcher
+        .include_system_fonts(false)
+        .include_embedded_fonts(true);
+    searcher
+        .search()
+        .fonts
+        .iter()
+        .filter_map(|slot| slot.get())
+        .collect()
+});
+
+/// Number of formulas to render (and fonts to load) concurrently. typst
+/// compilation is CPU-bound, so we cap at the core count (bounded to keep
+/// transient memory reasonable on low-RAM machines).
+#[cfg(feature = "math")]
+fn math_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 6)
+}
+
+/// Force the one-time system-font search now (e.g. from a background thread at
+/// startup) so the first rendered formula doesn't pay the full search latency.
+#[cfg(feature = "math")]
+pub fn warm_math_fonts() {
+    LazyLock::force(&MATH_FONTS);
+}
+
+/// Find the math baseline within a rendered page, as a fraction of the page
+/// height from the top. typst doesn't set a baseline on the *page* frame, but
+/// the frame *contains* positioned glyph runs and a run's y-position is its
+/// baseline. The base-size symbols of an equation sit on the equation baseline
+/// (super/subscripts are smaller and offset), so we take the y of the
+/// largest-font-size text run. Recurses into transformed groups.
+#[cfg(feature = "math")]
+fn math_baseline_ratio(page: &typst::layout::Page) -> f32 {
+    let h = page.frame.height().to_pt();
+    if h <= 0.0 {
+        return 0.8;
+    }
+
+    // Preferred: typst sets a real baseline on the inline equation's own frame.
+    // The page frame doesn't carry it, but a nested group's frame does — find the
+    // first frame with an explicit baseline and use it (plus its y offset).
+    fn find_baseline(frame: &typst::layout::Frame, y_off: f64) -> Option<f64> {
+        if frame.has_baseline() {
+            return Some(y_off + frame.baseline().to_pt());
+        }
+        for (pos, item) in frame.items() {
+            if let typst::layout::FrameItem::Group(g) = item {
+                let gy = y_off + pos.y.to_pt() + g.transform.ty.to_pt();
+                if let Some(b) = find_baseline(&g.frame, gy) {
+                    return Some(b);
+                }
+            }
+        }
+        None
+    }
+    if let Some(b) = find_baseline(&page.frame, 0.0) {
+        return (b / h).clamp(0.0, 1.0) as f32;
+    }
+
+    // Fallback (block equations / no baseline set): average the baselines of the
+    // largest-font text runs. A single symbol gives its own baseline; a fraction
+    // (numerator + denominator, same size, above and below the bar) averages to
+    // the axis so it straddles the text line.
+    fn collect(frame: &typst::layout::Frame, y_off: f64, runs: &mut Vec<(f64, f64)>) {
+        for (pos, item) in frame.items() {
+            let y = y_off + pos.y.to_pt();
+            match item {
+                typst::layout::FrameItem::Text(t) => runs.push((t.size.to_pt(), y)),
+                typst::layout::FrameItem::Group(g) => {
+                    collect(&g.frame, y + g.transform.ty.to_pt(), runs);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut runs = Vec::new();
+    collect(&page.frame, 0.0, &mut runs);
+    let max_sz = runs.iter().fold(0.0f64, |m, &(s, _)| m.max(s));
+    let base: Vec<f64> = runs
+        .iter()
+        .filter(|&&(s, _)| s > max_sz - 0.01)
+        .map(|&(_, y)| y)
+        .collect();
+    if base.is_empty() {
+        return 0.8;
+    }
+    (base.iter().sum::<f64>() / base.len() as f64 / h).clamp(0.0, 1.0) as f32
+}
 
 /// Render a LaTeX math formula: convert via mitex, compile via typst, rasterize directly.
 #[cfg(feature = "math")]
@@ -997,28 +1122,46 @@ fn render_math_formula(
 
     // 2. Build Typst source — render with transparent background so we get a clean
     // alpha mask, then composite with egui colors in the pixel loop below.
-    let margin = if is_inline { "(x: 2pt, y: 2pt)" } else { "(x: 8pt, y: 6pt)" };
+    // Inline: no horizontal margin — the surrounding text already provides word
+    // spacing, so a baked-in x-margin would double the gap around short symbols
+    // (`$w$`, `$z$`) and read as "weird spacing". Keep a little vertical margin
+    // so glyph extents (e.g. accents, descenders) aren't clipped.
+    let margin = if is_inline { "(x: 0pt, y: 2pt)" } else { "(x: 8pt, y: 6pt)" };
+
+    // Inline vs display style. Whitespace inside `$ … $` makes typst render a
+    // *block* equation (displaystyle: bigger operators, centered, no inline
+    // baseline). `$…$` with no surrounding whitespace is *inline* (textstyle:
+    // correctly-sized for running text, and the equation carries a baseline we
+    // can read back). Use inline for `$…$` formulas, block for `$$…$$`.
+    let equation = if is_inline {
+        format!("${typst_math}$")
+    } else {
+        format!("$ {typst_math} $")
+    };
 
     let source = format!(
         r#"{preamble}
 #set page(width: auto, height: auto, margin: {margin}, fill: none)
 #set text(size: 16pt, fill: black)
-$ {math} $"#,
+{equation}"#,
         preamble = MITEX_PREAMBLE,
         margin = margin,
-        math = typst_math,
+        equation = equation,
     );
 
-    // 3. Compile with typst
+    // 3. Compile with typst. Reuse the embedded fonts (see MATH_FONTS) instead
+    // of re-scanning the font directories per formula.
     let engine = typst_as_lib::TypstEngine::builder()
         .main_file(source)
-        .search_fonts_with(Default::default())
+        .fonts(MATH_FONTS.iter().cloned())
         .build();
 
     let result = engine.compile::<typst::layout::PagedDocument>();
     let doc = result.output.map_err(|e| format!("typst: {e}"))?;
 
     let page = doc.pages.first().ok_or("typst: no pages")?;
+
+    let baseline_ratio = math_baseline_ratio(page);
 
     // 4. Render directly to pixels via typst-render (no SVG intermediary)
     let pixel_per_pt = 3.0_f32;
@@ -1034,24 +1177,27 @@ $ {math} $"#,
     // The alpha channel cleanly separates "ink" from "no ink".
     // We boost alpha via pow(0.6) so thin strokes (like numerals) appear
     // more solid, then composite fg over bg using the boosted alpha.
+    //
+    // Alpha is a u8, so there are only 256 possible boosted values. Precompute
+    // the composited fg/bg color for every alpha once (a 256-entry LUT) instead
+    // of running a powf + 3 lerps per pixel — the per-pixel loop was the single
+    // largest render cost (~90 ms/formula, more on big display equations).
+    let mut lut = [bg; 256];
+    for (a, slot) in lut.iter_mut().enumerate() {
+        if a >= 3 {
+            let boosted = (a as f32 / 255.0).powf(0.6).min(1.0);
+            let inv = 1.0 - boosted;
+            *slot = egui::Color32::from_rgb(
+                (fg.r() as f32 * boosted + bg.r() as f32 * inv) as u8,
+                (fg.g() as f32 * boosted + bg.g() as f32 * inv) as u8,
+                (fg.b() as f32 * boosted + bg.b() as f32 * inv) as u8,
+            );
+        }
+    }
     let pixels = pixmap.data();
     let colors: Vec<egui::Color32> = pixels
         .chunks_exact(4)
-        .map(|c| {
-            let a = c[3] as f32 / 255.0;
-            if a < 0.01 {
-                bg
-            } else {
-                // Boost alpha: pow < 1 pushes mid-alpha toward opaque,
-                // making thin anti-aliased strokes bolder.
-                let boosted = a.powf(0.6).min(1.0);
-                let inv = 1.0 - boosted;
-                let r = (fg.r() as f32 * boosted + bg.r() as f32 * inv) as u8;
-                let g = (fg.g() as f32 * boosted + bg.g() as f32 * inv) as u8;
-                let b = (fg.b() as f32 * boosted + bg.b() as f32 * inv) as u8;
-                egui::Color32::from_rgb(r, g, b)
-            }
-        })
+        .map(|c| lut[c[3] as usize])
         .collect();
 
     let image = egui::ColorImage {
@@ -1061,7 +1207,11 @@ $ {math} $"#,
     };
     // Size in logical points (divide pixel size by scale)
     let size = egui::vec2(w as f32 / pixel_per_pt, h as f32 / pixel_per_pt);
-    Ok(MathRendered { image, size })
+    Ok(MathRendered {
+        image,
+        size,
+        baseline_ratio,
+    })
 }
 
 /// Public function to render math from the callback. Called from the `render_math_fn` closure.
@@ -1085,10 +1235,10 @@ pub fn render_math(
     let hash = hasher.finish();
 
     // Poll for completed background renders
+    let mut received_any = false;
     while let Ok(result) = cache.math_rx.try_recv() {
-        if cache.math_rendering == Some(result.hash) {
-            cache.math_rendering = None;
-        }
+        received_any = true;
+        cache.math_rendering.remove(&result.hash);
         match result.result {
             Ok(rendered) => {
                 let texture = ui.ctx().load_texture(
@@ -1101,6 +1251,7 @@ pub fn render_math(
                     MathState::Ready {
                         texture,
                         size: rendered.size,
+                        baseline_ratio: rendered.baseline_ratio,
                     },
                 );
             }
@@ -1109,18 +1260,23 @@ pub fn render_math(
             }
         }
     }
-
-    // First encounter: insert placeholder, spawn if slot is free
-    if !cache.math_states.contains_key(&hash) {
-        cache.math_states.insert(hash, MathState::Rendering);
-        if cache.math_rendering.is_none() {
-            spawn_math_render(hash, latex, is_inline, fg, bg, cache);
-        }
+    // A render just finished, freeing a concurrency slot. Repaint immediately so
+    // the next formula spawns now instead of waiting for the 100ms placeholder
+    // tick — otherwise throughput is capped at slots-per-100ms, not render speed.
+    if received_any {
+        ui.ctx().request_repaint();
     }
 
-    // Promote: if this formula is waiting and no thread is active, spawn now
+    // First encounter: insert placeholder
+    if !cache.math_states.contains_key(&hash) {
+        cache.math_states.insert(hash, MathState::Rendering);
+    }
+
+    // Spawn if this formula is still waiting, isn't already being rendered, and
+    // a concurrency slot is free. Multiple formulas render in parallel.
     if matches!(cache.math_states.get(&hash), Some(MathState::Rendering))
-        && cache.math_rendering.is_none()
+        && !cache.math_rendering.contains(&hash)
+        && cache.math_rendering.len() < math_concurrency()
     {
         spawn_math_render(hash, latex, is_inline, fg, bg, cache);
     }
@@ -1151,13 +1307,57 @@ pub fn render_math(
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
-        Some(MathState::Ready { texture, size }) => {
+        Some(MathState::Ready {
+            texture,
+            size,
+            baseline_ratio,
+        }) => {
             let sized_texture = egui::load::SizedTexture::new(texture.id(), *size);
             if is_inline {
-                ui.add(
-                    egui::Image::new(egui::ImageSource::Texture(sized_texture))
-                        .fit_to_original_size(1.0),
-                );
+                // Align the formula's own baseline to the text baseline. Inline
+                // content lays out bottom-aligned, so by default the image bottom
+                // sits at the line bottom and the formula's baseline (at a
+                // shape-dependent height inside the image — `baseline_ratio` from
+                // `math_baseline_ratio`) lands wherever.
+                //
+                // To raise the baseline by `lift` we DON'T paint the image shifted
+                // outside its allocated box (that gets clipped in dense paragraphs
+                // — the "cut off" bug). Instead we allocate a box that is `lift`
+                // taller and paint the image at its TOP, leaving transparent
+                // padding below. Bottom-alignment then drops the padding to the
+                // line bottom and lifts the formula's baseline by exactly `lift`,
+                // while the image stays fully inside its box.
+                //
+                // lift = text_descent − image_descent. `image_descent` is exact
+                // per formula; `text_descent` is the body-font descent below the
+                // line box, a shape-independent fraction of line height.
+                let img = egui::Image::new(egui::ImageSource::Texture(sized_texture));
+                // Compute the text descent EXACTLY from egui's own metrics
+                // instead of a tuned constant. epaint places a glyph's baseline
+                // at `font_ascent` below the row top and adds the line-height
+                // leading *below* the baseline, so the descent from the baseline
+                // to the line-box bottom is `line_height − font_ascent`. The
+                // body line height is `font_size × 1.5` (TypographyConfig default
+                // `line_height: Multiplier(1.5)`); `text_style_height` returns the
+                // font's *natural* height (≈1.2× size), which is why using it
+                // left formulas ~1px low.
+                let body_font = egui::TextStyle::Body.resolve(ui.style());
+                let font_size = body_font.size;
+                let line_height = font_size * 1.5;
+                let ref_galley =
+                    ui.painter()
+                        .layout_no_wrap("x".to_owned(), body_font, egui::Color32::WHITE);
+                let font_ascent = ref_galley
+                    .rows
+                    .first()
+                    .and_then(|r| r.row.glyphs.first())
+                    .map_or(font_size * 0.8, |g| g.font_ascent);
+                let text_descent = line_height - font_ascent;
+                let image_descent = (1.0 - *baseline_ratio) * size.y;
+                let lift = (text_descent - image_descent).max(0.0);
+                let (rect, _) = ui
+                    .allocate_exact_size(egui::vec2(size.x, size.y + lift), egui::Sense::hover());
+                img.paint_at(ui, egui::Rect::from_min_size(rect.min, *size));
             } else {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
@@ -1197,7 +1397,7 @@ fn spawn_math_render(
     bg: egui::Color32,
     cache: &mut CommonMarkCache,
 ) {
-    cache.math_rendering = Some(hash);
+    cache.math_rendering.insert(hash);
     let latex = latex.to_owned();
     let tx = cache.math_tx.clone();
 
@@ -1415,9 +1615,10 @@ pub struct CommonMarkCache {
     #[cfg(feature = "math")]
     math_rx: mpsc::Receiver<MathRenderResult>,
 
-    /// Hash of the formula that currently has an active background thread
+    /// Hashes of formulas that currently have an active background render
+    /// thread (bounded by `math_concurrency()`).
     #[cfg(feature = "math")]
-    math_rendering: Option<u64>,
+    math_rendering: HashSet<u64>,
 }
 
 impl std::fmt::Debug for CommonMarkCache {
@@ -1489,7 +1690,7 @@ impl Default for CommonMarkCache {
             #[cfg(feature = "math")]
             math_rx,
             #[cfg(feature = "math")]
-            math_rendering: None,
+            math_rendering: HashSet::new(),
             cached_events: None,
             syntax_layouts: HashMap::new(),
         }

@@ -83,6 +83,8 @@ pub use egui_commonmark_backend_extended::misc::CommonMarkCache;
 pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 #[cfg(feature = "math")]
 pub use egui_commonmark_backend_extended::render_math;
+#[cfg(feature = "math")]
+pub use egui_commonmark_backend_extended::warm_math_fonts;
 
 #[cfg(feature = "macros")]
 pub use egui_commonmark_macros_extended::*;
