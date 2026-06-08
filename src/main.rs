@@ -23,6 +23,10 @@ use egui_mcp_bridge::{McpBridge, McpUiExt};
 
 const APP_KEY: &str = "md-viewer-state";
 
+// Welcome page recent-files: how many to keep, and how many to show before "Show more".
+const RECENT_FILES_CAP: usize = 20;
+const RECENT_SHOWN: usize = 6;
+
 /// Compiled regex for parsing markdown headers (lazy, compiled once)
 static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.+)$").unwrap());
 
@@ -168,6 +172,55 @@ fn content_default_width(full_width_content: bool) -> Option<usize> {
     }
 }
 
+/// A recently opened file, for the welcome page's "Recent" list.
+#[derive(Serialize, Deserialize, Clone)]
+struct RecentEntry {
+    path: PathBuf,
+    /// Seconds since the Unix epoch when the file was last opened.
+    last_opened: u64,
+}
+
+/// Current time in seconds since the Unix epoch (0 if the clock is before epoch).
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Push a path to the front of the recent list, deduped and capped (most-recent first).
+fn push_recent(list: &mut Vec<RecentEntry>, path: &Path, now: u64) {
+    list.retain(|e| e.path.as_path() != path);
+    list.insert(
+        0,
+        RecentEntry {
+            path: path.to_path_buf(),
+            last_opened: now,
+        },
+    );
+    list.truncate(RECENT_FILES_CAP);
+}
+
+/// Format an epoch-seconds timestamp as a short relative time ("3m ago").
+fn format_relative_time(epoch_secs: u64, now: u64) -> String {
+    let diff = now.saturating_sub(epoch_secs);
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86_400 {
+        format!("{}h ago", diff / 3600)
+    } else if diff < 172_800 {
+        "yesterday".to_string()
+    } else if diff < 604_800 {
+        format!("{}d ago", diff / 86_400)
+    } else if diff < 2_592_000 {
+        format!("{}w ago", diff / 604_800)
+    } else {
+        format!("{}mo ago", diff / 2_592_000)
+    }
+}
+
 /// Persisted state saved between sessions
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedState {
@@ -182,6 +235,7 @@ struct PersistedState {
     explorer_root: Option<PathBuf>,
     expanded_dirs: Option<Vec<PathBuf>>,
     explorer_sort_order: Option<SortOrder>,
+    recent_files: Option<Vec<RecentEntry>>,
 }
 
 /// Build the composite cache key for a header position lookup. Combines the
@@ -721,42 +775,6 @@ impl Tab {
             content_lines,
             local_links,
             base_uri,
-            history_back: Vec::new(),
-            history_forward: Vec::new(),
-            search_matches: Vec::new(),
-            content_version: 1,
-        }
-    }
-
-    fn from_sample() -> Self {
-        let content = SAMPLE_MARKDOWN.to_string();
-        let parsed = parse_headers(&content);
-        let local_links = parse_local_links(&content);
-        let content_lines = content.lines().count();
-
-        let mut cache = CommonMarkCache::default();
-        for link in &local_links {
-            cache.add_link_hook(link);
-        }
-
-        let sample_path = PathBuf::from("Welcome");
-        Self {
-            id: egui::Id::new("sample"),
-            base_uri: Self::compute_base_uri(&sample_path),
-            path: sample_path,
-            content,
-            cache,
-            document_title: parsed.document_title,
-            outline_headers: parsed.outline_headers,
-            collapsed_headers: HashSet::new(),
-            scroll_offset: 0.0,
-            pending_scroll_offset: None,
-            pending_header_click_key: None,
-            correct_active_search_pending: false,
-            last_content_height: 0.0,
-            last_viewport_height: 0.0,
-            content_lines,
-            local_links,
             history_back: Vec::new(),
             history_forward: Vec::new(),
             search_matches: Vec::new(),
@@ -1422,6 +1440,10 @@ struct MarkdownApp {
     lightbox_open_count: u64,
     // Find-bar state (current-document search)
     search: SearchState,
+    // Recently opened files (most-recent first), shown on the welcome page
+    recent_files: Vec<RecentEntry>,
+    // Welcome page: whether the recent list is expanded ("Show more")
+    welcome_show_all: bool,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -1492,15 +1514,11 @@ impl MarkdownApp {
                 .map(Tab::new)
                 .collect()
         } else {
-            // Show sample content
-            vec![Tab::from_sample()]
+            // No file and no saved session → start empty (welcome page).
+            Vec::new()
         };
 
-        let tabs = if initial_tabs.is_empty() {
-            vec![Tab::from_sample()]
-        } else {
-            initial_tabs
-        };
+        let tabs = initial_tabs;
 
         let active_tab = persisted
             .active_tab
@@ -1579,11 +1597,20 @@ impl MarkdownApp {
             lightbox_scroll: 0.0,
             lightbox_open_count: 0,
             search: SearchState::default(),
+            recent_files: persisted.recent_files.unwrap_or_default(),
+            welcome_show_all: false,
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
 
         app.refresh_open_tab_paths();
+
+        // Record a CLI-provided file as recent (an explicit open). Session-restored
+        // tabs are not treated as explicit opens, so they are not recorded here.
+        if let Some(f) = &file {
+            let f = f.canonicalize().unwrap_or_else(|_| f.clone());
+            app.record_recent(&f);
+        }
 
         if watch {
             app.start_watching();
@@ -1638,6 +1665,7 @@ impl MarkdownApp {
     fn open_in_new_tab(&mut self, path: PathBuf) {
         // Canonicalize for consistent comparison with existing tabs
         let path = path.canonicalize().unwrap_or(path);
+        self.record_recent(&path);
         // Check if already open
         if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
             self.active_tab = idx;
@@ -1658,9 +1686,13 @@ impl MarkdownApp {
         }
     }
 
+    /// Record a file in the recent list (most-recent first, deduped, capped).
+    fn record_recent(&mut self, path: &Path) {
+        push_recent(&mut self.recent_files, path, now_epoch_secs());
+    }
+
     fn close_tab(&mut self, idx: usize) {
-        if self.tabs.len() <= 1 {
-            // Don't close the last tab
+        if idx >= self.tabs.len() {
             return;
         }
 
@@ -1668,8 +1700,11 @@ impl MarkdownApp {
         self.title_dirty = true;
         self.refresh_open_tab_paths();
 
-        // Adjust active tab index
-        if self.active_tab >= self.tabs.len() {
+        // Adjust active tab index. Closing the last tab leaves `tabs` empty,
+        // which renders the welcome page (active_tab kept in range / at 0).
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+        } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         } else if self.active_tab > idx {
             self.active_tab -= 1;
@@ -2345,6 +2380,13 @@ impl MarkdownApp {
                     });
                 });
 
+            // Placeholder hint when no document is open (the welcome page is showing)
+            if tab_count == 0 {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("No file open").weak());
+                ui.add_space(4.0);
+            }
+
             // New tab button
             let new_tab_btn = ui.button("+").on_hover_text("New Tab (Ctrl+T)");
 
@@ -2603,6 +2645,138 @@ impl MarkdownApp {
     }
 
     /// Render the active tab's content
+    /// Render the welcome / idle page shown when no document is open (issue #28).
+    fn render_welcome(&mut self, ui: &mut egui::Ui) {
+        let mut do_open_file = false;
+        let mut do_open_folder = false;
+        let mut open_path: Option<PathBuf> = None;
+        let mut toggle_show_all = false;
+        let now = now_epoch_secs();
+
+        // Snapshot the entries to display so we don't borrow self while acting on clicks.
+        let shown = if self.welcome_show_all {
+            RECENT_FILES_CAP
+        } else {
+            RECENT_SHOWN
+        };
+        let recents: Vec<(RecentEntry, bool)> = self
+            .recent_files
+            .iter()
+            .take(shown)
+            .map(|e| (e.clone(), e.path.exists()))
+            .collect();
+        let total_recent = self.recent_files.len();
+        let show_all = self.welcome_show_all;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(64.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("📄").size(56.0).weak());
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("Open a file or folder")
+                            .size(22.0)
+                            .strong(),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("No document is open.").weak());
+                });
+                ui.add_space(18.0);
+                // Center the button row manually: a horizontal inside
+                // vertical_centered expands to full width, defeating centering.
+                ui.horizontal(|ui| {
+                    let avail = ui.available_width();
+                    ui.add_space(((avail - 230.0) / 2.0).max(0.0));
+                    if ui
+                        .button(egui::RichText::new("📂  Open File").size(15.0))
+                        .clicked()
+                    {
+                        do_open_file = true;
+                    }
+                    ui.add_space(10.0);
+                    if ui
+                        .button(egui::RichText::new("📁  Open Folder").size(15.0))
+                        .clicked()
+                    {
+                        do_open_folder = true;
+                    }
+                });
+
+                if !recents.is_empty() {
+                    ui.add_space(32.0);
+                    // Center a fixed-width, left-aligned column for the recent list.
+                    let avail = ui.available_width();
+                    let col_w = 560.0_f32.min((avail - 16.0).max(200.0));
+                    let margin = ((avail - col_w) / 2.0).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(margin);
+                        ui.vertical(|ui| {
+                            ui.set_max_width(col_w);
+                            ui.label(egui::RichText::new("Recent").strong());
+                            ui.add_space(2.0);
+                            ui.separator();
+                            for (entry, exists) in &recents {
+                                let name = entry
+                                    .path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| entry.path.to_string_lossy().to_string());
+                                let dir = entry
+                                    .path
+                                    .parent()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                let when = format_relative_time(entry.last_opened, now);
+                                ui.horizontal(|ui| {
+                                    let label =
+                                        egui::RichText::new(format!("📄 {name}")).size(14.0);
+                                    let label = if *exists { label } else { label.weak() };
+                                    let resp = ui
+                                        .add_enabled(*exists, egui::Button::new(label).frame(false))
+                                        .on_hover_text(entry.path.to_string_lossy());
+                                    if resp.clicked() {
+                                        open_path = Some(entry.path.clone());
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{dir}   ·   {when}"))
+                                            .weak()
+                                            .small(),
+                                    );
+                                });
+                            }
+                            if total_recent > RECENT_SHOWN {
+                                ui.add_space(6.0);
+                                let more = if show_all {
+                                    "Show less"
+                                } else {
+                                    "Show more…"
+                                };
+                                if ui.link(more).clicked() {
+                                    toggle_show_all = true;
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+
+        // Deferred actions (run after the borrow on self.recent_files is released).
+        if do_open_file {
+            self.open_file_dialog();
+        }
+        if do_open_folder {
+            self.open_folder_dialog();
+        }
+        if let Some(p) = open_path {
+            self.open_in_new_tab(p);
+        }
+        if toggle_show_all {
+            self.welcome_show_all = !self.welcome_show_all;
+        }
+    }
+
     fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
         let mut open_in_new_tab: Option<PathBuf> = None;
 
@@ -2610,7 +2784,11 @@ impl MarkdownApp {
         let search_is_open = self.search.is_open;
         let active_idx = self.search.active_match_index;
 
-        let tab = self.tabs.get_mut(self.active_tab)?;
+        // No document open → render the welcome / idle page instead.
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            self.render_welcome(ui);
+            return None;
+        };
 
         // Push current search match ranges into the cache so the renderer can paint highlights
         if search_is_open && !tab.search_matches.is_empty() {
@@ -3405,6 +3583,7 @@ impl eframe::App for MarkdownApp {
             explorer_root: self.file_explorer.root.clone(),
             expanded_dirs: Some(self.file_explorer.expanded_dirs.iter().cloned().collect()),
             explorer_sort_order: Some(self.file_explorer.sort_order),
+            recent_files: Some(self.recent_files.clone()),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -4202,98 +4381,47 @@ impl eframe::App for MarkdownApp {
     }
 }
 
-const SAMPLE_MARKDOWN: &str = r#"# Markdown Viewer
-
-A lightweight markdown viewer built with **egui** and **egui_commonmark**.
-
-## Features
-
-- Fast rendering at 60 FPS
-- Syntax highlighting for code blocks
-- GitHub Flavored Markdown support
-- **Tab-based interface** - open multiple documents
-
-## Keyboard Shortcuts
-
-### Tab Management
-
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+T | New tab (open file) |
-| Ctrl+W | Close current tab |
-| Ctrl+Tab | Next tab |
-| Ctrl+Shift+Tab | Previous tab |
-| Ctrl+1-9 | Switch to tab 1-9 |
-
-### Navigation
-
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+Click | Open link in new tab |
-| Alt+← / Alt+→ | Navigate back/forward |
-
-## Tables
-
-| Feature | Status | Notes |
-|:--------|:------:|------:|
-| Tables | ✓ | Left, center, right alignment |
-| Task lists | ✓ | Interactive checkboxes |
-| Strikethrough | ✓ | ~~deleted text~~ |
-| Footnotes | ✓ | See below[^1] |
-
-## Task List
-
-- [x] Project setup
-- [x] Core rendering
-- [x] File loading
-- [x] Live reload
-- [x] Theme toggle
-- [x] Custom tab system (no egui_dock)
-
-## Text Formatting
-
-Regular text with **bold**, *italic*, and ~~strikethrough~~.
-
-You can also combine ***bold and italic*** together.
-
-## Code Examples
-
-Inline code: `cargo build --release`
-
-```rust
-fn main() {
-    println!("Hello, markdown!");
-}
-```
-
-```python
-def greet(name: str) -> str:
-    return f"Hello, {name}!"
-```
-
-## Alerts
-
-> [!NOTE]
-> This is a note with helpful information.
-
-> [!TIP]
-> This is a tip for better usage.
-
-> [!IMPORTANT]
-> This is important information you should know.
-
-## Links
-
-Visit [egui](https://github.com/emilk/egui) for more information.
-
-## Footnotes
-
-[^1]: This is a footnote with additional details.
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_recent_dedupes_and_moves_to_front() {
+        let mut v = Vec::new();
+        push_recent(&mut v, Path::new("/a.md"), 100);
+        push_recent(&mut v, Path::new("/b.md"), 200);
+        push_recent(&mut v, Path::new("/a.md"), 300); // re-open a → moves to front, no dup
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].path, PathBuf::from("/a.md"));
+        assert_eq!(v[0].last_opened, 300);
+        assert_eq!(v[1].path, PathBuf::from("/b.md"));
+    }
+
+    #[test]
+    fn push_recent_caps_length_keeping_newest() {
+        let mut v = Vec::new();
+        for i in 0..(RECENT_FILES_CAP + 5) {
+            push_recent(&mut v, Path::new(&format!("/f{i}.md")), i as u64);
+        }
+        assert_eq!(v.len(), RECENT_FILES_CAP);
+        // The most recently pushed entry is at the front.
+        assert_eq!(
+            v[0].path,
+            PathBuf::from(format!("/f{}.md", RECENT_FILES_CAP + 4))
+        );
+    }
+
+    #[test]
+    fn relative_time_buckets() {
+        let now = 1_000_000u64;
+        assert_eq!(format_relative_time(now, now), "just now");
+        assert_eq!(format_relative_time(now - 120, now), "2m ago");
+        assert_eq!(format_relative_time(now - 7200, now), "2h ago");
+        assert_eq!(format_relative_time(now - 90_000, now), "yesterday");
+        assert_eq!(format_relative_time(now - 3 * 86_400, now), "3d ago");
+        // Clock skew (future timestamp) must not underflow.
+        assert_eq!(format_relative_time(now + 500, now), "just now");
+    }
 
     #[test]
     fn default_terminal_launch_detaches() {
