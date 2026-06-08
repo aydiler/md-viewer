@@ -1620,6 +1620,21 @@ impl MarkdownApp {
         }
     }
 
+    /// Open a native folder picker and point the file explorer at the chosen
+    /// directory (issue #28). The chosen root is persisted via `save()`.
+    fn open_folder_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            self.file_explorer.set_root(path);
+            // Make sure the explorer is visible so the result is seen.
+            self.show_explorer = true;
+            // Rebuild the watcher so the new root is watched recursively
+            // (`update_watched_paths` only reconciles tab paths, not the root).
+            if self.watch_enabled {
+                self.start_watching();
+            }
+        }
+    }
+
     fn open_in_new_tab(&mut self, path: PathBuf) {
         // Canonicalize for consistent comparison with existing tabs
         let path = path.canonicalize().unwrap_or(path);
@@ -3757,6 +3772,11 @@ impl eframe::App for MarkdownApp {
                         .clicked()
                     {
                         self.open_file_dialog();
+                        ui.close();
+                    }
+
+                    if ui.button("Open Folder...").clicked() {
+                        self.open_folder_dialog();
                         ui.close();
                     }
 
