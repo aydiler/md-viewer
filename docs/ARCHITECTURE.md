@@ -24,7 +24,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `cache: CommonMarkCache` - **must persist across frames** (never recreate per-frame, only reset on file load)
   - `document_title: Option<String>` - first h1 used as sidebar title
   - `outline_headers: Vec<Header>` - parsed headers for outline
-  - `scroll_offset`, `pending_scroll_offset`, `last_content_height` - scroll state
+  - `scroll_offset`, `pending_scroll_offset`, `last_content_height`, `last_viewport_height` - scroll state
   - `local_links: Vec<String>` - cached local markdown links
   - `history_back`, `history_forward: Vec<PathBuf>` - per-tab navigation history
 
@@ -54,6 +54,8 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 - **Link Navigation**: Uses egui_commonmark's link hook mechanism. Ctrl+Click opens links in new tabs, regular click navigates within the current tab.
 
 - **Search (Ctrl+F)**: Current-document find bar with inline highlights. `SearchState` lives on `MarkdownApp`; per-tab `search_matches: Vec<SearchMatch>` cache match byte ranges. Highlights are painted by the vendored `egui_commonmark` renderer via a new `CommonMarkCache::set_search_ranges` API; the renderer splits `Event::Text` and (non-wrapped) `Event::Code` at range boundaries and applies a background color to the matching segments. Enter/Shift+Enter cycle matches with line-ratio scroll-into-view; Esc closes the bar and clears highlights on all tabs.
+
+- **Keyboard document scrolling**: Plain document scroll keys are handled in `MarkdownApp::update` after mode-specific shortcuts are checked. `KeyboardScrollAction` maps Up/Down to fixed line steps and Page Up/Page Down to viewport-relative page steps through `keyboard_scroll_target`, which clamps against the active tab's `last_content_height`. The chosen target is assigned to the tab's `pending_scroll_offset`, so keyboard scrolling uses the same renderer-owned `ScrollArea` pipeline as outline and search jumps. Arrow keys are reserved for search-result navigation while the find bar is open, and document scrolling ignores Ctrl/Alt/Command-modified keypresses so it does not steal existing shortcuts.
 
 - **Wide table scrolling**: Wide markdown / HTML tables are wrapped in a nested `egui::ScrollArea::horizontal()` so columns wider than the content area can still be reached. Plain vertical wheel stays with the outer document scroller; table horizontal movement uses the bottom scrollbar, native horizontal input, or `Shift+vertical-wheel` (routed via `forward_shift_wheel_to_horizontal_scroll` in `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`) so the cursor crossing a wide table during normal scrolling does not change its horizontal offset.
 

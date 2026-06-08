@@ -48,5 +48,7 @@ The find bar also has on-screen `↑` and `↓` buttons next to the match count 
 | Ctrl++ / Ctrl+= | Zoom in |
 | Ctrl+- | Zoom out |
 | Ctrl+0 | Reset zoom to 100% |
+| ↑ / ↓ (when find bar is closed) | Scroll document up/down by line |
+| Page Up / Page Down | Scroll document up/down by page |
 | Ctrl+Scroll | Zoom in/out with mouse wheel |
 | Shift+Scroll over a wide table | Scroll the table horizontally |
