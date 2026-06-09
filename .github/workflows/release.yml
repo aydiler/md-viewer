@@ -34,6 +34,14 @@ jobs:
             exit 1
           fi
 
+      - name: Vendored fork is publishable to crates.io
+        # Fails the release if the vendored egui_commonmark fork's source differs
+        # from what is already published at its pinned version. crates.io is
+        # immutable, so without a fork version bump `cargo install md-viewer`
+        # would build against stale fork code (source builds — snap/AUR/binaries
+        # — use the local fork via [patch.crates-io] and are unaffected).
+        run: bash scripts/check-fork-publishable.sh
+
   build:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
