@@ -2,6 +2,13 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.13] - 2026-06-09
+
+### Packaging
+
+- **`cargo install` (crates.io) now ships the math-rendering fixes.** The vendored `egui_commonmark` fork had been pinned at `0.23.0` while its source changed across releases, so `cargo publish` resolved the fork from the registry and `cargo install md-viewer` built against the *older* fork code. (Source builds — snap, AUR, the GitHub binaries — use the local fork via `[patch.crates-io]` and were always current.) Bumped the fork to `0.24.0` and the root pin to match, so the publish job uploads the new fork version instead of skipping it as "already published." No functional changes versus 0.1.12.
+- **Guard against this recurring (#36).** `scripts/check-fork-publishable.sh` runs in the release `validate` job: for each vendored fork crate it diffs the local source against the published crate at the pinned version and fails the release (before any build) if they drift, so a stale crates.io build can't ship silently again.
+
 ## [0.1.12] - 2026-06-09
 
 ### Features
