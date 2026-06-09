@@ -28,6 +28,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **Tab System** - Open multiple documents with tab bar (Ctrl+Click links to open in new tab)
 - **In-Document Search (Ctrl+F)** - Find bar with inline highlights, Enter/Shift+Enter to cycle matches
 - **File Explorer** - Hierarchical sidebar with lazy-loading directories and sorting options
+- **Open Folder** - Use File → Open Folder… to choose and persist the file explorer root
 - **Outline Sidebar** - Click-to-navigate table of contents from document headers
 - **Navigation Buttons** - Back/forward buttons in title bar for quick history navigation
 - **Per-Tab History** - Independent back/forward navigation within each tab (Alt+Left/Right)
@@ -36,11 +37,13 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ### View
 - **Dark & Light Themes** - Toggle with Ctrl+D
 - **Zoom** - 50% to 300% zoom (Ctrl++/-/0 or Ctrl+Scroll)
+- **Keyboard Scrolling** - Scroll documents with ↑/↓ by line or Page Up/Page Down by page when the find bar is closed
 - **Live Reload** - Auto-refresh on file changes (enabled by default)
 
 ### Usability
 - **Drag and Drop** - Drop markdown files onto the window to open
-- **Native Dialogs** - System file picker integration
+- **Native Dialogs** - System file and folder picker integration
+- **Welcome Page & Recent Files** - Open files or folders from the idle screen and reopen recent documents
 - **Session Persistence** - Remembers open tabs, theme, zoom, and sidebar state
 - **Cross-Platform** - Works on X11 and Wayland
 
@@ -132,6 +135,8 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 | Ctrl++ / Ctrl+= | Zoom in |
 | Ctrl+- | Zoom out |
 | Ctrl+0 | Reset zoom to 100% |
+| ↑ / ↓ (when find bar is closed) | Scroll document up/down by line |
+| Page Up / Page Down | Scroll document up/down by page |
 | Ctrl+Scroll | Zoom with mouse wheel |
 | Shift+Scroll over a wide table | Scroll the table horizontally |
 
@@ -228,6 +233,8 @@ md-viewer --foreground README.md
 # Disable live reload
 md-viewer README.md --no-watch
 ```
+
+Run `md-viewer` with no file to start on the welcome page, then choose Open File, Open Folder, or a recent document. In the app, use File → Open File… or Ctrl+O to open a document, and File → Open Folder… to choose the file explorer root.
 
 When launched from a terminal, `md-viewer` detaches by default so the shell prompt is available while the window stays open. Use `--foreground` when you want terminal logs or blocking process behavior.
 
