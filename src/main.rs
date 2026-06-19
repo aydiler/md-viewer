@@ -1413,8 +1413,11 @@ struct MarkdownApp {
     watcher_retry_count: u32,
     // Set of paths being watched (individual tab files)
     watched_paths: HashSet<PathBuf>,
-    // Explorer root being watched (uses recursive mode for directory tree updates)
-    watched_explorer_root: Option<PathBuf>,
+    // Explorer directories being watched non-recursively: the root plus each
+    // currently-expanded directory. Mirrors the lazy explorer tree so startup
+    // doesn't recursively walk the whole root subtree (issue: ~6s hang on a
+    // huge home directory).
+    watched_explorer_dirs: HashSet<PathBuf>,
     // Tab being hovered for close button
     hovered_tab: Option<usize>,
     // File explorer state
@@ -1582,7 +1585,7 @@ impl MarkdownApp {
             watcher_rx: None,
             watcher_retry_count: 0,
             watched_paths: HashSet::new(),
-            watched_explorer_root: None,
+            watched_explorer_dirs: HashSet::new(),
             hovered_tab: None,
             file_explorer,
             show_explorer,
@@ -1781,6 +1784,25 @@ impl MarkdownApp {
         let has_local = !local_paths.is_empty() || (explorer_root.is_some() && !explorer_is_gvfs);
         let has_gvfs = !gvfs_paths.is_empty();
 
+        // Non-recursive: mirror the lazy explorer tree. Watching the whole root
+        // subtree recursively walks every directory on the main thread at startup
+        // (~6s hang on /home/ahmet, ~455k dirs). We only need change events for
+        // the directories the user can actually see: the root plus each expanded
+        // directory. GVFS explorer roots stay unwatched (costly over SFTP).
+        let mut explorer_dirs: Vec<PathBuf> = Vec::new();
+        if let Some(ref root) = explorer_root {
+            if !explorer_is_gvfs {
+                explorer_dirs.push(root.clone());
+                explorer_dirs.extend(
+                    self.file_explorer
+                        .expanded_dirs
+                        .iter()
+                        .filter(|d| !is_gvfs_path(d) && d.is_dir())
+                        .cloned(),
+                );
+            }
+        }
+
         // Both debouncers send to the same channel
         let (tx, debouncer_rx) = mpsc::channel();
 
@@ -1798,16 +1820,14 @@ impl MarkdownApp {
                             self.watched_paths.insert((*path).clone());
                         }
                     }
-                    if let Some(ref root) = explorer_root {
-                        if !explorer_is_gvfs {
-                            if let Err(e) = debouncer
-                                .watcher()
-                                .watch(root, notify::RecursiveMode::Recursive)
-                            {
-                                log::error!("Failed to watch explorer root {:?}: {}", root, e);
-                            } else {
-                                self.watched_explorer_root = Some(root.clone());
-                            }
+                    for dir in &explorer_dirs {
+                        if let Err(e) = debouncer
+                            .watcher()
+                            .watch(dir, notify::RecursiveMode::NonRecursive)
+                        {
+                            log::error!("Failed to watch explorer dir {:?}: {}", dir, e);
+                        } else {
+                            self.watched_explorer_dirs.insert(dir.clone());
                         }
                     }
                     Some(debouncer)
@@ -1870,10 +1890,10 @@ impl MarkdownApp {
             let local_count = local_paths.len();
             let gvfs_count = gvfs_paths.len();
             log::info!(
-                "Started watching {} local (inotify) + {} GVFS (poll) files, explorer root: {}",
+                "Started watching {} local (inotify) + {} GVFS (poll) files, {} explorer dirs",
                 local_count,
                 gvfs_count,
-                self.watched_explorer_root.is_some()
+                self.watched_explorer_dirs.len()
             );
 
             // Bridge thread: forward events and wake egui on demand
@@ -1906,7 +1926,7 @@ impl MarkdownApp {
         self.watcher = None;
         self.watcher_rx = None;
         self.watched_paths.clear();
-        self.watched_explorer_root = None;
+        self.watched_explorer_dirs.clear();
     }
 
     fn update_watched_paths(&mut self) {
@@ -1958,6 +1978,44 @@ impl MarkdownApp {
         }
 
         self.watched_paths = current_paths;
+    }
+
+    /// Reconcile the non-recursive explorer-directory watches (root + expanded
+    /// dirs) against the live watcher after the expanded set changes. Mirrors
+    /// `update_watched_paths`'s incremental diff so expand/collapse doesn't tear
+    /// down and rebuild the debouncer + bridge thread.
+    fn reconcile_explorer_watches(&mut self) {
+        if !self.watch_enabled {
+            return;
+        }
+
+        // Desired set: root + each expanded dir (local, still existing).
+        let mut desired: HashSet<PathBuf> = HashSet::new();
+        if let Some(root) = &self.file_explorer.root {
+            if !is_gvfs_path(root) {
+                desired.insert(root.clone());
+            }
+        }
+        for d in &self.file_explorer.expanded_dirs {
+            if !is_gvfs_path(d) && d.is_dir() {
+                desired.insert(d.clone());
+            }
+        }
+
+        if let Some(fw) = &mut self.watcher {
+            if let Some(w) = fw.inotify_watcher() {
+                for path in desired.difference(&self.watched_explorer_dirs) {
+                    if let Err(e) = w.watch(path, notify::RecursiveMode::NonRecursive) {
+                        log::error!("Failed to watch explorer dir {:?}: {}", path, e);
+                    }
+                }
+                for path in self.watched_explorer_dirs.difference(&desired) {
+                    let _ = w.unwatch(path);
+                }
+            }
+        }
+
+        self.watched_explorer_dirs = desired;
     }
 
     fn check_file_changes(&mut self) -> Vec<PathBuf> {
@@ -2995,6 +3053,7 @@ impl MarkdownApp {
                     );
                     if expand_btn.clicked() {
                         self.file_explorer.expand_all();
+                        self.reconcile_explorer_watches();
                     }
 
                     let collapse_btn = ui
@@ -3009,6 +3068,7 @@ impl MarkdownApp {
                     );
                     if collapse_btn.clicked() {
                         self.file_explorer.collapse_all();
+                        self.reconcile_explorer_watches();
                     }
 
                     if ui.small_button("↻").on_hover_text("Refresh").clicked() {
@@ -3090,6 +3150,9 @@ impl MarkdownApp {
                 self.file_explorer.tree = tree;
                 if let Some(ref dir_path) = action.dir_to_toggle {
                     self.file_explorer.toggle_expanded(dir_path);
+                    // Keep the non-recursive explorer watches in sync with the
+                    // newly expanded/collapsed directory.
+                    self.reconcile_explorer_watches();
                 }
             });
 
