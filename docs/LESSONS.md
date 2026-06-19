@@ -290,6 +290,16 @@ if watcher_error && recovery_count < 3 {
 ```
 **Files:** `src/main.rs`
 
+### Recursive watch of the explorer root froze startup (~6s) proportional to tree size
+**Context:** Launching md-viewer hung ~6s before the first frame whenever the file explorer root was a large tree. With `explorer_root = /home/ahmet` (454,709 dirs), KDE DrKonqi recorded an "application-not-responding" marker at the exact launch time.
+**Root cause:** `start_watching()` registered the explorer root with `notify::RecursiveMode::Recursive`. notify's inotify backend implements recursive watching by **walking the entire subtree and issuing one `inotify_add_watch` per directory, synchronously on the calling thread**. `start_watching()` runs inside `MarkdownApp::new()` *before* the eframe event loop, so the walk blocked the first paint. A cache-warm walk of `/home/ahmet` alone measured 6.11s; the watch also consumed ~87% of `max_user_watches` (524,288). The document being opened was irrelevant — any file triggered it.
+**Two things to keep separate:** the explorer *scan* (`scan_directory_shallow`) is already lazy/one-level and fine; only the *watch* recursed everything.
+**Fix:** Watch the root **plus each currently-expanded directory, non-recursively** — mirroring the lazy tree. A non-recursive inotify watch on dir `D` reports create/delete/modify of `D`'s direct entries, which is exactly what's visible. Keep watches in sync on expand/collapse via a new `reconcile_explorer_watches()` (incremental add/remove diff, same pattern as `update_watched_paths`), called after `toggle_expanded`/`expand_all`/`collapse_all`.
+**Why nothing breaks:** open-tab reload uses individual per-tab watches (independent of the root watch); the `path.starts_with(root)` tree-refresh trigger still fires for all visible dirs. Bonus: eliminates spurious whole-tree refreshes from invisible deep changes.
+**Result (Xvfb, isolated `XDG_DATA_HOME`):** time-to-window 6s → 0.11s; inotify watches ~455,000 → ~10 (root + tab + expanded dirs).
+**General lesson:** `notify`'s `RecursiveMode::Recursive` is O(directories) synchronous work at `watch()` time — never call it on an arbitrarily large/user-chosen root on a UI-blocking path. Watch only what's visible, or watch off-thread *and* bound the set.
+**Files:** `src/main.rs` (`start_watching`, `reconcile_explorer_watches`, `watched_explorer_dirs`), `docs/devlog/041-explorer-watch-nonrecursive.md`
+
 ---
 
 ## Path Resolution
