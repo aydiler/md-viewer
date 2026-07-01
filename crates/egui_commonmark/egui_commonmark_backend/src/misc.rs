@@ -446,6 +446,19 @@ static MERMAID_FONTDB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::
 });
 
 #[cfg(feature = "mermaid")]
+fn fix_double_escaped_xml_entities(svg: &str) -> String {
+    // merman's escape_xml_text double-escapes text that mermaid has already
+    // entity-escaped for HTML foreignObject content.
+    // e.g. "a > b" → mermaid "a &gt; b" → escape_xml_text "a &amp;gt; b"
+    // Fix: revert the second escaping so resvg renders the intended character.
+    svg.replace("&amp;lt;", "&lt;")
+        .replace("&amp;gt;", "&gt;")
+        .replace("&amp;amp;", "&amp;")
+        .replace("&amp;quot;", "&quot;")
+        .replace("&amp;apos;", "&apos;")
+}
+
+#[cfg(feature = "mermaid")]
 fn rasterize_mermaid_svg(svg_bytes: &[u8]) -> Option<(egui::ColorImage, egui::Vec2)> {
     let opts = resvg::usvg::Options {
         fontdb: Arc::clone(&MERMAID_FONTDB),
@@ -611,6 +624,7 @@ impl CodeBlock {
         std::thread::spawn(move || {
             let result = match renderer.render_svg_readable_sync(&content) {
                 Ok(Some(svg_string)) => {
+                    let svg_string = fix_double_escaped_xml_entities(&svg_string);
                     let svg_string = CodeBlock::sanitize_svg_font_family(&svg_string);
                     let svg_string = CodeBlock::strip_stroke_text(&svg_string);
                     let svg_string = CodeBlock::wrap_fallback_text(&svg_string);
