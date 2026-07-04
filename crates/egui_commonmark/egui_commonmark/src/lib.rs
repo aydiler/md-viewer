@@ -79,7 +79,7 @@ mod parsers;
 pub use egui_commonmark_backend_extended::RenderHtmlFn;
 pub use egui_commonmark_backend_extended::RenderMathFn;
 pub use egui_commonmark_backend_extended::alerts::{Alert, AlertBundle};
-pub use egui_commonmark_backend_extended::misc::CommonMarkCache;
+pub use egui_commonmark_backend_extended::misc::{CommonMarkCache, STRONG_FONT_FAMILY};
 pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 #[cfg(feature = "math")]
 pub use egui_commonmark_backend_extended::render_math;
@@ -241,6 +241,16 @@ impl<'f> CommonMarkViewer<'f> {
     }
 
     // ========== Typography Methods ==========
+
+    /// Opt into the named font family used for markdown strong text.
+    ///
+    /// Callers must register `STRONG_FONT_FAMILY` with egui before enabling
+    /// this option. The default stays off so generic library consumers do not
+    /// emit an unregistered font family for `**strong**` spans.
+    pub fn use_strong_font_family(mut self, enabled: bool) -> Self {
+        self.options.use_strong_font_family = enabled;
+        self
+    }
 
     /// Set line height as a multiplier of font size.
     ///

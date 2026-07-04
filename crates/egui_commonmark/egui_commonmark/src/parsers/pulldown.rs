@@ -1360,8 +1360,7 @@ impl CommonMarkViewerInternal {
             }
             t
         } else {
-            self.text_style
-                .to_richtext_with_typography(ui, &text, Some(&options.typography))
+            self.text_style.to_richtext_with_options(ui, &text, options)
         };
         if let Some(bg) = bg {
             rich_text = rich_text.background_color(bg);
@@ -1835,10 +1834,10 @@ impl CommonMarkViewerInternal {
                                                         .show(ui, |ui| {
                                                             let rich_text = self
                                                                 .text_style
-                                                                .to_richtext_with_typography(
+                                                                .to_richtext_with_options(
                                                                     ui,
                                                                     cell,
-                                                                    Some(&options.typography),
+                                                                    options,
                                                                 );
                                                             ui.label(rich_text);
                                                         });
@@ -1862,10 +1861,10 @@ impl CommonMarkViewerInternal {
                                                     .show(ui, |ui| {
                                                         let rich_text = self
                                                             .text_style
-                                                            .to_richtext_with_typography(
+                                                            .to_richtext_with_options(
                                                                 ui,
                                                                 cell,
-                                                                Some(&options.typography),
+                                                                options,
                                                             );
                                                         ui.label(rich_text);
                                                     });
