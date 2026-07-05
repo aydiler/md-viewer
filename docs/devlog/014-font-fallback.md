@@ -94,3 +94,28 @@ Test with documents containing:
 - [ ] User-configurable font paths
 - [ ] Font size scaling for different font families
 - [ ] Embed small emoji subset for systems without Noto Emoji
+
+---
+
+## 2026-07-04 Follow-up: Windows CJK fallback paths
+
+Issue #40 reported Chinese text rendering as missing glyphs on Windows 11 Home Chinese with the v0.1.13 Windows binary. The existing font fallback loader only knew common Linux Noto paths, so Windows builds had no CJK fallback unless egui's defaults happened to cover the glyphs.
+
+This follow-up extends `SYSTEM_FONT_PATHS` with common Windows CJK fonts:
+
+- Microsoft YaHei (`C:/Windows/Fonts/msyh.ttc`) for Simplified Chinese.
+- SimSun / NSimSun (`C:/Windows/Fonts/simsun.ttc`) for older Simplified Chinese installs.
+- DengXian (`C:/Windows/Fonts/Deng.ttf`) for another common Simplified Chinese UI font.
+- Microsoft JhengHei (`C:/Windows/Fonts/msjh.ttc`) for Traditional Chinese.
+- Yu Gothic (`C:/Windows/Fonts/YuGothM.ttc`) and Malgun Gothic (`C:/Windows/Fonts/malgun.ttf`) for broader CJK fallback coverage.
+
+Scope stays automatic fallback only. User-configurable font paths remain a future improvement rather than part of this bug-fix PR.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `git diff --check`
+
+Manual Windows rendering validation should be requested from a Windows user or maintainer because this development environment is Linux.

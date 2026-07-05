@@ -33,7 +33,7 @@ static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.
 /// Compiled regex for parsing markdown links (lazy, compiled once)
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
-/// System font paths for fallback (Arch Linux / common Linux paths)
+/// System font paths for fallback (Linux and Windows common paths)
 const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
     // Noto Sans for extended Latin, Greek, Cyrillic
     ("NotoSans", "/usr/share/fonts/noto/NotoSans-Regular.ttf"),
@@ -42,7 +42,7 @@ const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
         "NotoSans",
         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     ),
-    // CJK fonts (Chinese, Japanese, Korean)
+    // Linux CJK fonts (Chinese, Japanese, Korean)
     (
         "NotoSansCJK",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
@@ -55,6 +55,15 @@ const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
         "NotoSansCJK",
         "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
     ),
+    // Windows CJK fonts (Chinese, Japanese, Korean)
+    ("MicrosoftYaHei", "C:/Windows/Fonts/msyh.ttc"),
+    ("MicrosoftYaHeiUI", "C:/Windows/Fonts/msyh.ttc"),
+    ("SimSun", "C:/Windows/Fonts/simsun.ttc"),
+    ("NSimSun", "C:/Windows/Fonts/simsun.ttc"),
+    ("DengXian", "C:/Windows/Fonts/Deng.ttf"),
+    ("MicrosoftJhengHei", "C:/Windows/Fonts/msjh.ttc"),
+    ("YuGothic", "C:/Windows/Fonts/YuGothM.ttc"),
+    ("MalgunGothic", "C:/Windows/Fonts/malgun.ttf"),
     // Arabic
     (
         "NotoSansArabic",
