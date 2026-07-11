@@ -1228,6 +1228,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser, Debug)]
 #[command(name = "md-viewer")]
+#[command(version)]
 #[command(about = "A lightweight markdown viewer", long_about = None)]
 struct Args {
     /// Markdown file to open
@@ -4553,6 +4554,17 @@ mod tests {
         let help = Args::command().render_long_help().to_string();
         assert!(help.contains("--foreground"));
         assert!(!help.contains("--no-detach"));
+    }
+
+    #[test]
+    fn version_flag_reports_crate_version() {
+        use clap::CommandFactory;
+
+        let version = Args::command()
+            .get_version()
+            .expect("--version should be wired up")
+            .to_string();
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
