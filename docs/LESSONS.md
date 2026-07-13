@@ -100,6 +100,14 @@ egui_commonmark_extended = { features = ["svg", "svg_text", ...] }
 
 ---
 
+### Emoji shortcode expansion must preserve raw source identity
+**Context:** Issue #38 — render recognized GitHub shortcodes such as `:pushpin:` as emoji glyphs.
+**Problem:** Replacing shortcodes in the whole Markdown string changes byte offsets and can mutate code, links, image syntax, and heading identity before pulldown-cmark parses them. Replacing text without retaining raw spelling also breaks search ranges and duplicate-heading keys because `:pushpin:` is 9 source bytes while `📌` is 4 UTF-8 bytes.
+**Fix:** Expand only eligible `Event::Text` segments inside the renderer. Each scanner segment carries rendered text, raw spelling, and its absolute original source range. Advance the cursor by raw bytes. Keep replacement segments indivisible for painting: any search-range overlap highlights the whole glyph, with Active taking precedence. Feed the rendered glyph to `current_heading_rich_texts`, but feed the raw shortcode to `current_heading_text`. Skip image alt text and code blocks; route `Event::Code` through a separate literal-only highlight path so inline code keeps both source text and search highlights. Destinations, URLs, and malformed/unknown candidates remain literal.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `src/main.rs`, `docs/devlog/045-emoji-shortcodes.md`
+
+---
+
 ## egui
 
 ### CommonMarkCache must persist across frames
@@ -744,6 +752,12 @@ Belt-and-suspenders: keep `cargo publish --allow-dirty` in `scripts/publish-crat
 **Fix:** For new versions, prepend a `## [X.Y.Z] - YYYY-MM-DD` section manually using the existing entry style (rich prose with PR refs, root-cause + fix structure). git-cliff can be used as a *starting point* (`git-cliff --tag vX.Y.Z` to stdout) but the output requires heavy editing and shouldn't overwrite the file.
 **Recovery:** `git checkout CHANGELOG.md` if you accidentally regenerated.
 **Files:** `CHANGELOG.md`, `.claude/rules/release-workflow.md` (rule could be tightened with a "git-cliff for inspiration only" note).
+
+### Renderer transformations need borrowed unchanged fast paths
+**Context:** GitHub emoji shortcode expansion originally built a `Vec<EmojiTextSegment>` plus owned raw/rendered `String` values for every eligible `Event::Text`, then built another owned highlight vector.
+**Problem:** Most text events contain no recognized shortcode, so paint-time allocation churn paid transformation costs for unchanged content.
+**Fix:** Use direct visitor callbacks. Plain/raw slices borrow parser input, recognized emoji borrow static `Emoji::as_str()` values, and highlight splitting emits borrowed slices directly. Capture active-match Y during emission, then mutate cache only after immutable search-range borrows end. Tests collect owned snapshots only at the test boundary and use pointer identity to prove no-colon and unknown-only paths borrow original input.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`
 
 ---
 

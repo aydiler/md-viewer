@@ -13,7 +13,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ## Features
 
 ### Rendering
-- **GitHub Flavored Markdown** - Full GFM support including tables, task lists, and footnotes
+- **GitHub Flavored Markdown** - Full GFM support including tables, task lists, footnotes, and recognized emoji shortcodes such as `:pushpin:`
 - **LaTeX Math** - Inline `$…$` and display `$$…$$` equations rendered via typst + mitex — fractions, sub/superscripts, `\boxed`, accents, matrices, and more — sized and baseline-aligned to the surrounding text
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, and more rendered natively via [merman](https://github.com/Latias94/merman) (click to enlarge)
@@ -151,7 +151,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ### Quick Install (Linux / macOS) — recommended
 
-Downloads the prebuilt binary for your platform, verifies its SHA256, and installs to `~/.local/bin`. No compilation, takes seconds.
+Downloads the prebuilt binary for your platform, verifies its SHA256, and installs the binary to `~/.local/bin` plus bundled third-party notices under `~/.local/share/licenses/md-viewer`. No compilation, takes seconds.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aydiler/md-viewer/main/scripts/install.sh | sh
@@ -206,7 +206,8 @@ Compiles locally (~2–3 minutes). Update with `cargo install --force md-viewer`
 git clone https://github.com/aydiler/md-viewer
 cd md-viewer
 cargo build --release
-make install   # installs to ~/.local/bin (optional)
+make install     # installs to ~/.local/bin (optional)
+make uninstall   # removes the local installation
 ```
 
 ### System Dependencies (Arch Linux)
@@ -250,6 +251,7 @@ When launched from a terminal, `md-viewer` detaches by default so the shell prom
 
 - [eframe/egui](https://github.com/emilk/egui) - Immediate mode GUI framework
 - [egui_commonmark](https://github.com/lampsitter/egui_commonmark) - Markdown rendering (vendored fork with typography, math, and alignment improvements)
+- [emojis](https://crates.io/crates/emojis) - GitHub/gemoji shortcode lookup data (`(MIT OR Apache-2.0) AND Unicode-3.0`; see `THIRD_PARTY_NOTICES`)
 - [typst](https://github.com/typst/typst) + [mitex](https://github.com/mitex-rs/mitex) - LaTeX math rendering (LaTeX → typst → rasterized inline)
 - [merman](https://github.com/Latias94/merman) - Mermaid diagram rendering
 - [syntect](https://github.com/trishume/syntect) - Syntax highlighting

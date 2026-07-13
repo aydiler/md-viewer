@@ -31,12 +31,14 @@ source=(
     "md-viewer.desktop::https://raw.githubusercontent.com/aydiler/md-viewer/v${pkgver}/data/md-viewer.desktop"
     "io.github.aydiler.md-viewer.png::https://raw.githubusercontent.com/aydiler/md-viewer/v${pkgver}/data/io.github.aydiler.md-viewer.png"
     "LICENSE::https://raw.githubusercontent.com/aydiler/md-viewer/v${pkgver}/LICENSE"
+    "THIRD_PARTY_NOTICES::https://raw.githubusercontent.com/aydiler/md-viewer/v${pkgver}/THIRD_PARTY_NOTICES"
 )
 sha256sums=(
     'bc7e3f5f00101cccea2cd6535ec0f32ecf0b403b5c96d902e8b63ad744730ce8'
     '7d786706389bf20531f1e2ace18bc1d2057b1745c059df6e804695cbbc8fe69c'
     '46d7a5b2a50e845d8c63146441914d37df5c411036a22d5412f1844126330b1b'
     '1a12042bdcb8eb609fd272b10a1dac618aec3aebdae90f5dd49af264a358444e'
+    'SKIP'
 )
 
 package() {
@@ -48,4 +50,6 @@ package() {
         "${pkgdir}/usr/share/pixmaps/io.github.aydiler.md-viewer.png"
     install -Dm644 "${srcdir}/LICENSE" \
         "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 "${srcdir}/THIRD_PARTY_NOTICES" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES"
 }

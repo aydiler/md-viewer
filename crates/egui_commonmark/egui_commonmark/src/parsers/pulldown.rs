@@ -41,58 +41,157 @@ impl HighlightKind {
     }
 }
 
-/// Split `text` (covering `span` in the source) into segments tagged with the
-/// highlight kind that applies to each. Returns at least one segment.
-///
-/// Assumes `text.len() == span.len()` — caller is responsible for that check
-/// (markdown escapes or smart-punct transforms can break it).
-fn compute_highlight_segments(
-    text: &str,
+/// One borrowed visible segment plus its exact identity in raw Markdown source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EmojiTextSegment<'a> {
+    rendered: &'a str,
+    source_range: Range<usize>,
+    raw: &'a str,
+    replaced: bool,
+}
+
+/// Visit recognized `:shortcode:` replacements without allocating unchanged text.
+fn visit_emoji_text_segments<'a>(
+    text: &'a str,
+    span: &Range<usize>,
+    mut visit: impl FnMut(EmojiTextSegment<'a>),
+) {
+    // Transformed pulldown text cannot be mapped safely back to original source bytes.
+    if text.len() != span.len() {
+        visit(EmojiTextSegment {
+            rendered: text,
+            source_range: span.clone(),
+            raw: text,
+            replaced: false,
+        });
+        return;
+    }
+
+    let mut plain_start = 0usize;
+    let mut search_from = 0usize;
+    let mut replaced_any = false;
+
+    while let Some(open_rel) = text[search_from..].find(':') {
+        let open = search_from + open_rel;
+        let name_start = open + 1;
+        let Some(close_rel) = text[name_start..].find(':') else {
+            break;
+        };
+        let close = name_start + close_rel;
+        let name = &text[name_start..close];
+
+        if !name.is_empty() {
+            if let Some(emoji) = emojis::get_by_shortcode(name) {
+                if plain_start < open {
+                    visit(EmojiTextSegment {
+                        rendered: &text[plain_start..open],
+                        source_range: span.start + plain_start..span.start + open,
+                        raw: &text[plain_start..open],
+                        replaced: false,
+                    });
+                }
+
+                let raw_end = close + 1;
+                visit(EmojiTextSegment {
+                    rendered: emoji.as_str(),
+                    source_range: span.start + open..span.start + raw_end,
+                    raw: &text[open..raw_end],
+                    replaced: true,
+                });
+                replaced_any = true;
+                plain_start = raw_end;
+                search_from = raw_end;
+                continue;
+            }
+        }
+
+        // Keep unknown syntax literal while searching later openers in this event.
+        search_from = name_start;
+    }
+
+    if !replaced_any {
+        visit(EmojiTextSegment {
+            rendered: text,
+            source_range: span.clone(),
+            raw: text,
+            replaced: false,
+        });
+    } else if plain_start < text.len() {
+        visit(EmojiTextSegment {
+            rendered: &text[plain_start..],
+            source_range: span.start + plain_start..span.end,
+            raw: &text[plain_start..],
+            replaced: false,
+        });
+    }
+}
+
+/// Only ordinary visible text may expand; image alt text and code blocks stay literal.
+fn emoji_expansion_is_eligible(in_image: bool, in_code_block: bool) -> bool {
+    !in_image && !in_code_block
+}
+
+/// Resolve one indivisible replacement against source-authoritative search ranges.
+fn highlight_for_source_span(
+    source_span: &Range<usize>,
+    ranges: &[Range<usize>],
+    active: Option<&Range<usize>>,
+) -> HighlightKind {
+    let overlaps =
+        |range: &Range<usize>| range.start < source_span.end && source_span.start < range.end;
+
+    if active.is_some_and(overlaps) {
+        HighlightKind::Active
+    } else if ranges.iter().any(overlaps) {
+        HighlightKind::Match
+    } else {
+        HighlightKind::None
+    }
+}
+
+/// Visit borrowed text slices tagged with exact source-range highlighting.
+/// Assumes non-overlapping source ranges, matching app search production.
+fn visit_highlight_segments<'a>(
+    text: &'a str,
     span: &Range<usize>,
     ranges: &[Range<usize>],
     active: Option<&Range<usize>>,
-) -> Vec<(String, HighlightKind)> {
-    let mut overlaps: Vec<(usize, usize, HighlightKind)> = Vec::new();
-    for r in ranges {
-        let start = r.start.max(span.start);
-        let end = r.end.min(span.end);
+    mut visit: impl FnMut(&'a str, HighlightKind),
+) {
+    let mut cursor = 0usize;
+    let mut found = false;
+
+    for range in ranges {
+        let start = range.start.max(span.start);
+        let end = range.end.min(span.end);
         if start >= end {
             continue;
         }
+
         let local_start = start - span.start;
         let local_end = end - span.start;
-        let is_active = active.map(|a| a == r).unwrap_or(false);
-        let kind = if is_active {
+        if !text.is_char_boundary(local_start) || !text.is_char_boundary(local_end) {
+            continue;
+        }
+
+        found = true;
+        if local_start > cursor && text.is_char_boundary(cursor) {
+            visit(&text[cursor..local_start], HighlightKind::None);
+        }
+        let kind = if active == Some(range) {
             HighlightKind::Active
         } else {
             HighlightKind::Match
         };
-        overlaps.push((local_start, local_end, kind));
+        visit(&text[local_start..local_end], kind);
+        cursor = local_end;
     }
 
-    if overlaps.is_empty() {
-        return vec![(text.to_string(), HighlightKind::None)];
+    if !found {
+        visit(text, HighlightKind::None);
+    } else if cursor < text.len() && text.is_char_boundary(cursor) {
+        visit(&text[cursor..], HighlightKind::None);
     }
-
-    let mut segments = Vec::new();
-    let mut cursor = 0;
-    for (start, end, kind) in overlaps {
-        if start > cursor
-            && text.is_char_boundary(cursor)
-            && text.is_char_boundary(start)
-        {
-            segments.push((text[cursor..start].to_string(), HighlightKind::None));
-        }
-        if text.is_char_boundary(start) && text.is_char_boundary(end) {
-            segments.push((text[start..end].to_string(), kind));
-        }
-        cursor = end;
-    }
-    if cursor < text.len() && text.is_char_boundary(cursor) {
-        segments.push((text[cursor..].to_string(), HighlightKind::None));
-    }
-
-    segments
 }
 
 /// Split a long inline-code token into fixed-size chunks so the row-wrap layout
@@ -1238,7 +1337,8 @@ impl CommonMarkViewerInternal {
                 };
                 for segment in segments {
                     if let Some(ref span) = interior_span {
-                        self.event_text_with_highlights(
+                        // Inline code stays source-literal while retaining byte-range highlights.
+                        self.event_literal_text_with_highlights(
                             segment.into(),
                             span,
                             cache,
@@ -1325,13 +1425,14 @@ impl CommonMarkViewerInternal {
     }
 
     fn event_text(&mut self, text: CowStr, ui: &mut Ui, options: &CommonMarkOptions) {
-        self.emit_text(text, HighlightKind::None, ui, options);
+        self.emit_text(text, None, HighlightKind::None, ui, options);
     }
 
-    /// Like `event_text`, but applies a search-highlight background color when `hl` is not `None`.
+    /// Render text while optionally retaining a different raw spelling for heading identity.
     fn emit_text(
         &mut self,
         text: CowStr,
+        raw_heading_text: Option<&str>,
         hl: HighlightKind,
         ui: &mut Ui,
         options: &CommonMarkOptions,
@@ -1376,7 +1477,8 @@ impl CommonMarkViewerInternal {
             link.text.push(rich_text);
         } else if self.text_style.heading.is_some() {
             // Accumulate heading text for position tracking
-            self.current_heading_text.push_str(&text);
+            self.current_heading_text
+                .push_str(raw_heading_text.unwrap_or(&text));
             // Accumulate RichText - will render all at once in end_tag(Heading)
             self.current_heading_rich_texts.push(rich_text);
         } else {
@@ -1384,10 +1486,35 @@ impl CommonMarkViewerInternal {
         }
     }
 
-    /// Split `text` at search-match boundaries (using `span` to locate matches in the
-    /// source content) and emit each segment with the appropriate highlight. Falls back
-    /// to plain `event_text` when there are no ranges or `text.len() != span.len()`
-    /// (markdown escapes or smart-punct transforms can break the 1:1 byte mapping).
+    /// Render source-literal text while preserving fine-grained search highlighting.
+    fn event_literal_text_with_highlights(
+        &mut self,
+        text: CowStr,
+        span: &Range<usize>,
+        cache: &mut CommonMarkCache,
+        ui: &mut Ui,
+        options: &CommonMarkOptions,
+    ) {
+        // Emit borrowed slices directly; record captured active Y after cache borrows end.
+        let mut active_y = None;
+        visit_highlight_segments(
+            &text,
+            span,
+            cache.search_ranges(),
+            cache.active_search_range(),
+            |segment_text, hl| {
+                if hl == HighlightKind::Active {
+                    active_y = Some(ui.cursor().top());
+                }
+                self.emit_text(segment_text.into(), None, hl, ui, options);
+            },
+        );
+        if let Some(y) = active_y {
+            cache.record_active_search_y_viewport(y);
+        }
+    }
+
+    /// Expand eligible emoji shortcodes, then preserve source-based search semantics.
     fn event_text_with_highlights(
         &mut self,
         text: CowStr,
@@ -1396,22 +1523,44 @@ impl CommonMarkViewerInternal {
         ui: &mut Ui,
         options: &CommonMarkOptions,
     ) {
-        let ranges = cache.search_ranges();
-        if ranges.is_empty() || text.len() != span.len() {
+        if !emoji_expansion_is_eligible(self.image.is_some(), self.code_block.is_some()) {
             self.event_text(text, ui, options);
             return;
         }
-        let segments =
-            compute_highlight_segments(&text, span, ranges, cache.active_search_range());
-        for (segment_text, hl) in segments {
-            // Record the cursor y for the Active segment BEFORE emitting it, so the
-            // app can scroll to the active match's actual position (line-ratio
-            // estimates are unreliable in image-heavy docs).
-            if hl == HighlightKind::Active {
-                let vy = ui.cursor().top();
-                cache.record_active_search_y_viewport(vy);
+
+        // Emit borrowed source slices and static emoji strings directly.
+        let mut active_y = None;
+        visit_emoji_text_segments(&text, span, |segment| {
+            if segment.replaced {
+                // Replacement glyphs are indivisible, but overlap uses raw source range.
+                let hl = highlight_for_source_span(
+                    &segment.source_range,
+                    cache.search_ranges(),
+                    cache.active_search_range(),
+                );
+                if hl == HighlightKind::Active {
+                    active_y = Some(ui.cursor().top());
+                }
+                self.emit_text(segment.rendered.into(), Some(segment.raw), hl, ui, options);
+                return;
             }
-            self.emit_text(segment_text.into(), hl, ui, options);
+
+            // Plain source-preserving segments retain exact highlight splitting.
+            visit_highlight_segments(
+                segment.rendered,
+                &segment.source_range,
+                cache.search_ranges(),
+                cache.active_search_range(),
+                |segment_text, hl| {
+                    if hl == HighlightKind::Active {
+                        active_y = Some(ui.cursor().top());
+                    }
+                    self.emit_text(segment_text.into(), None, hl, ui, options);
+                },
+            );
+        });
+        if let Some(y) = active_y {
+            cache.record_active_search_y_viewport(y);
         }
     }
 
@@ -1880,5 +2029,374 @@ impl CommonMarkViewerInternal {
             });
         forward_shift_wheel_to_horizontal_scroll(ui, &mut scroll_out);
         self.line.try_insert_end(ui);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+
+    // Snapshot scanner output so ranges and raw/rendered identities stay explicit.
+    fn segment_snapshot(text: &str, start: usize) -> Vec<(String, Range<usize>, String, bool)> {
+        let mut snapshots = Vec::new();
+        visit_emoji_text_segments(text, &(start..start + text.len()), |segment| {
+            snapshots.push((
+                segment.rendered.to_owned(),
+                segment.source_range,
+                segment.raw.to_owned(),
+                segment.replaced,
+            ));
+        });
+        snapshots
+    }
+
+    // Collect highlight output only in tests; production emission stays borrowed.
+    fn highlight_snapshot(
+        text: &str,
+        span: &Range<usize>,
+        ranges: &[Range<usize>],
+        active: Option<&Range<usize>>,
+    ) -> Vec<(String, HighlightKind)> {
+        let mut snapshots = Vec::new();
+        visit_highlight_segments(text, span, ranges, active, |segment, kind| {
+            snapshots.push((segment.to_owned(), kind));
+        });
+        snapshots
+    }
+
+    // Exercise expansion at pulldown event boundaries without invoking egui painting.
+    fn expanded_visible_text(markdown: &str) -> String {
+        let mut visible = String::new();
+        let mut image_depth = 0usize;
+        let mut code_block_depth = 0usize;
+
+        for (event, span) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
+            match event {
+                Event::Start(Tag::Image { .. }) => image_depth += 1,
+                Event::End(pulldown_cmark::TagEnd::Image) => image_depth -= 1,
+                Event::Start(Tag::CodeBlock(_)) => code_block_depth += 1,
+                Event::End(pulldown_cmark::TagEnd::CodeBlock) => code_block_depth -= 1,
+                Event::Text(text)
+                    if emoji_expansion_is_eligible(image_depth > 0, code_block_depth > 0) =>
+                {
+                    visit_emoji_text_segments(&text, &span, |segment| {
+                        visible.push_str(segment.rendered);
+                    });
+                }
+                Event::Text(text) | Event::Code(text) => visible.push_str(&text),
+                _ => {}
+            }
+        }
+        visible
+    }
+
+    #[test]
+    fn no_colon_fast_path_borrows_original_text() {
+        let text = "plain text only";
+        let mut seen = 0;
+
+        visit_emoji_text_segments(text, &(7..7 + text.len()), |segment| {
+            seen += 1;
+            assert_eq!(segment.rendered.as_ptr(), text.as_ptr());
+            assert_eq!(segment.raw.as_ptr(), text.as_ptr());
+            assert_eq!(segment.source_range, 7..7 + text.len());
+            assert!(!segment.replaced);
+        });
+
+        assert_eq!(seen, 1);
+    }
+
+    #[test]
+    fn unknown_only_fast_path_borrows_original_text() {
+        let text = ":unknown: and :still_unknown:";
+        let mut seen = 0;
+
+        visit_emoji_text_segments(text, &(3..3 + text.len()), |segment| {
+            seen += 1;
+            assert_eq!(segment.rendered.as_ptr(), text.as_ptr());
+            assert_eq!(segment.raw.as_ptr(), text.as_ptr());
+            assert_eq!(segment.source_range, 3..3 + text.len());
+            assert!(!segment.replaced);
+        });
+
+        assert_eq!(seen, 1);
+    }
+
+    #[test]
+    fn plain_query_boundary_does_not_highlight_following_emoji() {
+        let text = "hello world :rocket:";
+        let span = 30..30 + text.len();
+        let world = 36..41;
+        let mut snapshots = Vec::new();
+
+        visit_emoji_text_segments(text, &span, |segment| {
+            if segment.replaced {
+                snapshots.push((
+                    segment.rendered.to_owned(),
+                    highlight_for_source_span(
+                        &segment.source_range,
+                        std::slice::from_ref(&world),
+                        None,
+                    ),
+                ));
+            } else {
+                snapshots.extend(highlight_snapshot(
+                    segment.rendered,
+                    &segment.source_range,
+                    std::slice::from_ref(&world),
+                    None,
+                ));
+            }
+        });
+
+        assert_eq!(
+            snapshots,
+            vec![
+                ("hello ".into(), HighlightKind::None),
+                ("world".into(), HighlightKind::Match),
+                (" ".into(), HighlightKind::None),
+                ("🚀".into(), HighlightKind::None),
+            ]
+        );
+    }
+
+    #[test]
+    fn emoji_segments_keep_absolute_raw_source_ranges() {
+        assert_eq!(
+            segment_snapshot("A :pushpin: B", 20),
+            vec![
+                ("A ".into(), 20..22, "A ".into(), false),
+                ("📌".into(), 22..31, ":pushpin:".into(), true),
+                (" B".into(), 31..33, " B".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn emoji_segments_support_multiple_and_adjacent_shortcodes() {
+        assert_eq!(
+            segment_snapshot(":rocket::pushpin:", 0),
+            vec![
+                ("🚀".into(), 0..8, ":rocket:".into(), true),
+                ("📌".into(), 8..17, ":pushpin:".into(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn emoji_segments_preserve_unknown_empty_and_unterminated_candidates() {
+        for text in [
+            ":not_a_gemoji:",
+            "::",
+            "prefix :pushpin",
+            "12:30",
+            "https://x:y",
+        ] {
+            assert_eq!(
+                segment_snapshot(text, 7),
+                vec![(text.into(), 7..7 + text.len(), text.into(), false)]
+            );
+        }
+    }
+
+    #[test]
+    fn emoji_segments_continue_after_unknown_candidates() {
+        assert_eq!(
+            segment_snapshot(":unknown: then :rocket:", 4),
+            vec![
+                (
+                    ":unknown: then ".into(),
+                    4..19,
+                    ":unknown: then ".into(),
+                    false
+                ),
+                ("🚀".into(), 19..27, ":rocket:".into(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn emoji_segments_are_utf8_safe_before_and_after_shortcode() {
+        assert_eq!(
+            segment_snapshot("é:pushpin:界", 10),
+            vec![
+                ("é".into(), 10..12, "é".into(), false),
+                ("📌".into(), 12..21, ":pushpin:".into(), true),
+                ("界".into(), 21..24, "界".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn emoji_segments_refuse_non_identity_source_mapping() {
+        let mut snapshots = Vec::new();
+        visit_emoji_text_segments("📌", &(10..19), |segment| {
+            snapshots.push((
+                segment.rendered.to_owned(),
+                segment.source_range,
+                segment.raw.to_owned(),
+                segment.replaced,
+            ));
+        });
+        assert_eq!(snapshots, vec![("📌".into(), 10..19, "📌".into(), false)]);
+    }
+
+    #[test]
+    fn replacement_highlight_is_indivisible_for_any_source_overlap() {
+        let source = 22..31;
+        assert_eq!(
+            highlight_for_source_span(&source, &[25..26], None),
+            HighlightKind::Match
+        );
+        assert_eq!(
+            highlight_for_source_span(&source, &[0..100], None),
+            HighlightKind::Match
+        );
+    }
+
+    #[test]
+    fn active_overlap_wins_over_regular_match() {
+        assert_eq!(
+            highlight_for_source_span(&(22..31), &[22..31], Some(&(24..25))),
+            HighlightKind::Active
+        );
+    }
+
+    #[test]
+    fn disjoint_source_ranges_do_not_highlight_replacement() {
+        assert_eq!(
+            highlight_for_source_span(&(22..31), &[0..22, 31..40], None),
+            HighlightKind::None
+        );
+    }
+
+    #[test]
+    fn emoji_expansion_eligibility_excludes_images_and_code_blocks() {
+        assert!(emoji_expansion_is_eligible(false, false));
+        assert!(!emoji_expansion_is_eligible(true, false));
+        assert!(!emoji_expansion_is_eligible(false, true));
+        assert!(!emoji_expansion_is_eligible(true, true));
+    }
+
+    #[test]
+    fn eligible_markdown_text_and_link_labels_expand() {
+        let markdown = "Paragraph :pushpin: *:rocket:* [:pushpin:](https://e/:rocket:)";
+        assert_eq!(expanded_visible_text(markdown), "Paragraph 📌 🚀 📌");
+    }
+
+    #[test]
+    fn production_inline_code_stays_literal_and_keeps_source_highlighting() {
+        // Drive the production Event::Code branch and inspect its heading accumulator output.
+        egui::__run_test_ui(|ui| {
+            let markdown = "`:pushpin:`";
+            let mut renderer = CommonMarkViewerInternal::new();
+            let mut cache = CommonMarkCache::default();
+            cache.set_search_ranges(std::iter::once(1..10).collect());
+            cache.set_active_search_range(Some(1..10));
+            renderer.text_style.heading = Some(1);
+
+            renderer.event(
+                ui,
+                Event::Code(":pushpin:".into()),
+                0..markdown.len(),
+                &mut cache,
+                &CommonMarkOptions::default(),
+                540.0,
+            );
+
+            assert_eq!(renderer.current_heading_rich_texts.len(), 1);
+            assert_eq!(renderer.current_heading_rich_texts[0].text(), ":pushpin:");
+            assert_eq!(renderer.current_heading_text, ":pushpin:");
+            assert!(
+                cache.active_search_y().is_some(),
+                "inline-code active search range was not recorded"
+            );
+        });
+    }
+
+    #[test]
+    fn production_heading_accumulates_emoji_display_and_raw_shortcode_identity() {
+        // Drive production Event::Text while heading mode is active.
+        egui::__run_test_ui(|ui| {
+            let mut renderer = CommonMarkViewerInternal::new();
+            let mut cache = CommonMarkCache::default();
+            renderer.text_style.heading = Some(1);
+
+            renderer.event(
+                ui,
+                Event::Text("Pin :pushpin:".into()),
+                3..16,
+                &mut cache,
+                &CommonMarkOptions::default(),
+                540.0,
+            );
+
+            let display: String = renderer
+                .current_heading_rich_texts
+                .iter()
+                .map(|text| text.text())
+                .collect();
+            assert_eq!(display, "Pin 📌");
+            assert_eq!(renderer.current_heading_text, "Pin :pushpin:");
+        });
+    }
+
+    #[test]
+    fn production_duplicate_shortcode_headings_use_raw_occurrence_keys() {
+        // Run complete heading start/text/end production events twice against one cache.
+        egui::__run_test_ui(|ui| {
+            let mut renderer = CommonMarkViewerInternal::new();
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+
+            for _ in 0..2 {
+                renderer.start_tag(
+                    ui,
+                    Tag::Heading {
+                        level: HeadingLevel::H2,
+                        id: None,
+                        classes: Vec::new(),
+                        attrs: Vec::new(),
+                    },
+                    &options,
+                );
+                renderer.event(
+                    ui,
+                    Event::Text("Pin :pushpin:".into()),
+                    3..16,
+                    &mut cache,
+                    &options,
+                    540.0,
+                );
+                renderer.end_tag(
+                    ui,
+                    pulldown_cmark::TagEnd::Heading(HeadingLevel::H2),
+                    &mut cache,
+                    &options,
+                    540.0,
+                );
+            }
+
+            assert!(cache.get_header_position("pin :pushpin:").is_some());
+            assert!(cache.get_header_position("pin :pushpin:#1").is_some());
+            assert!(cache.get_header_position("pin 📌").is_none());
+            assert!(cache.get_header_position("pin 📌#1").is_none());
+        });
+    }
+
+    #[test]
+    fn inline_fenced_and_indented_code_remain_literal() {
+        let markdown = "`:pushpin:`\n\n```text\n:rocket:\n```\n\n    :pushpin:\n";
+        assert_eq!(
+            expanded_visible_text(markdown),
+            ":pushpin::rocket:\n:pushpin:\n"
+        );
+    }
+
+    #[test]
+    fn image_alt_text_and_url_remain_literal() {
+        let markdown = "![:pushpin:](https://e/:rocket:.png)";
+        assert_eq!(expanded_visible_text(markdown), ":pushpin:");
     }
 }

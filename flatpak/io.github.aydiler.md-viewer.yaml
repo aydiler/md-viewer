@@ -49,6 +49,9 @@ modules:
       - cargo --offline build --release --verbose
       # Install binary
       - install -Dm755 target/release/md-viewer /app/bin/md-viewer
+      # Install license and third-party attribution notices
+      - install -Dm644 LICENSE /app/share/licenses/md-viewer/LICENSE
+      - install -Dm644 THIRD_PARTY_NOTICES /app/share/licenses/md-viewer/THIRD_PARTY_NOTICES
       # Install desktop file under the new app-id name
       - install -Dm644 data/md-viewer.desktop /app/share/applications/io.github.aydiler.md-viewer.desktop
       # Rewrite the Icon= line to reference our app-id icon
