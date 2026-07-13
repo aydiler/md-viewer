@@ -1444,6 +1444,11 @@ impl CommonMarkViewerInternal {
                 self.is_blockquote = true;
             }
             pulldown_cmark::Tag::CodeBlock(c) => {
+                // List items render in one horizontal_wrapped row; end it before a block widget.
+                if self.list.is_inside_a_list() {
+                    ui.end_row();
+                }
+
                 match c {
                     pulldown_cmark::CodeBlockKind::Fenced(lang) => {
                         self.code_block = Some(crate::CodeBlock {
@@ -1632,6 +1637,11 @@ impl CommonMarkViewerInternal {
             pulldown_cmark::TagEnd::BlockQuote(_) => {}
             pulldown_cmark::TagEnd::CodeBlock => {
                 self.end_code_block(ui, cache, options, max_width);
+
+                // Keep any following list-item text below the completed block widget.
+                if self.list.is_inside_a_list() {
+                    ui.end_row();
+                }
             }
 
             pulldown_cmark::TagEnd::List(_) => {

@@ -3,28 +3,85 @@
 //! overlapped surrounding text at narrow widths. See pulldown.rs
 //! `inline_code_wrap_segments`.
 
-use egui::{Context, Rect, TextStyle};
+use egui::{Context, Rect, Shape, TextStyle};
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 
-fn render(markdown: &str, width: f32) -> (Rect, f32) {
-    let ctx = Context::default();
-    let mut body_rect = Rect::NOTHING;
+#[derive(Debug)]
+struct PaintedText {
+    text: String,
+    rect: Rect,
+}
 
-    // Two passes: egui caches font/layout state on the first pass.
-    for _ in 0..2 {
+fn collect_painted_text(shape: &Shape, painted: &mut Vec<PaintedText>) {
+    // Text can be emitted directly or nested in a grouped Shape::Vec.
+    match shape {
+        Shape::Text(text) => painted.push(PaintedText {
+            text: text.galley.job.text.clone(),
+            rect: text.galley.rect.translate(text.pos.to_vec2()),
+        }),
+        Shape::Vec(shapes) => {
+            for shape in shapes {
+                collect_painted_text(shape, painted);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_geometry(markdown: &str, width: f32) -> (Rect, f32, Vec<PaintedText>) {
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    let mut body_rect = Rect::NOTHING;
+    let mut painted = Vec::new();
+
+    // Two passes let egui settle font/layout caches before geometry is asserted.
+    for pass in 0..2 {
         ctx.begin_pass(Default::default());
         egui::CentralPanel::default().show(&ctx, |ui| {
             ui.set_width(width);
-            let mut cache = CommonMarkCache::default();
             let response = CommonMarkViewer::new().show(ui, &mut cache, markdown);
             body_rect = response.response.rect;
         });
-        let _ = ctx.end_pass();
+        let output = ctx.end_pass();
+
+        // Only final-pass positions represent the settled layout.
+        if pass == 1 {
+            for clipped in output.shapes {
+                collect_painted_text(&clipped.shape, &mut painted);
+            }
+        }
     }
 
     let body_id = TextStyle::Body.resolve(&ctx.style());
-    let row_height = ctx.fonts_mut(|f| f.row_height(&body_id));
+    let row_height = ctx.fonts_mut(|fonts| fonts.row_height(&body_id));
+    (body_rect, row_height, painted)
+}
+
+fn render(markdown: &str, width: f32) -> (Rect, f32) {
+    let (body_rect, row_height, _) = render_geometry(markdown, width);
     (body_rect, row_height)
+}
+
+fn text_rect(painted: &[PaintedText], marker: &str) -> Rect {
+    painted
+        .iter()
+        .find(|entry| entry.text.contains(marker))
+        .unwrap_or_else(|| panic!("missing painted marker {marker:?}: {painted:#?}"))
+        .rect
+}
+
+fn assert_vertical_order(painted: &[PaintedText], markers: &[&str]) {
+    // Strict top-to-bottom order detects same-row overlap at either block edge.
+    for pair in markers.windows(2) {
+        let upper = text_rect(painted, pair[0]);
+        let lower = text_rect(painted, pair[1]);
+        assert!(
+            upper.bottom() <= lower.top(),
+            "expected {:?} above {:?}, got upper={upper:?} lower={lower:?}",
+            pair[0],
+            pair[1]
+        );
+    }
 }
 
 #[test]
@@ -150,4 +207,94 @@ fn deeply_nested_list_renders() {
     assert!(rect.height() > 0.0, "deeply nested list rect was empty: {rect:?}");
     let rect2 = render_scrollable(md, 540.0, 200.0, None);
     assert!(rect2.height() > 0.0, "deeply nested via scrollable empty: {rect2:?}");
+}
+
+#[test]
+fn list_code_block_uses_separate_rows() {
+    let markdown = "- ISSUE44_BEFORE\n  ```sh\n  ISSUE44_CODE\n  ```\n  ISSUE44_AFTER";
+    let (_, _, painted) = render_geometry(markdown, 540.0);
+
+    // The issue #44 block and trailing text must each occupy later rows.
+    assert_vertical_order(
+        &painted,
+        &["ISSUE44_BEFORE", "ISSUE44_CODE", "ISSUE44_AFTER"],
+    );
+}
+
+#[test]
+fn ordered_list_code_block_uses_separate_rows() {
+    let markdown = "1. ORDERED_BEFORE\n   ```text\n   ORDERED_CODE\n   ```\n   ORDERED_AFTER";
+    let (_, _, painted) = render_geometry(markdown, 540.0);
+
+    // Ordered-list markers use the same list runtime state as bullets.
+    assert_vertical_order(
+        &painted,
+        &["ORDERED_BEFORE", "ORDERED_CODE", "ORDERED_AFTER"],
+    );
+}
+
+#[test]
+fn code_only_list_item_renders_without_overlap_or_panic() {
+    let markdown = "- ```text\n  CODE_ONLY_MARKER\n  ```";
+    let (_, _, painted) = render_geometry(markdown, 540.0);
+
+    // Successful rendering and a visible marker cover the no-panic contract.
+    let code = text_rect(&painted, "CODE_ONLY_MARKER");
+    assert!(
+        code.is_positive(),
+        "code-only block has no painted area: {code:?}"
+    );
+}
+
+#[test]
+fn multiple_code_blocks_in_one_item_keep_row_order() {
+    let markdown = "- MULTI_BEFORE\n  ```text\n  MULTI_CODE_ONE\n  ```\n  MULTI_BETWEEN\n  ```text\n  MULTI_CODE_TWO\n  ```\n  MULTI_AFTER";
+    let (_, _, painted) = render_geometry(markdown, 540.0);
+
+    // Each block has independent before/after boundaries inside one item.
+    assert_vertical_order(
+        &painted,
+        &[
+            "MULTI_BEFORE",
+            "MULTI_CODE_ONE",
+            "MULTI_BETWEEN",
+            "MULTI_CODE_TWO",
+            "MULTI_AFTER",
+        ],
+    );
+}
+
+#[test]
+fn nested_list_code_blocks_keep_order_and_deeper_indentation() {
+    let markdown = "- OUTER_BEFORE\n  ```text\n  OUTER_CODE\n  ```\n  - NESTED_BEFORE\n    ```text\n    NESTED_CODE\n    ```\n    NESTED_AFTER\n- OUTER_AFTER";
+    let (_, _, painted) = render_geometry(markdown, 540.0);
+
+    // Nested list processing must remain balanced and vertically ordered.
+    assert_vertical_order(
+        &painted,
+        &[
+            "OUTER_BEFORE",
+            "OUTER_CODE",
+            "NESTED_BEFORE",
+            "NESTED_CODE",
+            "NESTED_AFTER",
+            "OUTER_AFTER",
+        ],
+    );
+
+    let outer_code = text_rect(&painted, "OUTER_CODE");
+    let nested_code = text_rect(&painted, "NESTED_CODE");
+    assert!(
+        nested_code.left() > outer_code.left(),
+        "nested code lost list indentation: outer={outer_code:?} nested={nested_code:?}"
+    );
+}
+
+#[test]
+fn top_level_code_block_layout_remains_separate() {
+    let markdown = "TOP_BEFORE\n\n```text\nTOP_CODE\n```\n\nTOP_AFTER";
+    let (_, _, painted) = render_geometry(markdown, 540.0);
+
+    // This control is already green before the fix and protects the list-only gate.
+    assert_vertical_order(&painted, &["TOP_BEFORE", "TOP_CODE", "TOP_AFTER"]);
 }
