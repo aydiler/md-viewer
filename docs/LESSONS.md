@@ -142,6 +142,19 @@ fn setup_fonts(ctx: &egui::Context) {
 ```
 **Files:** `src/main.rs`
 
+### Windows CJK fallback needs Windows font paths
+**Context:** Issue #40 reported Chinese text missing on Windows 11 even though Linux Noto CJK fallback paths existed.
+**Problem:** `setup_fonts()` only loads files from paths listed in `SYSTEM_FONT_PATHS`. Linux Noto paths do nothing on Windows, so Windows builds can still miss CJK glyphs.
+**Fix:** Add common Windows CJK font files to the same fallback list, keeping the existing loader and no manual config:
+```rust
+("MicrosoftYaHei", "C:/Windows/Fonts/msyh.ttc"),
+("SimSun", "C:/Windows/Fonts/simsun.ttc"),
+("DengXian", "C:/Windows/Fonts/Deng.ttf"),
+("MicrosoftJhengHei", "C:/Windows/Fonts/msjh.ttc"),
+```
+**Scope:** This is automatic fallback only. User-configurable font paths are a separate feature because they need UI/persistence/design work.
+**Files:** `src/main.rs`
+
 ### egui 0.33 FontData requires Arc wrapper
 **Context:** Compiler error when adding fonts
 **Problem:** `fonts.font_data.insert()` expects `Arc<FontData>`, not `FontData`
