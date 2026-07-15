@@ -2,6 +2,30 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.14] - 2026-07-15
+
+### Features
+
+- **GitHub emoji shortcodes (#38, PR #49, contributed by [@aki1ro](https://github.com/aki1ro)).** Recognized gemoji shortcodes in visible Markdown text now render as Unicode emoji (`:pushpin:` → 📌). Expansion happens on `Event::Text` only, after pulldown-cmark has parsed the document, so Markdown syntax, source offsets, search ranges, and heading identity stay authoritative (code, links, image alt-text, and URLs are left literal).
+
+### Bug Fixes
+
+- **`**bold**` now renders with visible weight (#39, PRs #42 + #51).** md-viewer registers a `MarkdownStrong` font family backed by a real bold face and makes **Noto Sans** the primary body face, so bold shares the body baseline instead of falling back to egui's Ubuntu-Light (which had no matching bold).
+- **List markers are vertically centred on their item text (PR #50).** The `•` bullet, hollow `◦` nested bullet, and `N.` number sat above the optical centre of the item text on every bullet/ordered list; they now align to the text's line box.
+- **Fenced code blocks inside list items no longer overlap adjacent text (#44, PR #48, contributed by [@aki1ro](https://github.com/aki1ro)).** The renderer ends the active wrapped list row immediately before and after each fenced code block; top-level code blocks are unaffected.
+- **Inline `code` sits on the shared text baseline at body size (#46, PR #52).** It previously rendered smaller than and raised above the surrounding body text.
+- **Narrow tables hug their columns (#47, PR #53).** A table narrower than the content area no longer stretches its bordered frame to full width with an empty gap after the last column; wide-table horizontal scrolling is unchanged.
+- **Chinese/Japanese/Korean text renders on Windows (#40, PR #43, contributed by [@aki1ro](https://github.com/aki1ro)).** Added common Windows CJK font files (MicrosoftYaHei, SimSun, DengXian, MicrosoftJhengHei) to the automatic fallback list.
+- **Mermaid diagram text with special characters renders correctly (PR #41, contributed by [@MCXCC303](https://github.com/MCXCC303)).** Handles the five double-escaped XML characters produced by the Mermaid→HTML→SVG path.
+
+### Performance
+
+- **Startup no longer hangs ~6 s on a large explorer root.** `start_watching()` registered the explorer root with `notify`'s recursive mode, which synchronously walks the entire subtree on the UI-blocking startup path (~455k inotify watches on `/home/ahmet`). The watcher now covers the root plus each expanded directory non-recursively, mirroring the lazy tree — time-to-window dropped from ~6 s to ~0.11 s and inotify watches from ~455k to ~10.
+
+### Documentation
+
+- Refreshed README notes on recent UI changes (#37).
+
 ## [0.1.13] - 2026-06-09
 
 ### Packaging
