@@ -586,6 +586,17 @@ objdump -T target/release/md-viewer | grep -oE 'GLIBC_[0-9.]+' | sort -u | tail
 ```
 **Files:** `snap/snapcraft.yaml`, `.github/workflows/release.yml`
 
+### snapcraft renamed `push-metadata` → `upload-metadata` (the whole `push` verb family)
+**Context:** v0.1.14 release. The **Publish to Snap Store** job went red, but the snap itself published fine — `snapcore/action-publish@v1` logged `Revision 17 created for 'md-viewer' and released to 'stable'`. The failure was the *next* step, "Push snap store listing metadata", which runs `snapcraft push-metadata "${SNAP_FILE}" --force`:
+```
+Error: no such command 'push-metadata', maybe you meant 'upload-metadata'
+```
+**Root cause:** the step does `sudo snap install snapcraft --classic` (tracks *latest*), and newer snapcraft renamed the entire `push` verb family to `upload` (`push` → `upload`, `push-metadata` → `upload-metadata`). This worked at v0.1.13 (~5 weeks earlier) because the runner's snapcraft was older — **environmental drift**, not anything the release commit changed. It would now fail on every release.
+**Fix:** `snapcraft upload-metadata "${SNAP_FILE}" --force` — identical positional `<snap-file>` and `--force` flag, just the renamed verb.
+**Non-impact:** the snap upload is a *separate* step (`action-publish`) that already succeeded, so users got the new revision regardless; only the store-listing description sync (unchanged from prior releases anyway) was skipped. The overall run still shows red because of the one trailing step.
+**Guard for next time:** consider pinning `snap install snapcraft --classic --channel=8.x/stable` in this step so the verb surface can't drift out from under the release again.
+**Files:** `.github/workflows/release.yml` (Push snap store listing metadata step), `docs/devlog/050-snap-upload-metadata-verb.md`
+
 ### `to_ascii_lowercase` preserves byte offsets; `to_lowercase` doesn't
 **Context:** Implementing case-insensitive substring search (`find_matches`) that returns byte ranges into the original content.
 **Problem:** `str::to_lowercase` does Unicode case folding which can *change byte length* (e.g. `"İ".to_lowercase() == "i̇"` — adds a combining mark). Any match offsets computed against the folded string would point at the wrong bytes in the original.
