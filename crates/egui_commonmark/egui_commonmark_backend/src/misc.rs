@@ -4,6 +4,7 @@ use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
 #[cfg(feature = "math")]
 use std::collections::HashSet;
+#[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid"))]
 use std::sync::Arc;
 
 use std::collections::hash_map::DefaultHasher;
@@ -52,6 +53,9 @@ pub struct CommonMarkOptions<'f> {
     pub html_fn: Option<&'f crate::RenderHtmlFn>,
     /// Typography configuration for line height and spacing
     pub typography: TypographyConfig,
+    /// Opt into using the named strong font family. Callers must register
+    /// `STRONG_FONT_FAMILY` in egui before enabling this to avoid lookup panics.
+    pub use_strong_font_family: bool,
 }
 
 impl std::fmt::Debug for CommonMarkOptions<'_> {
@@ -75,6 +79,7 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             .field("alerts", &self.alerts)
             .field("mutable", &self.mutable)
             .field("typography", &self.typography)
+            .field("use_strong_font_family", &self.use_strong_font_family)
             .finish()
     }
 }
@@ -97,6 +102,7 @@ impl Default for CommonMarkOptions<'_> {
             math_fn: None,
             html_fn: None,
             typography: TypographyConfig::default(),
+            use_strong_font_family: false,
         }
     }
 }
@@ -124,6 +130,9 @@ impl CommonMarkOptions<'_> {
     }
 }
 
+/// Font family name used for Markdown strong text when the app registers a bold face.
+pub const STRONG_FONT_FAMILY: &str = "MarkdownStrong";
+
 #[derive(Default, Clone)]
 pub struct Style {
     pub heading: Option<u8>,
@@ -139,11 +148,39 @@ impl Style {
         self.to_richtext_with_typography(ui, text, None)
     }
 
+    pub fn to_richtext_with_options(
+        &self,
+        ui: &Ui,
+        text: &str,
+        options: &CommonMarkOptions,
+    ) -> RichText {
+        // Keep renderer formatting decisions in one path so caller-level
+        // opt-in options apply consistently to markdown text fragments.
+        self.to_richtext_internal(
+            ui,
+            text,
+            Some(&options.typography),
+            options.use_strong_font_family,
+        )
+    }
+
     pub fn to_richtext_with_typography(
         &self,
         ui: &Ui,
         text: &str,
         typography: Option<&TypographyConfig>,
+    ) -> RichText {
+        // Public low-level helper remains safe by default for library users
+        // who did not register md-viewer's named strong font family.
+        self.to_richtext_internal(ui, text, typography, false)
+    }
+
+    fn to_richtext_internal(
+        &self,
+        ui: &Ui,
+        text: &str,
+        typography: Option<&TypographyConfig>,
+        use_strong_font_family: bool,
     ) -> RichText {
         let mut rich_text = RichText::new(text);
 
@@ -153,6 +190,7 @@ impl Style {
             .text_styles
             .get(&TextStyle::Body)
             .map_or(14.0, |d| d.size);
+        let mut selected_font_size = base_font_size;
 
         if let Some(level) = self.heading {
             // Evidence-based heading scale using Major Third ratio (1.25×)
@@ -168,6 +206,7 @@ impl Style {
             };
 
             rich_text = rich_text.size(size);
+            selected_font_size = size;
             if is_bold {
                 rich_text = rich_text.strong();
             }
@@ -206,7 +245,16 @@ impl Style {
         }
 
         if self.strong {
+            // Always keep egui's strong styling hint. Only md-viewer opts into
+            // the named bold font after registering it; inline code keeps the
+            // monospace family applied later by `RichText::code()`.
             rich_text = rich_text.strong();
+            if use_strong_font_family && !self.code {
+                rich_text = rich_text.font(egui::FontId::new(
+                    selected_font_size,
+                    egui::FontFamily::Name(STRONG_FONT_FAMILY.into()),
+                ));
+            }
         }
 
         if self.emphasis {
@@ -223,6 +271,120 @@ impl Style {
         }
 
         rich_text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first_text_format(ui: &Ui, rich_text: RichText) -> egui::TextFormat {
+        // Convert RichText into the same LayoutJob format path widgets use so
+        // tests can inspect formatting decisions without depending on pixels.
+        let mut layout_job = LayoutJob::default();
+        rich_text.append_to(
+            &mut layout_job,
+            ui.style(),
+            egui::FontSelection::Default,
+            egui::Align::LEFT,
+        );
+        layout_job
+            .sections
+            .into_iter()
+            .next()
+            .expect("RichText should append one text section")
+            .format
+    }
+
+    #[test]
+    fn default_strong_style_does_not_select_markdown_strong_family() {
+        // Generic egui_commonmark consumers have not registered the md-viewer
+        // named family, so the backend default must stay on egui's built-in
+        // strong styling instead of emitting an unregistered font family.
+        egui::__run_test_ui(|ui| {
+            let plain_format = first_text_format(ui, Style::default().to_richtext(ui, "text"));
+            let strong_format = first_text_format(
+                ui,
+                Style {
+                    strong: true,
+                    ..Default::default()
+                }
+                .to_richtext(ui, "text"),
+            );
+
+            assert_eq!(
+                strong_format.font_id, plain_format.font_id,
+                "default strong markdown should not require a named font family; plain={plain_format:?}, strong={strong_format:?}"
+            );
+            assert_ne!(
+                strong_format.font_id.family,
+                egui::FontFamily::Name(STRONG_FONT_FAMILY.into()),
+                "default strong markdown must not emit the md-viewer-only font family"
+            );
+        });
+    }
+
+    #[test]
+    fn opt_in_strong_style_selects_distinct_markdown_strong_font() {
+        // Issue #39: md-viewer opts into a registered bold face so markdown
+        // strong/bold produces an inspectable font formatting change.
+        egui::__run_test_ui(|ui| {
+            let mut options = CommonMarkOptions::default();
+            options.use_strong_font_family = true;
+
+            let plain_format = first_text_format(ui, Style::default().to_richtext(ui, "text"));
+            let strong_format = first_text_format(
+                ui,
+                Style {
+                    strong: true,
+                    ..Default::default()
+                }
+                .to_richtext_with_options(ui, "text", &options),
+            );
+
+            assert_ne!(
+                strong_format.font_id, plain_format.font_id,
+                "opt-in strong markdown should select a bold/strong font; plain={plain_format:?}, strong={strong_format:?}"
+            );
+            assert_eq!(
+                strong_format.font_id.family,
+                egui::FontFamily::Name(STRONG_FONT_FAMILY.into()),
+                "opt-in strong markdown should use the registered md-viewer strong family"
+            );
+        });
+    }
+
+    #[test]
+    fn strong_code_keeps_monospace_font_family() {
+        // Even with md-viewer's strong-font opt-in, strong inline code should
+        // keep the same monospace/code font family as normal inline code.
+        egui::__run_test_ui(|ui| {
+            let mut options = CommonMarkOptions::default();
+            options.use_strong_font_family = true;
+
+            let code_format = first_text_format(
+                ui,
+                Style {
+                    code: true,
+                    ..Default::default()
+                }
+                .to_richtext_with_options(ui, "code", &options),
+            );
+            let strong_code_format = first_text_format(
+                ui,
+                Style {
+                    strong: true,
+                    code: true,
+                    ..Default::default()
+                }
+                .to_richtext_with_options(ui, "code", &options),
+            );
+
+            assert_eq!(
+                strong_code_format.font_id.family, code_format.font_id.family,
+                "strong inline code should preserve code font family; code={code_format:?}, strong_code={strong_code_format:?}"
+            );
+        });
     }
 }
 
