@@ -1050,3 +1050,26 @@ Smooth ≤ ~3k events; borderline ~5–10k; laggy ~20k; near-unusable at 100k. A
 **General lesson:** when a "side path" caches values mid-render for downstream consumers (here, `active_search_y` for the corrective scroll), audit ALL the code paths that *populate* the cache when you change rendering behavior. The disable-virtualization fix in `21d43c5` was correctness-first for paint, but it silently changed the semantics of `active_search_y` from "valid while visible" to "valid forever," and the corrective block was implicitly assuming the old semantics.
 
 **Files:** `src/main.rs` (`Tab.correct_active_search_pending`, `scroll_to_active_match`, `render_tab_content` corrective block), `docs/devlog/031-search-scroll-lock.md`
+
+### List-item block widgets need explicit wrapped-row boundaries
+**Context:** Issue #44 — fenced code blocks inside unordered, ordered, and nested list items overlapped text immediately before or after the block.
+
+**Root cause:** List-item content renders in an egui horizontal wrapped row. A fenced code block is a block widget, but entering and leaving `Tag::CodeBlock` did not end that active row. Adjacent text and the block could therefore occupy the same layout row.
+
+**Fix:** Call `ui.end_row()` immediately before starting and after finishing a code block, gated by `self.list.is_inside_a_list()`. The gate leaves top-level code-block layout unchanged.
+
+**Fixture gotcha:** Markdown indentation does not guarantee a sibling block. This ending:
+```markdown
+    NESTED_AFTER
+  OUTER_AFTER
+```
+parses as one nested paragraph with a `SoftBreak`, so same-row placement is valid. To test return to outer list depth, use an actual outer sibling item:
+```markdown
+    NESTED_AFTER
+- OUTER_AFTER
+```
+Do not change renderer soft-break behavior to satisfy a fixture whose syntax expresses one paragraph.
+
+**Testing technique:** Inspect final-pass painted `Shape::Text` rectangles and assert strict top-to-bottom ordering. Response height alone can miss overlap. Keep one `CommonMarkCache` across render passes so tests match production cache lifetime and egui layout can settle.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `docs/devlog/043-list-code-block-layout.md`
