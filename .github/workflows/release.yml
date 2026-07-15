@@ -241,7 +241,7 @@ jobs:
       # Push the store-listing description / summary embedded in the snap.
       # snapcore/action-publish above only ships the .snap artifact to a
       # channel; the Snap Store listing description is curated separately and
-      # won't pick up changes unless we explicitly push-metadata. --force
+      # won't pick up changes unless we explicitly upload-metadata. --force
       # overwrites any web-UI edits, treating snap/snapcraft.yaml in the repo
       # as source of truth.
       #
@@ -249,11 +249,17 @@ jobs:
       # .snap file's embedded yaml (which came from snap/snapcraft.yaml at
       # build time), so the freshly-built snap from steps.build already
       # carries the current description.
+      #
+      # `push-metadata` was renamed to `upload-metadata` (the whole `push`
+      # verb family became `upload`). v0.1.14's release used the old verb and
+      # this step failed with "no such command 'push-metadata'" — the snap
+      # itself still published fine (action-publish above does the upload),
+      # only this listing-metadata sync broke. See docs/LESSONS.md.
       - name: Push snap store listing metadata
         if: steps.check.outputs.proceed == 'true'
         run: |
           sudo snap install snapcraft --classic
-          snapcraft push-metadata "${SNAP_FILE}" --force
+          snapcraft upload-metadata "${SNAP_FILE}" --force
         env:
           SNAP_FILE: ${{ steps.build.outputs.snap }}
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
