@@ -4695,6 +4695,60 @@ mod tests {
     }
 
     #[test]
+    fn shortcode_search_range_uses_raw_source_bytes() {
+        let content = "before :pushpin: after";
+        let matches = find_matches(content, ":pushpin:");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].byte_start, 7);
+        assert_eq!(matches[0].byte_end, 16);
+        assert_eq!(
+            &content[matches[0].byte_start..matches[0].byte_end],
+            ":pushpin:"
+        );
+    }
+
+    #[test]
+    fn rendered_emoji_does_not_match_shortcode_only_source() {
+        assert!(find_matches("before :pushpin: after", "📌").is_empty());
+    }
+
+    #[test]
+    fn literal_unicode_emoji_still_matches_raw_source() {
+        let matches = find_matches("before 📌 after", "📌");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].byte_start, 7);
+        assert_eq!(matches[0].byte_end, 11);
+    }
+
+    #[test]
+    fn shortcode_heading_parser_keeps_raw_identity_and_duplicate_index() {
+        let parsed = parse_headers("# Doc\n\n## Pin :pushpin:\n\n## Pin :pushpin:\n");
+        assert_eq!(parsed.outline_headers.len(), 3);
+        assert_eq!(parsed.outline_headers[1].title, "Pin :pushpin:");
+        assert_eq!(parsed.outline_headers[1].normalized_title, "pin :pushpin:");
+        assert_eq!(parsed.outline_headers[1].nth_with_same_text, 0);
+        assert_eq!(parsed.outline_headers[2].normalized_title, "pin :pushpin:");
+        assert_eq!(parsed.outline_headers[2].nth_with_same_text, 1);
+        assert_eq!(
+            header_position_key(
+                &parsed.outline_headers[2].normalized_title,
+                parsed.outline_headers[2].nth_with_same_text,
+            ),
+            "pin :pushpin:#1"
+        );
+    }
+
+    #[test]
+    fn unknown_shortcode_heading_stays_raw() {
+        let parsed = parse_headers("# Doc\n\n## Pin :not_a_gemoji:\n");
+        assert_eq!(parsed.outline_headers[1].title, "Pin :not_a_gemoji:");
+        assert_eq!(
+            parsed.outline_headers[1].normalized_title,
+            "pin :not_a_gemoji:"
+        );
+    }
+
+    #[test]
     fn keyboard_scroll_target_moves_by_line_step() {
         assert_eq!(
             keyboard_scroll_target(100.0, 500.0, 2_000.0, KeyboardScrollAction::LineDown),

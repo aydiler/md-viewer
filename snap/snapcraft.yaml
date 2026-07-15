@@ -91,3 +91,5 @@ parts:
       sed -i '/egui-mcp-bridge/d' Cargo.toml
       sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
       craftctl default
+      install -Dm644 LICENSE "$CRAFT_PART_INSTALL/usr/share/doc/md-viewer/LICENSE"
+      install -Dm644 THIRD_PARTY_NOTICES "$CRAFT_PART_INSTALL/usr/share/doc/md-viewer/THIRD_PARTY_NOTICES"

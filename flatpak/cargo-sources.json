@@ -2108,6 +2108,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/emojis/emojis-0.9.0.crate",
+        "sha256": "0b1514ced566c94991ed9563258ecf61e311fd773bf0a3f20606830386bf66e3",
+        "dest": "cargo/vendor/emojis-0.9.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"0b1514ced566c94991ed9563258ecf61e311fd773bf0a3f20606830386bf66e3\", \"files\": {}}",
+        "dest": "cargo/vendor/emojis-0.9.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/ena/ena-0.14.4.crate",
         "sha256": "eabffdaee24bd1bf95c5ef7cec31260444317e72ea56c4c91750e8b7ee58d5f1",
         "dest": "cargo/vendor/ena-0.14.4"

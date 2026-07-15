@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_backend_extended"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "data-url",
  "egui",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_extended"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "document-features",
  "eframe",
@@ -1166,13 +1166,14 @@ dependencies = [
  "egui_commonmark_backend_extended",
  "egui_commonmark_macros_extended",
  "egui_extras",
+ "emojis",
  "image",
  "pulldown-cmark 0.13.0",
 ]
 
 [[package]]
 name = "egui_commonmark_macros_extended"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "document-features",
  "egui",
@@ -1259,6 +1260,15 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
+name = "emojis"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b1514ced566c94991ed9563258ecf61e311fd773bf0a3f20606830386bf66e3"
+dependencies = [
+ "phf 0.13.1",
+]
 
 [[package]]
 name = "ena"

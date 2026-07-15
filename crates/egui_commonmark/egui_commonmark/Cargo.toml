@@ -13,7 +13,7 @@ keywords = ["commonmark", "egui", "markdown", "typography"]
 categories = ["gui"]
 readme = "README.md"
 documentation = "https://docs.rs/egui_commonmark_extended"
-include = ["src/**/*.rs", "LICENSE-MIT", "LICENSE-APACHE", "Cargo.toml"]
+include = ["src/**/*.rs", "LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_NOTICES", "Cargo.toml"]
 
 [dependencies]
 egui_commonmark_backend_extended = { workspace = true }
@@ -21,6 +21,9 @@ egui_commonmark_macros_extended = { workspace = true, optional = true }
 
 egui_extras = { workspace = true }
 egui = { workspace = true }
+
+# Expand recognized GitHub shortcodes in visible Markdown text.
+emojis = { workspace = true }
 
 document-features = { workspace = true, optional = true }
 

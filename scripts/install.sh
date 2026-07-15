@@ -1,6 +1,7 @@
 #!/bin/sh
 # md-viewer installer: downloads the latest prebuilt binary for your platform,
 # verifies its SHA256, and installs to ~/.local/bin (override with INSTALL_DIR).
+# Bundled third-party notices are installed under the matching prefix.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/aydiler/md-viewer/main/scripts/install.sh | sh
@@ -59,7 +60,7 @@ case "$OS" in
 esac
 
 # --- check required tools ----------------------------------------------------
-for tool in curl tar; do
+for tool in curl tar install; do
     command -v "$tool" >/dev/null 2>&1 || err "$tool is required but not installed"
 done
 
@@ -88,7 +89,15 @@ BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 
 # --- download into temp ------------------------------------------------------
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+STAGED_BINARY=""
+STAGED_NOTICE=""
+cleanup() {
+    rm -rf "$TMPDIR"
+    [ -z "$STAGED_BINARY" ] || rm -f "$STAGED_BINARY"
+    [ -z "$STAGED_NOTICE" ] || rm -f "$STAGED_NOTICE"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 info "Downloading $ASSET..."
 curl -fsSL -o "$TMPDIR/$ASSET" "$BASE_URL/$ASSET"
@@ -99,11 +108,31 @@ info "Verifying checksum..."
     || err "SHA256 checksum verification failed"
 
 # --- install -----------------------------------------------------------------
+# Derive the data prefix from the binary directory so custom INSTALL_DIR values
+# keep their license material in the same installation prefix.
+case "$INSTALL_DIR" in
+    */bin) INSTALL_PREFIX="${INSTALL_DIR%/bin}" ;;
+    *) INSTALL_PREFIX="${INSTALL_DIR%/}" ;;
+esac
+NOTICE_DIR="$INSTALL_PREFIX/share/licenses/md-viewer"
+
 info "Installing to $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR" "$NOTICE_DIR"
 tar -xzf "$TMPDIR/$ASSET" -C "$TMPDIR"
-mv "$TMPDIR/md-viewer" "$INSTALL_DIR/md-viewer"
-chmod +x "$INSTALL_DIR/md-viewer"
+[ -f "$TMPDIR/md-viewer" ] || err "release archive is missing md-viewer"
+[ -f "$TMPDIR/THIRD_PARTY_NOTICES" ] \
+    || err "release archive is missing THIRD_PARTY_NOTICES"
+
+# Stage inside each destination directory, then rename atomically over old files.
+STAGED_BINARY="$INSTALL_DIR/.md-viewer.new.$$"
+STAGED_NOTICE="$NOTICE_DIR/.THIRD_PARTY_NOTICES.new.$$"
+rm -f "$STAGED_BINARY" "$STAGED_NOTICE"
+install -m 0755 "$TMPDIR/md-viewer" "$STAGED_BINARY"
+install -m 0644 "$TMPDIR/THIRD_PARTY_NOTICES" "$STAGED_NOTICE"
+mv -f "$STAGED_BINARY" "$INSTALL_DIR/md-viewer"
+STAGED_BINARY=""
+mv -f "$STAGED_NOTICE" "$NOTICE_DIR/THIRD_PARTY_NOTICES"
+STAGED_NOTICE=""
 
 # Desktop integration (Linux only)
 if [ "$OS" = "Linux" ]; then

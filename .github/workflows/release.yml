@@ -111,7 +111,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           ASSET="md-viewer-${VERSION}-${{ matrix.asset_name }}.tar.gz"
-          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" md-viewer
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" md-viewer \
+            -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_NOTICES
           shasum -a 256 "$ASSET" > "$ASSET.sha256"
 
       - name: Package (Windows)
@@ -120,7 +121,7 @@ jobs:
         run: |
           $VERSION = "${env:GITHUB_REF}" -replace '^refs/tags/v',''
           $ASSET = "md-viewer-$VERSION-${{ matrix.asset_name }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/md-viewer.exe" -DestinationPath $ASSET
+          Compress-Archive -Path "target/${{ matrix.target }}/release/md-viewer.exe", "LICENSE", "THIRD_PARTY_NOTICES" -DestinationPath $ASSET
           $Hash = (Get-FileHash -Algorithm SHA256 $ASSET).Hash.ToLower()
           "$Hash  $ASSET" | Out-File -Encoding ascii "$ASSET.sha256"
 
@@ -415,7 +416,7 @@ jobs:
           cp aur-bin/PKGBUILD aur-repo/PKGBUILD
 
           # Tarball sha256 comes from the downloaded artifact (see comment above).
-          # The three aux files (.desktop, icon, LICENSE) come from raw.github
+          # The four aux files (.desktop, icon, LICENSE, notice) come from raw.github
           # at the tagged commit — those URLs are valid as soon as the tag exists.
           mkdir -p sums
           cp "dist/md-viewer-${VERSION}-linux-x86_64.tar.gz.sha256" sums/tarball.sha256
@@ -425,14 +426,16 @@ jobs:
             | sha256sum > sums/icon.sha256
           curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/LICENSE" \
             | sha256sum > sums/license.sha256
+          curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/THIRD_PARTY_NOTICES" \
+            | sha256sum > sums/notice.sha256
 
-          # Rewrite pkgver and the four-element sha256sums=( ... ) array.
+          # Rewrite pkgver and the five-element sha256sums=( ... ) array.
           # sed on a multi-line array is fragile, so use Python.
           python3 - <<'PY'
           import re, pathlib
           p = pathlib.Path("aur-repo/PKGBUILD")
           sums = [open(f"sums/{n}.sha256").read().split()[0]
-                  for n in ("tarball", "desktop", "icon", "license")]
+                  for n in ("tarball", "desktop", "icon", "license", "notice")]
           import os
           version = os.environ["VERSION"]
           text = p.read_text()
