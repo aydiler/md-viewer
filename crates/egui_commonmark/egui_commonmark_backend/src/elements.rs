@@ -53,43 +53,60 @@ pub fn newline(ui: &mut Ui) {
     ui.label("\n");
 }
 
-pub fn bullet_point(ui: &mut Ui) {
+pub fn bullet_point(ui: &mut Ui, row_height: f32) {
+    // The list row is `Align::BOTTOM` and as tall as the item text, which carries
+    // the 1.5× accessibility line-height. Size the marker box to that same
+    // row_height so it bottom-aligns identically to the text; keep the dot radius
+    // tied to the raw glyph height so the marker size is unchanged. Without this,
+    // the marker box was only the raw font height and its centre sat above the
+    // text's optical centre (marker high, text low).
+    let raw = height_body(ui);
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, height_body(ui)),
+        egui::vec2(width_body_space(ui) * 4.0, row_height.max(raw)),
         Sense::hover(),
     );
     ui.painter().circle_filled(
-        rect.center(),
-        rect.height() / 6.0,
+        marker_center(rect, raw),
+        raw / 6.0,
         ui.visuals().strong_text_color(),
     );
 }
 
-pub fn bullet_point_hollow(ui: &mut Ui) {
+pub fn bullet_point_hollow(ui: &mut Ui, row_height: f32) {
+    let raw = height_body(ui);
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, height_body(ui)),
+        egui::vec2(width_body_space(ui) * 4.0, row_height.max(raw)),
         Sense::hover(),
     );
     ui.painter().circle(
-        rect.center(),
-        rect.height() / 6.0,
+        marker_center(rect, raw),
+        raw / 6.0,
         egui::Color32::TRANSPARENT,
         egui::Stroke::new(0.6, ui.visuals().strong_text_color()),
     );
 }
 
-pub fn number_point(ui: &mut Ui, number: &str) {
+pub fn number_point(ui: &mut Ui, number: &str, row_height: f32) {
+    let raw = height_body(ui);
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, height_body(ui)),
+        egui::vec2(width_body_space(ui) * 4.0, row_height.max(raw)),
         Sense::hover(),
     );
     ui.painter().text(
-        rect.right_center(),
+        egui::pos2(rect.right(), marker_center(rect, raw).y),
         egui::Align2::RIGHT_CENTER,
         format!("{number}."),
         TextStyle::Body.resolve(ui.style()),
         ui.visuals().strong_text_color(),
     );
+}
+
+/// Vertical centre for a list marker inside a `row_height`-tall, bottom-aligned box.
+/// egui lays a `line_height`-boosted galley with the glyph near the bottom of the
+/// line box (extra leading above), so the text's optical centre is one raw
+/// half-height up from the row bottom — match the marker to that, not the box centre.
+fn marker_center(rect: egui::Rect, raw: f32) -> egui::Pos2 {
+    egui::pos2(rect.center().x, rect.bottom() - raw / 2.0)
 }
 
 #[inline]
