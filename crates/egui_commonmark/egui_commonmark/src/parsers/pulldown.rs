@@ -1230,7 +1230,13 @@ impl CommonMarkViewerInternal {
                                 .striped(true)
                                 .resizable(true)
                                 .vscroll(false)
-                                .auto_shrink([false, true])
+                                // Shrink horizontally to the columns' content so a
+                                // table narrower than the panel hugs its columns
+                                // instead of stretching the bordered frame full width
+                                // with an empty gap after the last column (#47). The
+                                // outer ScrollArea still bounds wide tables at
+                                // max_width and provides horizontal scroll.
+                                .auto_shrink([true, true])
                                 .min_scrolled_height(0.0)
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                 .columns(
@@ -1941,7 +1947,9 @@ impl CommonMarkViewerInternal {
                             .striped(true)
                             .resizable(true)
                             .vscroll(false)
-                            .auto_shrink([false, true])
+                            // Hug columns when narrower than the panel (#47); the
+                            // outer ScrollArea still handles wide-table overflow.
+                            .auto_shrink([true, true])
                             .min_scrolled_height(0.0)
                             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                             .columns(
