@@ -1257,9 +1257,18 @@ fn setup_fonts(ctx: &egui::Context) {
                         egui::FontData::from_owned(font_data).into(),
                     );
 
-                    // Add to proportional family as fallback (after default fonts)
+                    // Noto Sans is the primary body face so regular text shares the
+                    // Noto Sans family — and its baseline/ascent metrics — with the
+                    // Noto Sans Bold used for `**strong**` (issue #39). Otherwise
+                    // regular text stays on egui's bundled Ubuntu-Light and bold spans
+                    // sit on a slightly different baseline. Other scripts (CJK, Arabic,
+                    // …) remain appended fallbacks.
                     if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                        family.push(font_name.to_string());
+                        if *font_name == "NotoSans" {
+                            family.insert(0, font_name.to_string());
+                        } else {
+                            family.push(font_name.to_string());
+                        }
                     }
 
                     // Also add text fonts to monospace for code blocks with Unicode
