@@ -98,6 +98,18 @@ egui_commonmark_extended = { features = ["svg", "svg_text", ...] }
 **Status:** Upstream limitation in resvg - no fix available
 **Files:** N/A (external limitation)
 
+### Strong markdown needs a registered bold family for visible weight
+**Context:** Issue #39 reported that `**bold**` rendered with no visible bold difference.
+**Problem:** The renderer already called `RichText::strong()`, but egui can still lay the text out with the same regular font face. For md-viewer, visible bold requires selecting a distinct font family backed by a bold face.
+**Fix:** Keep `RichText::strong()` for the semantic hint, add an opt-in `use_strong_font_family` option, register `STRONG_FONT_FAMILY` (`MarkdownStrong`) in `setup_fonts`, and enable the option only in md-viewer's viewer builder:
+```rust
+CommonMarkViewer::new()
+    .use_strong_font_family(true)
+    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+```
+**Gotchas:** Default must stay `false` for generic library consumers that did not register `MarkdownStrong`. Strong inline code must skip the strong family override so `**`code`**` keeps the monospace code font.
+**Files:** `src/main.rs`, `crates/egui_commonmark/egui_commonmark/src/lib.rs`, `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs`
+
 ---
 
 ### Emoji shortcode expansion must preserve raw source identity

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
-use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer, STRONG_FONT_FAMILY};
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
 use regex::Regex;
@@ -32,6 +32,13 @@ static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.
 
 /// Compiled regex for parsing markdown links (lazy, compiled once)
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
+
+/// System font paths for a real bold face used by Markdown strong text.
+const STRONG_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/TTF/NotoSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+];
 
 /// System font paths for fallback (Linux and Windows common paths)
 const SYSTEM_FONT_PATHS: &[(&str, &str)] = &[
@@ -1176,6 +1183,56 @@ fn any_header_has_children(headers: &[Header]) -> bool {
     false
 }
 
+/// Register a named bold font family for Markdown strong text.
+fn setup_strong_font_family(fonts: &mut egui::FontDefinitions) {
+    let mut strong_family = Vec::new();
+
+    // Try to load a true bold face before appending proportional fallbacks.
+    for font_path in STRONG_FONT_PATHS {
+        let path = Path::new(font_path);
+        if path.exists() {
+            match fs::read(path) {
+                Ok(font_data) => {
+                    log::info!("Loaded Markdown strong font: {}", font_path);
+                    fonts.font_data.insert(
+                        STRONG_FONT_FAMILY.to_string(),
+                        egui::FontData::from_owned(font_data).into(),
+                    );
+                    strong_family.push(STRONG_FONT_FAMILY.to_string());
+                    break;
+                }
+                Err(e) => {
+                    log::debug!("Failed to read Markdown strong font {}: {}", font_path, e);
+                }
+            }
+        }
+    }
+
+    // Keep normal proportional fallbacks so bold text can still render broad Unicode.
+    if let Some(proportional) = fonts.families.get(&egui::FontFamily::Proportional) {
+        strong_family.extend(
+            proportional
+                .iter()
+                .filter(|font_name| font_name.as_str() != STRONG_FONT_FAMILY)
+                .cloned(),
+        );
+    }
+
+    if !matches!(
+        strong_family.first(),
+        Some(font_name) if font_name.as_str() == STRONG_FONT_FAMILY
+    ) {
+        log::warn!("No Markdown strong font found. Install NotoSans-Bold for true bold rendering.");
+    }
+
+    // The renderer selects this named family for strong spans; register it even
+    // without a bold face so documents do not panic on systems missing Noto Sans Bold.
+    fonts.families.insert(
+        egui::FontFamily::Name(STRONG_FONT_FAMILY.into()),
+        strong_family,
+    );
+}
+
 /// Setup custom fonts with system font fallbacks for Unicode support.
 /// Loads Noto fonts from system for extended character coverage.
 fn setup_fonts(ctx: &egui::Context) {
@@ -1228,6 +1285,8 @@ fn setup_fonts(ctx: &egui::Context) {
             loaded_fonts.len()
         );
     }
+
+    setup_strong_font_family(&mut fonts);
 
     ctx.set_fonts(fonts);
 }
@@ -2899,6 +2958,7 @@ impl MarkdownApp {
                     .max_image_width(Some(800))
                     .default_width(default_width)
                     .indentation_spaces(2)
+                    .use_strong_font_family(true)
                     .show_alt_text_on_hover(true)
                     .syntax_theme_dark("base16-ocean.dark")
                     .syntax_theme_light("base16-ocean.light")
