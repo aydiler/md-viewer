@@ -267,7 +267,13 @@ impl Style {
         }
 
         if self.code {
-            rich_text = rich_text.code();
+            // `RichText::code()` sets the Monospace text style, which carries its
+            // own (smaller, 14px) size — so inline code rendered smaller than the
+            // surrounding 16px body text and sat raised off the shared baseline
+            // (issue #46). Pin the size to the current context (body, or the
+            // heading size when code is inside a heading) so code keeps the
+            // monospace family + code background but aligns with adjacent text.
+            rich_text = rich_text.code().size(selected_font_size);
         }
 
         rich_text
