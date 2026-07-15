@@ -108,14 +108,16 @@ impl List {
             let spaces = " ".repeat((len - 1) * options.indentation_spaces);
             stream.extend(quote!( ui.label(#spaces); ));
 
+            // The compile-time macro path has no typography config; pass the raw
+            // body height so marker layout is unchanged from the runtime default.
             if let Some(number) = &mut item.current_number {
                 let num = number.to_string();
-                stream.extend(quote!( egui_commonmark_backend_extended::number_point(ui, #num);));
+                stream.extend(quote!( egui_commonmark_backend_extended::number_point(ui, #num, ui.text_style_height(&egui::TextStyle::Body));));
                 *number += 1;
             } else if len > 1 {
-                stream.extend(quote!( egui_commonmark_backend_extended::bullet_point_hollow(ui);));
+                stream.extend(quote!( egui_commonmark_backend_extended::bullet_point_hollow(ui, ui.text_style_height(&egui::TextStyle::Body));));
             } else {
-                stream.extend(quote!( egui_commonmark_backend_extended::bullet_point(ui);));
+                stream.extend(quote!( egui_commonmark_backend_extended::bullet_point(ui, ui.text_style_height(&egui::TextStyle::Body));));
             }
         } else {
             unreachable!();

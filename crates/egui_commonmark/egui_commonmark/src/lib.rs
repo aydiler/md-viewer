@@ -556,13 +556,21 @@ impl List {
         if let Some(item) = self.items.last_mut() {
             ui.label(" ".repeat((len - 1) * options.indentation_spaces));
 
+            // Match the marker box to the item text's line-height so the marker
+            // bottom-aligns with (and vertically centres on) the text.
+            let body_h = ui.text_style_height(&egui::TextStyle::Body);
+            let row_height = options
+                .typography
+                .resolve_line_height(body_h)
+                .unwrap_or(body_h);
+
             if let Some(number) = &mut item.current_number {
-                number_point(ui, &number.to_string());
+                number_point(ui, &number.to_string(), row_height);
                 *number += 1;
             } else if len > 1 {
-                bullet_point_hollow(ui);
+                bullet_point_hollow(ui, row_height);
             } else {
-                bullet_point(ui);
+                bullet_point(ui, row_height);
             }
         } else {
             unreachable!();
