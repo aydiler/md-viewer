@@ -574,6 +574,17 @@ magick X.png -gravity center -crop 540x540+0+0 +repage -resize 256x256 -strip ou
 **Workaround:** Open a topic on Flathub Discourse (https://discourse.flathub.org/) asking for unblock; reference the closed prior PRs and the new app. The push to `aydiler/flathub:io.github.aydiler.md-viewer` branch succeeds before the PR step, so once unblocked the PR can be opened from the GitHub web UI without redoing branch work.
 **Files:** N/A (account-level state)
 
+### Strict snaps: winit dlopens its X11 stack — snapcraft staging can't see it, and staged files aren't reachable at compiled-in paths
+**Context:** Issue #55 — snap 0.1.14 aborted at startup on every X11 session (`Library libxkbcommon-x11.so could not be loaded`). Wayland unaffected, so no release since the snap's introduction caught it. Reporter (@HartmutLeister) root-caused all three layers and verified the fix combination on Ubuntu 24.04/X11.
+**Three independent gaps, all X11-only:**
+1. **dlopen'd libraries are invisible to `stage-packages` dependency resolution.** snapcraft walks the ELF `DT_NEEDED` graph; winit loads `libxkbcommon-x11.so.0` (and via it `libxcb-xkb1`/`libX11`/`libXau`/`libXdmcp`) with `dlopen()` at runtime, so none were staged. Must be listed explicitly: `libxkbcommon-x11-0`, `libx11-6`.
+2. **Data directories aren't dependencies at all.** `/usr/share/X11/xkb` (package `xkb-data`) exists in neither the snap nor core22 → winit panics `XKBNotFound` once the libs load. `libx11-data` provides Compose files (cosmetic warning otherwise).
+3. **Staged ≠ reachable.** Mesa's DRI drivers *were* staged (dep of `libgl1`) at `$SNAP/usr/lib/x86_64-linux-gnu/dri`, but Mesa searches its compiled-in absolute path `/usr/lib/x86_64-linux-gnu/dri`, which inside the strict-confinement mount namespace is the **empty core22 base** → `GLXBadFBConfig`. Anything with a baked-in search path needs its env override pointed into `$SNAP`: `LIBGL_DRIVERS_PATH=$SNAP/usr/lib/x86_64-linux-gnu/dri`, `XKB_CONFIG_ROOT=$SNAP/usr/share/X11/xkb`.
+**Fix shipped (v0.1.15, PR #56):** 4 stage-packages + 2 env vars in `snap/snapcraft.yaml`. Chosen over `extensions: [gnome]` (would fix the same gaps but drags in the whole gnome-42-2204 content snap; targeted staging keeps the snap ~7 MB).
+**Verification without an Ubuntu box:** download the published revision from the store API (`https://api.snapcraft.io/v2/snaps/info/<name>` → `channel-map[].download.url`), then `unsquashfs -l` to confirm the libs/data and check `meta/snap.yaml` carries the env block.
+**General lesson:** for any winit/egui app packaged as a strict snap without a desktop extension, smoke-test *both* display-server backends — every dlopen-based backend is a staging blind spot, and a Wayland-only test run proves nothing about X11.
+**Files:** `snap/snapcraft.yaml`, `docs/devlog/051-snap-x11-libs.md`
+
 ### Never `snapcraft --destructive-mode` for releases on a glibc-newer-than-base host
 **Context:** Issue #3 — v0.1.2 snap (revision 4) failed to start on Ubuntu 24.04 with `GLIBC_2.43 not found` errors. The snapcraft.yaml declared `base: core22` (glibc 2.35), but the actual binary required GLIBC_2.43.
 **Root cause:** v0.1.2 release CI run failed; the snap was manually uploaded with `snapcraft --destructive-mode` from this Arch host (glibc 2.43). Destructive mode builds directly on the host without LXD/multipass isolation, so cargo links against host glibc — `atan2f@GLIBC_2.43`, `acosf@GLIBC_2.43` etc. get baked into the binary regardless of the declared `base:`.
