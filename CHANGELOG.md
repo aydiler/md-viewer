@@ -2,6 +2,12 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.1.15] - 2026-07-23
+
+### Bug Fixes
+
+- **Snap no longer crashes on X11 sessions (#55, diagnosed and fix verified by [@HartmutLeister](https://github.com/HartmutLeister)).** The strictly-confined snap aborted at startup on X11 (`Library libxkbcommon-x11.so could not be loaded`; Wayland was unaffected). Three gaps compounded, all on the X11-only code path: winit `dlopen`s its X11 stack at runtime so snapcraft's link-time dependency staging never included `libxkbcommon-x11.so.0` and the `libxcb-xkb`/`libX11` chain; XKB keymap data (`/usr/share/X11/xkb`) was absent from both the snap and the core22 base; and Mesa's loader searched its compiled-in absolute DRI path, which resolves to the empty base inside the mount namespace, so GLX context creation failed (`GLXBadFBConfig`) even though the drivers were staged. The snap now stages `libxkbcommon-x11-0`, `libx11-6`, `libx11-data`, and `xkb-data`, and sets `XKB_CONFIG_ROOT` and `LIBGL_DRIVERS_PATH` to the staged copies.
+
 ## [0.1.14] - 2026-07-15
 
 ### Features
