@@ -2238,6 +2238,13 @@ impl CommonMarkCache {
         top_level_block_spans(&sc.events)
     }
 
+    /// True once block boundaries have been recorded for `source_id`
+    /// (`record_block_layout(true)` + at least one paint). Until then,
+    /// click hit-testing is not possible.
+    pub fn has_block_layout(&mut self, source_id: &egui::Id) -> bool {
+        !scroll_cache(self, source_id).boundaries.is_empty()
+    }
+
     /// Hit-test a content-relative y against the block boundaries recorded
     /// during the last paint with `record_block_layout(true)`; returns the
     /// byte range of the clicked top-level block.

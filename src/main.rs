@@ -1033,13 +1033,15 @@ impl Tab {
         }
     }
 
-    /// Ctrl+E: toggle between the rendered view and live preview (the
-    /// flagship editing experience); from Source it moves to Live.
+    /// Ctrl+E: cycle Rendered → Live → Source → Rendered so every press
+    /// visibly changes the surface.
     fn cycle_edit_mode(&mut self) {
         let next = match self.edit_mode {
             EditMode::Rendered => EditMode::Live,
-            EditMode::Live | EditMode::Source => EditMode::Rendered,
+            EditMode::Live => EditMode::Source,
+            EditMode::Source => EditMode::Rendered,
         };
+        log::info!("edit mode: {:?} -> {:?}", self.edit_mode, next);
         self.set_edit_mode(next);
     }
 
@@ -2160,6 +2162,25 @@ impl MarkdownApp {
             self.quit_after_saves = false;
             self.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+
+    /// Thin hint bar shown in Live mode while no block is being edited, so
+    /// entering the mode is visible even though the canvas looks unchanged.
+    fn render_live_hint(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if tab.edit_mode != EditMode::Live || tab.active_edit_byte.is_some() {
+            return;
+        }
+        egui::TopBottomPanel::bottom("live_hint_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("✎ Live preview — click any block to edit it · Esc stops editing · Ctrl+E cycles modes")
+                        .weak(),
+                );
+            });
+        });
     }
 
     /// Banner shown when the active tab has unsaved edits AND the file changed
@@ -3541,11 +3562,26 @@ impl MarkdownApp {
                 let pointer_y = ui.ctx().input(|i| i.pointer.latest_pos().map(|p| p.y));
                 if let Some(py) = pointer_y {
                     let content_y = py - origin.y + tab.scroll_offset;
-                    if let Some(span) = tab.cache.block_span_at_content_y(&tab.id, content_y) {
-                        tab.active_edit_byte = Some(span.start);
-                    } else {
-                        // Click outside any recorded block → leave editing.
-                        tab.active_edit_byte = None;
+                    let layout_ready = tab.cache.has_block_layout(&tab.id);
+                    match tab.cache.block_span_at_content_y(&tab.id, content_y) {
+                        Some(span) => {
+                            log::info!(
+                                "live: click at content_y={content_y:.0} activates block {}..{}",
+                                span.start,
+                                span.end
+                            );
+                            tab.active_edit_byte = Some(span.start);
+                        }
+                        None if layout_ready => {
+                            // Click below/above every recorded block → leave editing.
+                            log::info!("live: click outside blocks deactivates editor");
+                            tab.active_edit_byte = None;
+                        }
+                        None => {
+                            // Layout not recorded yet (first Live frame) — ignore
+                            // this click rather than wrongly clearing state.
+                            log::info!("live: click ignored, block layout not recorded yet");
+                        }
                     }
                 }
             }
@@ -3591,6 +3627,12 @@ impl MarkdownApp {
                         // otherwise in-flight typing would be clobbered.
                         let key = (tab.content_version, range.start);
                         if tab.live_seeded_for != Some(key) {
+                            log::info!(
+                                "live: seeding editor for block {}..{} (v{})",
+                                range.start,
+                                range.end,
+                                tab.content_version
+                            );
                             let seed = tab.content[range.clone()].to_string();
                             ui.ctx()
                                 .data_mut(|d| d.insert_temp(editor_id, seed));
@@ -3646,6 +3688,13 @@ impl MarkdownApp {
                 if let Some(range) = live_range.clone() {
                     if let Some(fb) = tab.cache.take_edit_feedback() {
                         if fb.changed && fb.text != tab.content[range.clone()] {
+                            log::info!(
+                                "live: splicing edited block {}..{} ({} -> {} bytes)",
+                                range.start,
+                                range.end,
+                                range.len(),
+                                fb.text.len()
+                            );
                             let anchor = tab.active_edit_byte.unwrap_or(range.start);
                             let new_anchor = anchor_after_splice(
                                 anchor,
@@ -5255,6 +5304,7 @@ impl eframe::App for MarkdownApp {
         // ---- Editing UI state: external-change conflict + unsaved guard ----
         self.render_conflict_banner(ctx);
         self.render_unsaved_confirm(ctx);
+        self.render_live_hint(ctx);
 
         // Find bar (conditional, between error bar and tab bar)
         let search_outcome = self.render_search_bar(ctx);
