@@ -2247,28 +2247,38 @@ impl CommonMarkCache {
 
     /// Hit-test a content-relative y against the block boundaries recorded
     /// during the last paint with `record_block_layout(true)`; returns the
-    /// byte range of the clicked top-level block.
+    /// tiled [`top_level_block_spans`] range of the clicked block.
     pub fn block_span_at_content_y(
         &mut self,
         source_id: &egui::Id,
         y: f32,
     ) -> Option<std::ops::Range<usize>> {
         let sc = scroll_cache(self, source_id);
-        let last_end = top_level_block_spans(&sc.events).last()?.end;
-        // Boundary i sits between span i and span i+1: its `next_start` opens
-        // the following block, and the next boundary (or the document end)
-        // closes it.
+        let spans = top_level_block_spans(&sc.events);
+        let last_end = spans.last()?.end;
+        // Boundary k sits between block k and block k+1: its top_y is where
+        // block k+1 starts painting, its next_start the byte just after the
+        // boundary event. The segment between consecutive cuts maps onto the
+        // first tiled span overlapping it — the clicked block.
         let idx = sc
             .boundaries
             .iter()
             .rposition(|b| b.top_y <= y + f32::EPSILON)?;
-        let start = sc.boundaries[idx].next_start.min(last_end);
-        let end = sc
+        let k = idx.min(spans.len().saturating_sub(1));
+        let seg_start = if k == 0 {
+            spans[0].start
+        } else {
+            sc.boundaries[k - 1].next_start.min(last_end)
+        };
+        let seg_end = sc
             .boundaries
-            .get(idx + 1)
+            .get(k)
             .map(|b| b.next_start.min(last_end))
             .unwrap_or(last_end);
-        Some(start..end.max(start))
+        spans
+            .iter()
+            .find(|s| s.start < seg_end && s.end > seg_start)
+            .cloned()
     }
 }
 
