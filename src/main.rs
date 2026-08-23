@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,148 @@ const OPTIMAL_WINDOW_HEIGHT: f32 = 750.0;
 // share the same line/page behavior.
 const KEYBOARD_LINE_SCROLL_STEP: f32 = 48.0;
 const KEYBOARD_PAGE_SCROLL_RATIO: f32 = 0.9;
+
+// Idle period after the last keystroke before derived caches (outline headers,
+// local links, line counts, search matches) are rebuilt. Keeps typing snappy
+// while still converging within a quarter second of pause.
+const DERIVED_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Hash a content string for dirty/sync tracking. Uses the same
+/// `DefaultHasher` scheme as the vendored renderer's event cache. Hashes are
+/// only compared within one process lifetime, so cross-run stability is not a
+/// requirement.
+fn hash_content(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Convert a byte offset in `text` into the char index that egui cursor APIs
+/// (`CCursor.index`) expect. Offsets past the end clamp to the char count;
+/// offsets landing mid-UTF-8-sequence round down to the containing char start.
+fn byte_offset_to_char_index(text: &str, byte_offset: usize) -> usize {
+    let clamped = byte_offset.min(text.len());
+    let boundary = match clamped {
+        0 => 0,
+        n if n >= text.len() => text.len(),
+        _ => {
+            // Walk back to a UTF-8 char boundary (floor division semantics).
+            let mut b = clamped;
+            while !text.is_char_boundary(b) {
+                b -= 1;
+            }
+            b
+        }
+    };
+    text[..boundary].chars().count()
+}
+
+/// Byte offset of the start of a 1-based `line` in `text`. Lines beyond the
+/// document clamp to the end of the text.
+fn byte_offset_of_line_start(text: &str, line: usize) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+    let mut offset = 0usize;
+    for (i, bytes) in text.split_inclusive('\n').enumerate() {
+        if i + 1 >= line {
+            break;
+        }
+        offset += bytes.len();
+    }
+    offset.min(text.len())
+}
+
+/// How the watcher should react to an on-disk change for one open tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskChange {
+    /// No-op echo or our own write — ignore entirely.
+    Ignore,
+    /// Buffer already matches disk (edits undone back to saved state) —
+    /// re-sync bookkeeping.
+    Resync,
+    /// External change while the buffer has unsaved edits — ask the user.
+    Conflict,
+    /// Clean external change — reload from disk.
+    Reload,
+}
+
+/// Pure decision core of `reload_changed_tabs` so the watcher policy stays
+/// unit-testable.
+fn classify_disk_change(
+    synced_content_hash: u64,
+    buffer_hash: u64,
+    dirty: bool,
+    in_flight_save_hash: Option<u64>,
+    incoming: u64,
+) -> DiskChange {
+    // Pure echo of unchanged content.
+    if !dirty && incoming == synced_content_hash {
+        return DiskChange::Ignore;
+    }
+    // Our own in-flight save observed on disk.
+    if in_flight_save_hash == Some(incoming) {
+        return DiskChange::Ignore;
+    }
+    // Live buffer already equals what's on disk.
+    if in_flight_save_hash.is_none() && buffer_hash == incoming {
+        return DiskChange::Resync;
+    }
+    if dirty {
+        DiskChange::Conflict
+    } else {
+        DiskChange::Reload
+    }
+}
+
+/// Open `path` with the system's default handler (Linux desktops: xdg-open).
+/// Fire-and-forget: the child outlives the app, and we never wait on it.
+fn open_external(path: &Path) {
+    match Command::new("xdg-open").arg(path).spawn() {
+        Ok(_) => log::info!("Opened {:?} in external application", path),
+        Err(e) => {
+            log::error!("Failed to open {:?} externally: {}", path, e);
+        }
+    }
+}
+
+/// Render a tab in source-editing mode: a monospace multiline TextEdit bound
+/// directly to `tab.content`, inside a ScrollArea that follows the caret
+/// (`ui.scroll_to_rect` from the TextEdit targets this enclosing scroller).
+/// Buffer changes only mark the tab dirty; heavy derived work happens
+/// debounced in the update loop.
+fn render_source_editor_ui(ui: &mut egui::Ui, tab: &mut Tab) {
+    let editor_id = tab.source_editor_id();
+
+    egui::ScrollArea::vertical()
+        .id_salt("source_editor_scroll")
+        .show(ui, |ui| {
+            let response = egui::TextEdit::multiline(&mut tab.content)
+                .id(editor_id)
+                .code_editor()
+                .desired_width(ui.available_width())
+                .show(ui);
+
+            if response.response.changed() {
+                tab.mark_edited(Instant::now());
+            }
+
+            // Consume pending caret jumps after the widget exists so its
+            // state is in the context store. Byte offsets from search/header
+            // machinery are converted to the char indices egui cursors use.
+            if let Some(byte_off) = tab.pending_caret_byte.take() {
+                let char_idx = byte_offset_to_char_index(&tab.content, byte_off);
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(char_idx)),
+                    ));
+                    state.store(ui.ctx(), editor_id);
+                }
+                response.response.request_focus();
+            }
+        });
+}
 
 // App-level keyboard scroll actions; kept private until shortcut wiring needs
 // to pass them through `MarkdownApp::update`.
@@ -199,12 +341,42 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
-/// A single match in a tab's content, identified by byte range and 1-based line number
+/// A search match identified by byte range and line number
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchMatch {
     byte_start: usize,
     byte_end: usize,
     line_number: usize,
+}
+
+// ---- Background save pipeline (State→Logic→UI→Async: thread does I/O,
+// update() only polls the outcome channel) ----
+
+/// A snapshot queued for asynchronous write to disk.
+struct SaveJob {
+    path: PathBuf,
+    content: String,
+    /// Hash of `content`; echoed back so the app can tell stale outcomes
+    /// from fresh ones.
+    hash: u64,
+}
+
+/// Result of one [`SaveJob`] written by the worker thread.
+struct SaveOutcome {
+    path: PathBuf,
+    hash: u64,
+    result: io::Result<()>,
+}
+
+/// A user confirmation awaiting a decision because closing/quitting would
+/// abandon unsaved edits. Tracks the affected tab by path (indices shift
+/// while a dialog is open).
+#[derive(Clone)]
+enum UnsavedConfirm {
+    /// Close the tab with this path.
+    CloseTab(PathBuf),
+    /// Quit the whole app.
+    Quit,
 }
 
 /// Per-frame return from `render_search_bar`
@@ -657,6 +829,33 @@ struct Tab {
     /// parsed events and split_points can survive across frames without
     /// re-hashing the entire content.
     content_version: u64,
+    // ---- Editing state (Phase 0/1: source mode + save pipeline) ----
+    /// Hash of the buffer as last known to be in sync with the file on disk
+    /// (set on load, reload, and completed save).
+    synced_content_hash: u64,
+    /// Hash of the snapshot currently being written by the background save
+    /// thread. `Some` while a save is in flight; lets the watcher recognize
+    /// our own write events even before the completion message arrives.
+    in_flight_save_hash: Option<u64>,
+    /// Unsaved modifications exist in the buffer.
+    dirty: bool,
+    /// External on-disk change detected while `dirty` — a conflict awaiting
+    /// the user's choice (reload vs keep). Holds the on-disk hash so repeated
+    /// watcher events for the same change dedupe.
+    external_change_hash: Option<u64>,
+    /// Source editing mode: raw markdown TextEdit instead of rendered view.
+    source_mode: bool,
+    /// Derived caches (`outline_headers`, `local_links`, `content_lines`,
+    /// `search_matches`) are stale relative to `content` after an edit.
+    derived_stale: bool,
+    /// Time of the last buffer modification, for debounced derived refresh.
+    last_edit_at: Option<Instant>,
+    /// Set when the user chose "Save & Close" in the unsaved-changes dialog:
+    /// the tab is removed once its save completes cleanly.
+    close_after_save: bool,
+    /// Byte offset to move the source-editor caret to (search jumps, outline
+    /// clicks while in source mode). Consumed by the editor render pass.
+    pending_caret_byte: Option<usize>,
 }
 
 impl Tab {
@@ -680,6 +879,8 @@ impl Tab {
             cache.add_link_hook(link);
         }
 
+        let synced_content_hash = hash_content(&content);
+
         Self {
             id: egui::Id::new(&path),
             path,
@@ -701,6 +902,15 @@ impl Tab {
             history_forward: Vec::new(),
             search_matches: Vec::new(),
             content_version: 1,
+            synced_content_hash,
+            in_flight_save_hash: None,
+            dirty: false,
+            external_change_hash: None,
+            source_mode: false,
+            derived_stale: false,
+            last_edit_at: None,
+            close_after_save: false,
+            pending_caret_byte: None,
         }
     }
 
@@ -709,6 +919,20 @@ impl Tab {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string())
+    }
+
+    /// Tab/window label including the unsaved-changes marker.
+    fn display_title(&self) -> String {
+        if self.dirty {
+            format!("{} •", self.title())
+        } else {
+            self.title()
+        }
+    }
+
+    /// Stable widget id for this tab's source editor.
+    fn source_editor_id(&self) -> egui::Id {
+        egui::Id::new(&self.path).with("source_editor")
     }
 
     fn reload(&mut self) {
@@ -736,7 +960,68 @@ impl Tab {
 
             // Stale byte ranges; caller rebuilds if search bar is open
             self.search_matches.clear();
+
+            // The buffer now matches disk exactly.
+            self.synced_content_hash = hash_content(&self.content);
+            self.dirty = false;
+            self.external_change_hash = None;
+            self.in_flight_save_hash = None;
+            self.derived_stale = false;
+            self.last_edit_at = None;
         }
+    }
+
+    /// Record a user modification of the buffer. Cheap on purpose: heavy
+    /// derived work is deferred to the debounced `refresh_derived` pass.
+    fn mark_edited(&mut self, now: Instant) {
+        self.dirty = true;
+        self.derived_stale = true;
+        self.last_edit_at = Some(now);
+    }
+
+    /// Flip between rendered and source-editing mode. When leaving source
+    /// mode with un-refreshed edits, rebuild derived caches immediately so
+    /// outline, links and search match what gets rendered again.
+    fn toggle_source_mode(&mut self) {
+        self.source_mode = !self.source_mode;
+        if !self.source_mode && self.derived_stale {
+            self.refresh_derived();
+        }
+    }
+
+    /// Mark the buffer as in-sync with disk at `hash` (after load or a
+    /// completed save). Only meaningful if the current buffer still hashes to
+    /// `hash`; callers check that before calling.
+    ///
+    /// Deliberately does NOT touch `derived_stale`/`last_edit_at`: a save may
+    /// complete before the debounced derived-cache rebuild runs, and that
+    /// rebuild must still happen afterwards.
+    fn note_synced(&mut self, hash: u64) {
+        self.synced_content_hash = hash;
+        self.dirty = false;
+        self.external_change_hash = None;
+        self.in_flight_save_hash = None;
+    }
+
+    /// Rebuild everything derived from `content` after edits (outline,
+    /// links, line count, renderer cache invalidation). Called debounced from
+    /// the update loop — never per keystroke.
+    fn refresh_derived(&mut self) {
+        self.content_lines = self.content.lines().count();
+        self.cache = CommonMarkCache::default();
+        self.content_version = self.content_version.wrapping_add(1);
+
+        let parsed = parse_headers(&self.content);
+        self.document_title = parsed.document_title;
+        self.outline_headers = parsed.outline_headers;
+
+        self.local_links = parse_local_links(&self.content);
+        for link in &self.local_links {
+            self.cache.add_link_hook(link);
+        }
+        self.search_matches.clear();
+        self.derived_stale = false;
+        self.last_edit_at = None;
     }
 
     /// Rebuild `search_matches` for `query`. Empty query clears matches.
@@ -773,6 +1058,14 @@ impl Tab {
 
             // Stale byte ranges; caller rebuilds if search bar is open
             self.search_matches.clear();
+
+            // Fresh document from disk: buffer and disk agree.
+            self.synced_content_hash = hash_content(&self.content);
+            self.dirty = false;
+            self.external_change_hash = None;
+            self.in_flight_save_hash = None;
+            self.derived_stale = false;
+            self.last_edit_at = None;
         }
     }
 
@@ -1387,6 +1680,17 @@ struct MarkdownApp {
     recent_files: Vec<RecentEntry>,
     // Welcome page: whether the recent list is expanded ("Show more")
     welcome_show_all: bool,
+    // ---- Editing / saving (Phase 0/1) ----
+    // Sender for background save jobs; None if the worker thread failed to spawn.
+    save_tx: Option<Sender<SaveJob>>,
+    // Completed save outcomes, polled non-blocking each frame.
+    save_rx: Receiver<SaveOutcome>,
+    // Dirty state of the active tab last frame — drives the window-title marker.
+    last_active_dirty: bool,
+    // Awaiting confirmation: closing a tab or quitting with unsaved edits.
+    unsaved_confirm: Option<UnsavedConfirm>,
+    // Set when "Save All" was chosen in the quit dialog: quit once saves land.
+    quit_after_saves: bool,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -1511,6 +1815,42 @@ impl MarkdownApp {
             .map(|d| d != ":0" && d != ":0.0" && !d.is_empty())
             .unwrap_or(false);
 
+        // Background save worker: the UI thread only clones + hashes and
+        // polls outcomes; all file I/O happens here (EGUI_WORKFLOW Phase 4).
+        // Writes go to a temp file followed by an atomic rename so a crash
+        // mid-write can never leave a truncated markdown file behind.
+        let (save_tx, save_job_rx) = mpsc::channel::<SaveJob>();
+        let (save_outcome_tx, save_rx) = mpsc::channel::<SaveOutcome>();
+        let save_worker_ok = std::thread::Builder::new()
+            .name("md-viewer-save".into())
+            .spawn(move || {
+                while let Ok(job) = save_job_rx.recv() {
+                    let tmp_path = {
+                        let mut name = job.path.clone().into_os_string();
+                        name.push(format!(".mdv-tmp-{}", std::process::id()));
+                        PathBuf::from(name)
+                    };
+                    let result = fs::write(&tmp_path, job.content.as_bytes())
+                        .and_then(|()| fs::rename(&tmp_path, &job.path));
+                    if result.is_err() {
+                        let _ = fs::remove_file(&tmp_path);
+                    }
+                    // If the app dropped the receiver we are shutting down.
+                    if save_outcome_tx
+                        .send(SaveOutcome {
+                            path: job.path,
+                            hash: job.hash,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .is_ok();
+        let save_tx = save_worker_ok.then_some(save_tx);
+
         let mut app = Self {
             tabs,
             active_tab,
@@ -1542,6 +1882,11 @@ impl MarkdownApp {
             search: SearchState::default(),
             recent_files: persisted.recent_files.unwrap_or_default(),
             welcome_show_all: false,
+            save_tx,
+            save_rx,
+            last_active_dirty: false,
+            unsaved_confirm: None,
+            quit_after_saves: false,
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -1564,7 +1909,7 @@ impl MarkdownApp {
 
     fn window_title(&self) -> String {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            format!("{} - Markdown Viewer", tab.title())
+            format!("{} - Markdown Viewer", tab.display_title())
         } else {
             "Markdown Viewer".to_string()
         }
@@ -1660,7 +2005,272 @@ impl MarkdownApp {
     }
 
     fn close_active_tab(&mut self) {
-        self.close_tab(self.active_tab);
+        self.request_close_tab(self.active_tab);
+    }
+
+    /// Close `idx`, but guard against silently abandoning unsaved edits:
+    /// a dirty tab raises an in-app confirmation instead of closing.
+    fn request_close_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[idx].dirty {
+            let path = self.tabs[idx].path.clone();
+            self.unsaved_confirm = Some(UnsavedConfirm::CloseTab(path));
+            return;
+        }
+        self.close_tab(idx);
+    }
+
+    /// Quit, guarding against unsaved edits in any open tab.
+    fn request_quit(&mut self, ctx: &egui::Context) {
+        if self.tabs.iter().any(|t| t.dirty) {
+            self.unsaved_confirm = Some(UnsavedConfirm::Quit);
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn any_dirty(&self) -> bool {
+        self.tabs.iter().any(|t| t.dirty)
+    }
+
+    /// Enqueue the tab's buffer for background write. Cheap (clone + hash
+    /// only); the actual I/O happens on the save worker thread. A no-op when
+    /// nothing changed since the last sync/save or a save is already in
+    /// flight for this exact snapshot.
+    fn request_save(&mut self, idx: usize) -> bool {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return false;
+        };
+        if !tab.dirty && tab.in_flight_save_hash.is_none() {
+            return false;
+        }
+        let hash = hash_content(&tab.content);
+        if Some(hash) == tab.in_flight_save_hash {
+            return false;
+        }
+        let job = SaveJob {
+            path: tab.path.clone(),
+            content: tab.content.clone(),
+            hash,
+        };
+        let sent = match &self.save_tx {
+            Some(tx) => tx.send(job).is_ok(),
+            None => false,
+        };
+        if sent {
+            if let Some(tab) = self.tabs.get_mut(idx) {
+                tab.in_flight_save_hash = Some(hash);
+            }
+        }
+        sent
+    }
+
+    /// Consume completed save outcomes. Called once per frame from update().
+    fn poll_save_outcomes(&mut self) {
+        while let Ok(outcome) = self.save_rx.try_recv() {
+            let idx = self
+                .tabs
+                .iter()
+                .position(|t| t.path == outcome.path && t.in_flight_save_hash == Some(outcome.hash));
+            let Some(idx) = idx else { continue };
+            match outcome.result {
+                Ok(()) => {
+                    let still_matches = hash_content(&self.tabs[idx].content) == outcome.hash;
+                    let close_requested = self.tabs[idx].close_after_save;
+                    if still_matches {
+                        self.tabs[idx].note_synced(outcome.hash);
+                    } else {
+                        // User typed while the write was in flight — keep the
+                        // dirty state so the next save picks up the tail.
+                        self.tabs[idx].in_flight_save_hash = None;
+                    }
+                    if close_requested && !self.tabs[idx].dirty {
+                        self.close_tab(idx);
+                    }
+                }
+                Err(e) => {
+                    self.tabs[idx].in_flight_save_hash = None;
+                    self.error_message =
+                        Some(format!("Failed to save {}: {}", self.tabs[idx].title(), e));
+                }
+            }
+        }
+
+        // All pending saves settled cleanly → honor a deferred quit request.
+        if self.quit_after_saves
+            && !self.any_dirty()
+            && self.tabs.iter().all(|t| t.in_flight_save_hash.is_none())
+        {
+            self.quit_after_saves = false;
+            self.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Banner shown when the active tab has unsaved edits AND the file changed
+    /// on disk (watcher detected an external modification). Offers explicit
+    /// resolution instead of silently clobbering either side.
+    fn render_conflict_banner(&mut self, ctx: &egui::Context) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Resolution {
+            ReloadFromDisk,
+            KeepMine,
+        }
+
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if tab.external_change_hash.is_none() {
+            return;
+        }
+        let file_name = tab.title();
+
+        let mut resolution: Option<Resolution> = None;
+        egui::TopBottomPanel::top("conflict_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("⚠")
+                        .color(egui::Color32::from_rgb(255, 170, 80)),
+                );
+                ui.label(egui::RichText::new(format!(
+                    "{file_name} changed on disk while you have unsaved edits."
+                )));
+                if ui.button("Reload from disk").clicked() {
+                    resolution = Some(Resolution::ReloadFromDisk);
+                }
+                if ui.button("Keep my version").clicked() {
+                    resolution = Some(Resolution::KeepMine);
+                }
+            });
+        });
+
+        match resolution {
+            Some(Resolution::ReloadFromDisk) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.reload();
+                }
+            }
+            Some(Resolution::KeepMine) => {
+                // Drop the marker; the buffer stays dirty. Saving overwrites
+                // the external change; a *new* external edit re-prompts.
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.external_change_hash = None;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Modal-ish confirmation for closing a tab or quitting with unsaved
+    /// edits. Prevents silent data loss on Ctrl+W / Ctrl+Q / tab-bar ✕.
+    fn render_unsaved_confirm(&mut self, ctx: &egui::Context) {
+        enum Choice {
+            SaveThenProceed,
+            DiscardAndProceed,
+            Cancel,
+        }
+
+        let Some(confirm) = self.unsaved_confirm.clone() else {
+            return;
+        };
+
+        let (message, is_quit) = match &confirm {
+            UnsavedConfirm::Quit => ("Quit with unsaved changes?".to_string(), true),
+            UnsavedConfirm::CloseTab(path) => (
+                format!(
+                    "\"{}\" has unsaved changes.",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "This file".to_string())
+                ),
+                false,
+            ),
+        };
+
+        let mut choice: Option<Choice> = None;
+        egui::Window::new("Unsaved changes")
+            .id(egui::Id::new("unsaved_confirm_window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(message);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let save_label = if is_quit { "Save All" } else { "Save" };
+                    if ui.button(save_label).clicked() {
+                        choice = Some(Choice::SaveThenProceed);
+                    }
+                    let discard_label = if is_quit {
+                        "Discard All"
+                    } else {
+                        "Discard Changes"
+                    };
+                    if ui.button(discard_label).clicked() {
+                        choice = Some(Choice::DiscardAndProceed);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(Choice::Cancel);
+                    }
+                });
+            });
+
+        let idx_for = |app: &Self, confirm: &UnsavedConfirm| match confirm {
+            UnsavedConfirm::CloseTab(path) => app.tabs.iter().position(|t| t.path == *path),
+            UnsavedConfirm::Quit => None,
+        };
+
+        match choice {
+            Some(Choice::SaveThenProceed) => {
+                match &confirm {
+                    UnsavedConfirm::CloseTab(_) => {
+                        if let Some(idx) = idx_for(self, &confirm) {
+                            self.tabs[idx].close_after_save = true;
+                            if !self.request_save(idx) {
+                                // Writer unavailable — keep the dialog state
+                                // cleared and surface the error instead.
+                                self.error_message =
+                                    Some("Save failed: file writer unavailable".to_string());
+                            }
+                        }
+                    }
+                    UnsavedConfirm::Quit => {
+                        let dirty: Vec<usize> = self
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.dirty)
+                            .map(|(i, _)| i)
+                            .collect();
+                        let mut all_enqueued = !dirty.is_empty();
+                        for idx in dirty {
+                            if !self.request_save(idx) {
+                                all_enqueued = false;
+                            }
+                        }
+                        self.quit_after_saves = all_enqueued;
+                    }
+                }
+                self.unsaved_confirm = None;
+            }
+            Some(Choice::DiscardAndProceed) => match &confirm {
+                UnsavedConfirm::CloseTab(_) => {
+                    if let Some(idx) = idx_for(self, &confirm) {
+                        self.close_tab(idx);
+                    }
+                }
+                UnsavedConfirm::Quit => {
+                    for tab in &mut self.tabs {
+                        tab.dirty = false; // abandon buffers deliberately
+                    }
+                    self.quit_after_saves = false;
+                    self.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            },
+            Some(Choice::Cancel) => self.unsaved_confirm = None,
+            None => {}
+        }
     }
 
     fn next_tab(&mut self) {
@@ -2026,42 +2636,82 @@ impl MarkdownApp {
         let active_path = self.tabs.get(self.active_tab).map(|t| t.path.clone());
 
         for path in changed_paths {
-            // Trigger flash effect for the changed file (use canonical path for consistent lookup)
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-            self.flashing_paths.insert(canonical, now);
+            // ---- Classify the change against each open tab first ----
+            // Self-writes (our own background saves) and pure echoes must not
+            // clobber editor buffers or trigger UI churn, so each matching
+            // tab decides: Skip / Reload / Conflict.
+            let mut matched_any = false;
+            let mut relevant_change = false;
+            let mut active_was_reloaded = false;
 
-            // Also flash parent directories up to the explorer root
-            if let Some(root) = &self.file_explorer.root {
-                // Check if the changed path is within the explorer root
-                if path.starts_with(root) {
-                    refresh_tree = true;
-                }
+            for tab in self.tabs.iter_mut().filter(|t| t.path == path) {
+                matched_any = true;
+                let Ok(bytes) = fs::read(&tab.path) else {
+                    continue;
+                };
+                let incoming = hash_content(&String::from_utf8_lossy(&bytes));
 
-                let mut current = path.parent();
-                while let Some(parent) = current {
-                    if parent.starts_with(root) || parent == root {
-                        self.flashing_paths.insert(
-                            parent
-                                .canonicalize()
-                                .unwrap_or_else(|_| parent.to_path_buf()),
-                            now,
-                        );
+                match classify_disk_change(
+                    tab.synced_content_hash,
+                    hash_content(&tab.content),
+                    tab.dirty,
+                    tab.in_flight_save_hash,
+                    incoming,
+                ) {
+                    DiskChange::Ignore => continue,
+                    DiskChange::Resync => {
+                        tab.note_synced(incoming);
+                        continue;
                     }
-                    if parent == root {
-                        break;
+                    DiskChange::Conflict => {
+                        // Never touch the buffer automatically. Record the
+                        // on-disk hash so repeat events dedupe; the banner
+                        // asks the user what to do.
+                        if tab.external_change_hash != Some(incoming) {
+                            log::info!("External change while dirty (conflict): {:?}", tab.path);
+                            tab.external_change_hash = Some(incoming);
+                        }
+                        relevant_change = true;
                     }
-                    current = parent.parent();
+                    DiskChange::Reload => {
+                        log::info!("Reloading tab: {:?}", path);
+                        tab.reload();
+                        relevant_change = true;
+                        if Some(&tab.path) == active_path.as_ref() {
+                            active_was_reloaded = true;
+                        }
+                    }
                 }
             }
 
-            // Reload the tab content
-            let mut active_was_reloaded = false;
-            for tab in &mut self.tabs {
-                if tab.path == path {
-                    log::info!("Reloading tab: {:?}", path);
-                    tab.reload();
-                    if Some(&tab.path) == active_path.as_ref() {
-                        active_was_reloaded = true;
+            // No open tab uses this path (explorer-only change): keep the old
+            // flash/refresh behavior.
+            if !matched_any || relevant_change {
+                // Trigger flash effect for the changed file (use canonical path for consistent lookup)
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                self.flashing_paths.insert(canonical, now);
+
+                // Also flash parent directories up to the explorer root
+                if let Some(root) = &self.file_explorer.root {
+                    // Check if the changed path is within the explorer root
+                    if path.starts_with(root) {
+                        refresh_tree = true;
+                    }
+
+                    let mut current = path.parent();
+                    while let Some(parent) = current {
+                        if parent.starts_with(root) || parent == root {
+                            self.flashing_paths.insert(
+                                parent
+                                    .canonicalize()
+                                    .unwrap_or_else(|_| parent.to_path_buf()),
+                                now,
+                            );
+                        }
+                        if parent == root {
+                            break;
+                        }
+                        current = parent.parent();
                     }
                 }
             }
@@ -2209,6 +2859,12 @@ impl MarkdownApp {
         let Some(m) = tab.search_matches.get(idx) else {
             return;
         };
+        // Source mode has no rendered layout to scroll; move the editor
+        // caret to the match instead.
+        if tab.source_mode {
+            tab.pending_caret_byte = Some(m.byte_start);
+            return;
+        }
         if tab.last_content_height <= 0.0 || tab.content_lines == 0 {
             return;
         }
@@ -2286,7 +2942,7 @@ impl MarkdownApp {
             .tabs
             .iter()
             .enumerate()
-            .map(|(idx, tab)| (tab.title(), idx == self.active_tab))
+            .map(|(idx, tab)| (tab.display_title(), idx == self.active_tab))
             .collect();
 
         let tab_count = tab_info.len();
@@ -2617,6 +3273,13 @@ impl MarkdownApp {
         // Calculate scroll target if header was clicked
         if let Some(idx) = clicked_header_index {
             if let Some(header) = tab.outline_headers.get(idx) {
+                // Source mode has no rendered layout: move the editor caret
+                // to the header's line instead.
+                if tab.source_mode {
+                    tab.pending_caret_byte =
+                        Some(byte_offset_of_line_start(&tab.content, header.line_number));
+                    return;
+                }
                 // Composite key disambiguates duplicate-titled headers (e.g. two
                 // `## Installation` sections). Each occurrence has its own
                 // `nth_with_same_text` index assigned at parse time, and the
@@ -2789,7 +3452,7 @@ impl MarkdownApp {
         };
 
         // Push current search match ranges into the cache so the renderer can paint highlights
-        if search_is_open && !tab.search_matches.is_empty() {
+        if search_is_open && !tab.search_matches.is_empty() && !tab.source_mode {
             let ranges: Vec<_> = tab
                 .search_matches
                 .iter()
@@ -2814,6 +3477,14 @@ impl MarkdownApp {
                 ..Default::default()
             })
             .show(ui, |ui| {
+                // Source editing mode: raw markdown editor instead of the
+                // rendered view. Renderer scroll bookkeeping is meaningless
+                // here, so skip the whole viewer pipeline.
+                if tab.source_mode {
+                    render_source_editor_ui(ui, tab);
+                    return;
+                }
+
                 // Capture scroll input for manual handling during selection
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
@@ -3613,6 +4284,36 @@ impl eframe::App for MarkdownApp {
             self.reload_changed_tabs(changed_paths);
         }
 
+        // Collect completed background saves (never blocking).
+        self.poll_save_outcomes();
+
+        // Debounced rebuild of edit-derived caches (outline headers, local
+        // links, line counts). Only after an idle gap following the last
+        // keystroke — never per frame while typing.
+        let now = Instant::now();
+        for idx in 0..self.tabs.len() {
+            let should_refresh = self.tabs[idx].derived_stale
+                && self.tabs[idx]
+                    .last_edit_at
+                    .is_some_and(|t| now.duration_since(t) >= DERIVED_REFRESH_DEBOUNCE);
+            if should_refresh {
+                self.tabs[idx].refresh_derived();
+                if idx == self.active_tab && self.search.is_open {
+                    // Matches were just cleared; force the find bar to rebuild
+                    // (same invalidation trick the watcher-reload path uses).
+                    self.search.last_tab = None;
+                }
+            }
+        }
+
+        // Window title must reflect the active tab's dirty marker; track the
+        // transition instead of comparing strings every frame.
+        let active_dirty = self.tabs.get(self.active_tab).is_some_and(|t| t.dirty);
+        if active_dirty != self.last_active_dirty {
+            self.last_active_dirty = active_dirty;
+            self.title_dirty = true;
+        }
+
         // Poll for async GVFS directory scan completion
         if self.file_explorer.pending_scan.is_some() {
             if self.file_explorer.poll_pending_scan() {
@@ -3693,6 +4394,8 @@ impl eframe::App for MarkdownApp {
         let mut prev_match = false;
         let mut close_search_kb = false;
         let mut keyboard_scroll_action: Option<KeyboardScrollAction> = None;
+        let mut save_active = false;
+        let mut toggle_source_mode = false;
 
         // Ctrl+/- zoom: applies to lightbox when open, document otherwise
         ctx.input(|i| {
@@ -3792,6 +4495,14 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
                     quit_app = true;
                 }
+                // Ctrl+S: Save active tab (no-op when not dirty / no tab)
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
+                    save_active = true;
+                }
+                // Ctrl+E: Toggle source editing for the active tab
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::E) {
+                    toggle_source_mode = true;
+                }
                 // Ctrl + scroll wheel for zoom
                 if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
                     self.zoom_level = (self.zoom_level
@@ -3833,9 +4544,16 @@ impl eframe::App for MarkdownApp {
                 }
                 // Plain document scroll keys reuse the existing pending-scroll pipeline.
                 // Arrow keys stay available for search navigation while the find bar is open.
+                // In source mode the TextEdit owns caret movement/scrolling, so the
+                // app-level scroll shortcuts must not steal those keys (LESSONS: mode
+                // -specific keys take priority over document-level ones).
                 let no_scroll_modifier =
                     !i.modifiers.ctrl && !i.modifiers.alt && !i.modifiers.command;
-                if no_scroll_modifier {
+                let source_mode_owns_keys = self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|t| t.source_mode);
+                if no_scroll_modifier && !source_mode_owns_keys {
                     if !self.search.is_open {
                         if i.key_pressed(egui::Key::ArrowUp) {
                             keyboard_scroll_action = Some(KeyboardScrollAction::LineUp);
@@ -3876,7 +4594,26 @@ impl eframe::App for MarkdownApp {
             self.show_explorer = !self.show_explorer;
         }
         if quit_app {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            // Guarded: raises an unsaved-changes confirmation instead when
+            // any tab has unsaved edits.
+            self.request_quit(ctx);
+        }
+        if save_active {
+            if let Some(tab) = self.tabs.get(self.active_tab) {
+                if tab.dirty {
+                    let idx = self.active_tab;
+                    if !self.request_save(idx) {
+                        self.error_message =
+                            Some("Save failed: file writer unavailable".to_string());
+                    }
+                }
+            }
+        }
+        if toggle_source_mode {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.toggle_source_mode();
+            }
+            self.title_dirty = true;
         }
         if close_tab {
             self.close_active_tab();
@@ -3967,11 +4704,42 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    let can_save = self
+                        .tabs
+                        .get(self.active_tab)
+                        .is_some_and(|t| t.dirty);
+                    if ui
+                        .add_enabled(
+                            can_save,
+                            egui::Button::new("Save").shortcut_text("Ctrl+S"),
+                        )
+                        .clicked()
+                    {
+                        let idx = self.active_tab;
+                        if !self.request_save(idx) {
+                            self.error_message =
+                                Some("Save failed: file writer unavailable".to_string());
+                        }
+                        ui.close();
+                    }
+
+                    let has_tab = !self.tabs.is_empty();
+                    if ui
+                        .add_enabled(has_tab, egui::Button::new("Open in External Editor"))
+                        .on_hover_text("Opens the current file with the system's default application; live reload picks up changes")
+                        .clicked()
+                    {
+                        if let Some(tab) = self.tabs.get(self.active_tab) {
+                            open_external(&tab.path);
+                        }
+                        ui.close();
+                    }
+
                     if ui
                         .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
                         .clicked()
                     {
-                        self.close_active_tab();
+                        self.request_close_tab(self.active_tab);
                         ui.close();
                     }
 
@@ -4056,6 +4824,29 @@ impl eframe::App for MarkdownApp {
 
                 #[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
                 let view_menu = ui.menu_button("View", |ui| {
+                    let source_editing = self
+                        .tabs
+                        .get(self.active_tab)
+                        .is_some_and(|t| t.source_mode);
+                    let edit_text = if source_editing {
+                        "✓ Edit Markdown (Source)"
+                    } else {
+                        "Edit Markdown (Source)"
+                    };
+                    if ui
+                        .add(egui::Button::new(edit_text).shortcut_text("Ctrl+E"))
+                        .on_hover_text("Edit the raw markdown; Ctrl+E toggles back to the rendered view")
+                        .clicked()
+                    {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.toggle_source_mode();
+                        }
+                        self.title_dirty = true;
+                        ui.close();
+                    }
+
+                    ui.separator();
+
                     let theme_text = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
@@ -4276,6 +5067,10 @@ impl eframe::App for MarkdownApp {
             self.error_message = None;
         }
 
+        // ---- Editing UI state: external-change conflict + unsaved guard ----
+        self.render_conflict_banner(ctx);
+        self.render_unsaved_confirm(ctx);
+
         // Find bar (conditional, between error bar and tab bar)
         let search_outcome = self.render_search_bar(ctx);
         // Rebuild matches if query or tab changed (TextEdit may have mutated the query)
@@ -4296,9 +5091,9 @@ impl eframe::App for MarkdownApp {
             tab_to_close = self.render_tab_bar(ui);
         });
 
-        // Close tab if requested
+        // Close tab if requested (guarded for unsaved edits)
         if let Some(idx) = tab_to_close {
-            self.close_tab(idx);
+            self.request_close_tab(idx);
         }
 
         // File explorer (left sidebar)
@@ -4312,7 +5107,7 @@ impl eframe::App for MarkdownApp {
         // Close tab from explorer (middle-click on open file)
         if let Some(path) = explorer_action.file_to_close {
             if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
-                self.close_tab(idx);
+                self.request_close_tab(idx);
             }
         }
 
@@ -4750,6 +5545,103 @@ mod tests {
         assert_eq!(
             keyboard_scroll_target(25.0, 500.0, 300.0, KeyboardScrollAction::LineDown),
             0.0
+        );
+    }
+
+    // ---- Editing / saving (Phase 0/1) ----
+
+    #[test]
+    fn hash_content_is_deterministic_and_separates_inputs() {
+        let a = hash_content("# Hello\n");
+        assert_eq!(a, hash_content("# Hello\n"));
+        assert_ne!(a, hash_content("# Hello\r\n"));
+        assert_ne!(a, hash_content(""));
+    }
+
+    #[test]
+    fn byte_offset_to_char_index_ascii() {
+        let text = "abcdef";
+        assert_eq!(byte_offset_to_char_index(text, 0), 0);
+        assert_eq!(byte_offset_to_char_index(text, 3), 3);
+        // Past-the-end clamps to char count.
+        assert_eq!(byte_offset_to_char_index(text, 100), 6);
+    }
+
+    #[test]
+    fn byte_offset_to_char_index_multibyte_and_mid_sequence() {
+        // Each emoji is 4 bytes; CJK chars are 3 bytes each.
+        let text = "a🎉b中文";
+        assert_eq!(byte_offset_to_char_index(text, 1), 1); // after 'a'
+        assert_eq!(byte_offset_to_char_index(text, 5), 2); // after emoji
+        assert_eq!(byte_offset_to_char_index(text, 9), 4); // after '中'
+        // Mid-UTF-8-sequence offsets round down to the containing char start.
+        assert_eq!(byte_offset_to_char_index(text, 2), 1);
+        assert_eq!(byte_offset_to_char_index(text, 7), 3); // inside '文'
+        assert_eq!(byte_offset_to_char_index(text, text.len()), 5);
+    }
+
+    #[test]
+    fn byte_offset_of_line_start_basic_lines() {
+        let text = "one\ntwo\nthree";
+        assert_eq!(byte_offset_of_line_start(text, 1), 0);
+        assert_eq!(byte_offset_of_line_start(text, 2), 4);
+        assert_eq!(byte_offset_of_line_start(text, 3), 8);
+        // Beyond the document → end of text.
+        assert_eq!(byte_offset_of_line_start(text, 99), text.len());
+    }
+
+    #[test]
+    fn byte_offset_of_line_start_empty_and_single_line() {
+        assert_eq!(byte_offset_of_line_start("", 1), 0);
+        assert_eq!(byte_offset_of_line_start("only", 1), 0);
+        assert_eq!(byte_offset_of_line_start("only\n", 2), 5);
+    }
+
+    #[test]
+    fn classify_disk_change_ignores_echoes_and_self_writes() {
+        let disk = hash_content("disk");
+        let other = hash_content("other");
+        // Unchanged content re-reported by the watcher.
+        assert_eq!(
+            classify_disk_change(disk, disk, false, None, disk),
+            DiskChange::Ignore
+        );
+        // Our own in-flight write landing on disk.
+        assert_eq!(
+            classify_disk_change(other, other, true, Some(disk), disk),
+            DiskChange::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_disk_change_resyncs_reverted_edits() {
+        let saved = hash_content("saved");
+        // Buffer was edited then undone back to the saved state: dirty but
+        // equal to disk → clear dirty instead of prompting/reloading.
+        assert_eq!(
+            classify_disk_change(saved, saved, true, None, saved),
+            DiskChange::Resync
+        );
+    }
+
+    #[test]
+    fn classify_disk_change_conflicts_only_when_dirty() {
+        let synced = hash_content("synced");
+        let buffer = hash_content("buffer with edits");
+        let external = hash_content("external edit");
+        assert_eq!(
+            classify_disk_change(synced, buffer, true, None, external),
+            DiskChange::Conflict
+        );
+        assert_eq!(
+            classify_disk_change(synced, buffer, false, None, external),
+            DiskChange::Reload
+        );
+        // A pending save must not be mistaken for a resync opportunity.
+        let inflight = hash_content("in-flight snapshot");
+        assert_eq!(
+            classify_disk_change(synced, buffer, false, Some(inflight), external),
+            DiskChange::Reload
         );
     }
 }
