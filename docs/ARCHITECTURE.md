@@ -125,3 +125,33 @@ Left sidebar showing all markdown files in a hierarchical directory tree:
 - Expand/collapse directories with arrow buttons
 - Refresh button to rescan directory
 - Session persistence for: visibility, root directory, expanded directories
+
+## Editing & Saving (Phase 0/1)
+
+Editing roadmap and design rationale live in `docs/research/editing-approaches.md`;
+implementation notes in `docs/devlog/055-editing-phase0-source-mode.md`.
+
+- **Source mode (Ctrl+E)**: the active tab renders a monospace multiline
+  `TextEdit` bound directly to `Tab.content` inside a `ScrollArea`
+  (`render_source_editor_ui`). egui's scroll-to-cursor targets the enclosing
+  ScrollArea, so search jumps / outline clicks move the caret via
+  `pending_caret_byte` (byte offsets converted with
+  `byte_offset_to_char_index` — egui cursors count chars, not bytes).
+- **Save pipeline**: Ctrl+S clones + hashes the buffer on the UI thread and
+  hands a `SaveJob` to a background worker; outcomes arrive via a channel and
+  are polled non-blocking each frame (`poll_save_outcomes`). Writes are
+  atomic: temp file + `fs::rename`.
+- **Dirty tracking**: `Tab.synced_content_hash` (last state known to match
+  disk), `dirty`, `in_flight_save_hash`. Dirty markers appear in the tab bar
+  and window title.
+- **Watcher safety**: watcher events run through the pure policy
+  `classify_disk_change() -> Ignore | Resync | Conflict | Reload`. The app's
+  own saves are never reloaded over the buffer; external changes while dirty
+  raise a conflict banner (Reload from disk / Keep my version) instead of
+  clobbering edits.
+- **Unsaved-changes guards**: closing a dirty tab or quitting raises an
+  in-app confirmation (Save / Discard / Cancel). Quit-with-save defers until
+  all background writes settle.
+- **Derived caches** (`outline_headers`, `local_links`, `content_lines`,
+  `search_matches`) rebuild debounced 250 ms after the last keystroke —
+  never per frame while typing.

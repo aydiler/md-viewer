@@ -15,8 +15,20 @@
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+O | Open file dialog |
+| Ctrl+S | Save active tab (source-mode editing) |
 | F5 | Toggle file watching |
-| Ctrl+Q | Quit application |
+| Ctrl+Q | Quit application (prompts if unsaved edits) |
+
+## Editing
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+E | Toggle source editing for the active tab (raw markdown pane) |
+
+In source mode, Ctrl+W / middle-click closing a dirty tab and Ctrl+Q raise an
+unsaved-changes confirmation with Save / Discard / Cancel. If the watched file
+changes on disk while you have unsaved edits, a banner offers
+Reload-from-disk or Keep-my-version.
 
 ## Navigation
 
