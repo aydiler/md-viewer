@@ -2233,8 +2233,14 @@ impl CommonMarkCache {
     /// over inter-block whitespace so consecutive blocks tile the source
     /// exactly (see [`top_level_block_spans`]). Returns an empty vec before
     /// the first paint or in non-scrollable mode.
+    ///
+    /// Note: `show_scrollable` keys its per-document cache under
+    /// `Id::new(source_id)` (a hash of whatever the caller passed). These
+    /// accessors must replicate that wrapping or they will read a different,
+    /// always-empty entry — pass exactly what you gave `show_scrollable`.
     pub fn top_level_block_spans(&mut self, source_id: &egui::Id) -> Vec<std::ops::Range<usize>> {
-        let sc = scroll_cache(self, source_id);
+        let key = egui::Id::new(source_id);
+        let sc = scroll_cache(self, &key);
         top_level_block_spans(&sc.events)
     }
 
@@ -2242,7 +2248,8 @@ impl CommonMarkCache {
     /// (`record_block_layout(true)` + at least one paint). Until then,
     /// click hit-testing is not possible.
     pub fn has_block_layout(&mut self, source_id: &egui::Id) -> bool {
-        !scroll_cache(self, source_id).boundaries.is_empty()
+        let key = egui::Id::new(source_id);
+        !scroll_cache(self, &key).boundaries.is_empty()
     }
 
     /// Hit-test a content-relative y against the block boundaries recorded
@@ -2253,7 +2260,8 @@ impl CommonMarkCache {
         source_id: &egui::Id,
         y: f32,
     ) -> Option<std::ops::Range<usize>> {
-        let sc = scroll_cache(self, source_id);
+        let key = egui::Id::new(source_id);
+        let sc = scroll_cache(self, &key);
         let spans = top_level_block_spans(&sc.events);
         let last_end = spans.last()?.end;
         // Boundary k sits between block k and block k+1: its top_y is where

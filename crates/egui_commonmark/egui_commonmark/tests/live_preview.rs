@@ -39,6 +39,7 @@ fn run_frame(
         scroll_offset_y: 0.0,
     });
     let feedback = std::cell::Cell::new(None);
+    let source_id = egui::Id::new("test-doc");
 
     ctx.run(
         RawInput {
@@ -59,7 +60,7 @@ fn run_frame(
                 viewer = viewer.edit_region(Some(cfg));
             }
             CentralPanel::default().show(ctx, |ui| {
-                let out = viewer.show_scrollable("test-doc", ui, &mut cache, markdown);
+                let out = viewer.show_scrollable(source_id, ui, &mut cache, markdown);
                 geom.set(FrameGeom {
                     inner_min_y: out.inner_rect.min.y,
                     scroll_offset_y: out.state.offset.y,
@@ -165,4 +166,48 @@ fn live_preview_click_activates_and_types() {
     let edited = ctx.data_mut(|d| d.get_temp::<String>(cfg.id)).unwrap();
     assert!(edited.contains('Z'), "keystroke reached buffer: {edited:?}");
     assert_ne!(edited, MARKDOWN[hit], "buffer diverged from disk text");
+}
+
+/// Regression: the app passes an arbitrary pre-built `egui::Id` as the
+/// source id. `show_scrollable` wraps it via `Id::new(source_id)` for cache
+/// keying — the public accessors must apply the identical wrapping or they
+/// read a different, always-empty entry (clicks then never resolve).
+#[test]
+fn accessors_match_show_scrollable_keying_for_arbitrary_ids() {
+    let ctx = Context::default();
+    // Deliberately NOT derived from a &str the way the other test does:
+    // this is exactly how src/main.rs builds Tab::id from a PathBuf.
+    let tab_id = egui::Id::new(std::path::PathBuf::from("/some/absolute/note.md"));
+    let cache = RefCell::new(CommonMarkCache::default());
+
+    run_frame_with_source_id(&ctx, MARKDOWN, &cache, tab_id);
+
+    assert!(
+        cache.borrow_mut().has_block_layout(&tab_id),
+        "accessors must see boundaries recorded under show_scrollable's wrapped key"
+    );
+    let spans = cache.borrow_mut().top_level_block_spans(&tab_id);
+    assert_eq!(spans.len(), 4);
+}
+
+fn run_frame_with_source_id(
+    ctx: &Context,
+    markdown: &str,
+    cache: &RefCell<CommonMarkCache>,
+    source_id: egui::Id,
+) {
+    ctx.run(
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            let mut cache = cache.borrow_mut();
+            CentralPanel::default().show(ctx, |ui| {
+                CommonMarkViewer::new()
+                    .record_block_layout(true)
+                    .show_scrollable(source_id, ui, &mut cache, markdown);
+            });
+        },
+    );
 }
