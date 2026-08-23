@@ -620,8 +620,48 @@ impl CommonMarkViewerInternal {
                 .enumerate()
                 .peekable();
 
+            // Live-preview editing state for this frame.
+            let mut edit_painted = false;
+            let _ = cache.take_edit_feedback();
+
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
+                let src_span_end = src_span.end;
+
+                // ---- Live-preview editing region ----
+                // Events fully inside the configured byte range are not
+                // painted; the first of them paints an inline TextEdit bound
+                // to an egui-temp buffer instead. The range must align to
+                // top-level block boundaries (caller contract) so skipping
+                // never strands the list/table/blockquote state machine mid-
+                // container. Partially-overlapping events (misaligned range)
+                // fall through to normal rendering defensively.
+                if let Some(cfg) = &options.edit_region {
+                    let inside =
+                        src_span.start >= cfg.src.start && src_span.end <= cfg.src.end;
+                    if inside {
+                        if !edit_painted {
+                            edit_painted = true;
+                            let mut buf = ui.ctx().data_mut(|d| {
+                                d.get_temp::<String>(cfg.id).unwrap_or_default()
+                            });
+                            let response = egui::TextEdit::multiline(&mut buf)
+                                .id(cfg.id)
+                                .code_editor()
+                                .desired_width(max_width)
+                                .show(ui);
+                            let changed = response.response.changed();
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(cfg.id, buf.clone()));
+                            cache.stash_edit_feedback(crate::misc::EditFeedback {
+                                text: buf,
+                                changed,
+                            });
+                        }
+                        continue;
+                    }
+                }
+
                 // Add a viewport-skip waypoint at every block-level end (not
                 // just list-internal ends as the original code did). Without
                 // this, docs whose content is mostly headings + paragraphs
@@ -674,6 +714,15 @@ impl CommonMarkViewerInternal {
                             scroll_cache
                                 .split_points
                                 .push((index, start_position, end_position));
+                            if options.record_block_layout {
+                                // `next_start` = first byte after this
+                                // boundary event; the following block begins
+                                // here (modulo inter-block whitespace).
+                                scroll_cache.boundaries.push(crate::misc::BlockBoundary {
+                                    top_y: end_position.y,
+                                    next_start: src_span_end,
+                                });
+                            }
                         }
                     }
                 }
@@ -744,6 +793,7 @@ impl CommonMarkViewerInternal {
                 // post-change frame falls into the bootstrap branch below.
                 sc.page_size = None;
                 sc.split_points.clear();
+                sc.boundaries.clear();
             }
             // Width/zoom/theme change: y-coordinates are invalid for the
             // new layout, even though parsed events are still good.
@@ -751,6 +801,7 @@ impl CommonMarkViewerInternal {
                 sc.layout_signature = layout_sig;
                 sc.page_size = None;
                 sc.split_points.clear();
+                sc.boundaries.clear();
                 sc.available_size = available_size;
             }
             // When the caller wants to jump to a specific scroll position
@@ -795,6 +846,7 @@ impl CommonMarkViewerInternal {
             {
                 sc.page_size = None;
                 sc.split_points.clear();
+                sc.boundaries.clear();
             }
         }
         // Header positions are content-keyed; new content means the cached

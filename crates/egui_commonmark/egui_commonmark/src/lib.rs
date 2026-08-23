@@ -81,7 +81,10 @@ mod parsers;
 pub use egui_commonmark_backend_extended::RenderHtmlFn;
 pub use egui_commonmark_backend_extended::RenderMathFn;
 pub use egui_commonmark_backend_extended::alerts::{Alert, AlertBundle};
-pub use egui_commonmark_backend_extended::misc::{CommonMarkCache, STRONG_FONT_FAMILY};
+pub use egui_commonmark_backend_extended::misc::{
+    CommonMarkCache, EditFeedback, EditRegionConfig, STRONG_FONT_FAMILY,
+};
+pub use egui_commonmark_backend_extended::misc::{BlockBoundary, top_level_block_spans};
 pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 #[cfg(feature = "math")]
 pub use egui_commonmark_backend_extended::render_math;
@@ -433,6 +436,23 @@ impl<'f> CommonMarkViewer<'f> {
     /// outer `ScrollArea` — `show_scrollable` owns the ScrollArea internally.
     pub fn pending_scroll_offset(mut self, offset: Option<f32>) -> Self {
         self.pending_scroll_offset = offset;
+        self
+    }
+
+    /// Live-preview editing: replace the given top-level block byte range
+    /// with an inline TextEdit for this frame. The editor's working buffer
+    /// lives in egui temp state under `EditRegionConfig::id`; collect it via
+    /// [`CommonMarkCache::take_edit_feedback`] right after painting and splice
+    /// changed text back into your own buffer.
+    pub fn edit_region(mut self, region: Option<EditRegionConfig>) -> Self {
+        self.options.edit_region = region;
+        self
+    }
+
+    /// Record block boundaries while painting so the caller can hit-test
+    /// clicks into byte ranges via [`CommonMarkCache::block_span_at_content_y`].
+    pub fn record_block_layout(mut self, on: bool) -> Self {
+        self.options.record_block_layout = on;
         self
     }
 

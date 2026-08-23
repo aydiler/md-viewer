@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
-use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer, EditRegionConfig};
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
 use regex::Regex;
@@ -91,6 +91,19 @@ fn byte_offset_to_char_index(text: &str, byte_offset: usize) -> usize {
         }
     };
     text[..boundary].chars().count()
+}
+
+/// Recompute the live-edit anchor after the edited block's text changed
+/// length. The anchor keeps its relative position inside the block, clamped
+/// to the new block length.
+fn anchor_after_splice(
+    anchor: usize,
+    range_start: usize,
+    range_end: usize,
+    new_len: usize,
+) -> usize {
+    let within = anchor.saturating_sub(range_start).min(range_end - range_start);
+    range_start + within.min(new_len)
 }
 
 /// Byte offset of the start of a 1-based `line` in `text`. Lines beyond the
@@ -339,6 +352,18 @@ struct ParsedHeaders {
     document_title: Option<String>,
     /// Outline headers (excludes the first h1)
     outline_headers: Vec<Header>,
+}
+
+/// Editing surface of a tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditMode {
+    /// Pure rendered view (original viewer behavior).
+    Rendered,
+    /// Whole-file raw markdown TextEdit.
+    Source,
+    /// Obsidian-style live preview: everything rendered except the active
+    /// top-level block, which shows as an inline raw-text editor.
+    Live,
 }
 
 /// A search match identified by byte range and line number
@@ -844,7 +869,14 @@ struct Tab {
     /// watcher events for the same change dedupe.
     external_change_hash: Option<u64>,
     /// Source editing mode: raw markdown TextEdit instead of rendered view.
-    source_mode: bool,
+    edit_mode: EditMode,
+    /// Live preview: byte offset inside the currently-edited top-level block
+    /// (`None` = view-only, everything rendered). The block is resolved from
+    /// this anchor every frame so re-segmentation can't strand it.
+    active_edit_byte: Option<usize>,
+    /// Which (content_version, block_start) the inline editor buffer was last
+    /// seeded for — prevents clobbering in-flight typing with re-seeds.
+    live_seeded_for: Option<(u64, usize)>,
     /// Derived caches (`outline_headers`, `local_links`, `content_lines`,
     /// `search_matches`) are stale relative to `content` after an edit.
     derived_stale: bool,
@@ -856,6 +888,10 @@ struct Tab {
     /// Byte offset to move the source-editor caret to (search jumps, outline
     /// clicks while in source mode). Consumed by the editor render pass.
     pending_caret_byte: Option<usize>,
+    /// Top-left of the rendered content area last frame (inner_rect.min),
+    /// used to convert pointer clicks into content-relative y for
+    /// live-preview block hit-testing.
+    last_content_origin: Option<egui::Pos2>,
 }
 
 impl Tab {
@@ -906,11 +942,14 @@ impl Tab {
             in_flight_save_hash: None,
             dirty: false,
             external_change_hash: None,
-            source_mode: false,
+            edit_mode: EditMode::Rendered,
+            active_edit_byte: None,
+            live_seeded_for: None,
             derived_stale: false,
             last_edit_at: None,
             close_after_save: false,
             pending_caret_byte: None,
+            last_content_origin: None,
         }
     }
 
@@ -979,14 +1018,29 @@ impl Tab {
         self.last_edit_at = Some(now);
     }
 
-    /// Flip between rendered and source-editing mode. When leaving source
-    /// mode with un-refreshed edits, rebuild derived caches immediately so
-    /// outline, links and search match what gets rendered again.
-    fn toggle_source_mode(&mut self) {
-        self.source_mode = !self.source_mode;
-        if !self.source_mode && self.derived_stale {
+    /// Switch editing mode. Leaving Source/Live with un-refreshed edits
+    /// rebuilds derived caches immediately so outline, links and search match
+    /// what gets rendered again. Deactivates any live-edit block.
+    fn set_edit_mode(&mut self, mode: EditMode) {
+        if self.edit_mode == mode {
+            return;
+        }
+        self.edit_mode = mode;
+        self.active_edit_byte = None;
+        self.live_seeded_for = None;
+        if mode == EditMode::Rendered && self.derived_stale {
             self.refresh_derived();
         }
+    }
+
+    /// Ctrl+E: toggle between the rendered view and live preview (the
+    /// flagship editing experience); from Source it moves to Live.
+    fn cycle_edit_mode(&mut self) {
+        let next = match self.edit_mode {
+            EditMode::Rendered => EditMode::Live,
+            EditMode::Live | EditMode::Source => EditMode::Rendered,
+        };
+        self.set_edit_mode(next);
     }
 
     /// Mark the buffer as in-sync with disk at `hash` (after load or a
@@ -2860,9 +2914,13 @@ impl MarkdownApp {
             return;
         };
         // Source mode has no rendered layout to scroll; move the editor
-        // caret to the match instead.
-        if tab.source_mode {
+        // caret to the match instead. Live preview activates the block.
+        if tab.edit_mode == EditMode::Source {
             tab.pending_caret_byte = Some(m.byte_start);
+            return;
+        }
+        if tab.edit_mode == EditMode::Live {
+            tab.active_edit_byte = Some(m.byte_start);
             return;
         }
         if tab.last_content_height <= 0.0 || tab.content_lines == 0 {
@@ -3273,10 +3331,15 @@ impl MarkdownApp {
         // Calculate scroll target if header was clicked
         if let Some(idx) = clicked_header_index {
             if let Some(header) = tab.outline_headers.get(idx) {
-                // Source mode has no rendered layout: move the editor caret
-                // to the header's line instead.
-                if tab.source_mode {
+                // Source/Live modes have no full rendered layout: jump via the
+                // editor (caret in Source; activate the containing block in Live).
+                if tab.edit_mode == EditMode::Source {
                     tab.pending_caret_byte =
+                        Some(byte_offset_of_line_start(&tab.content, header.line_number));
+                    return;
+                }
+                if tab.edit_mode == EditMode::Live {
+                    tab.active_edit_byte =
                         Some(byte_offset_of_line_start(&tab.content, header.line_number));
                     return;
                 }
@@ -3452,7 +3515,7 @@ impl MarkdownApp {
         };
 
         // Push current search match ranges into the cache so the renderer can paint highlights
-        if search_is_open && !tab.search_matches.is_empty() && !tab.source_mode {
+        if search_is_open && !tab.search_matches.is_empty() && tab.edit_mode != EditMode::Source {
             let ranges: Vec<_> = tab
                 .search_matches
                 .iter()
@@ -3468,6 +3531,26 @@ impl MarkdownApp {
             tab.cache.clear_search_ranges();
         }
 
+        // Live preview: resolve clicks from the previous frame's layout into
+        // the byte anchor of the block to edit. Runs before painting so the
+        // new region applies this frame (one frame of latency is imperceptible).
+        if tab.edit_mode == EditMode::Live
+            && ui.ctx().input(|i| i.pointer.primary_clicked())
+        {
+            if let Some(origin) = tab.last_content_origin {
+                let pointer_y = ui.ctx().input(|i| i.pointer.latest_pos().map(|p| p.y));
+                if let Some(py) = pointer_y {
+                    let content_y = py - origin.y + tab.scroll_offset;
+                    if let Some(span) = tab.cache.block_span_at_content_y(&tab.id, content_y) {
+                        tab.active_edit_byte = Some(span.start);
+                    } else {
+                        // Click outside any recorded block → leave editing.
+                        tab.active_edit_byte = None;
+                    }
+                }
+            }
+        }
+
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::NONE
@@ -3480,7 +3563,7 @@ impl MarkdownApp {
                 // Source editing mode: raw markdown editor instead of the
                 // rendered view. Renderer scroll bookkeeping is meaningless
                 // here, so skip the whole viewer pipeline.
-                if tab.source_mode {
+                if tab.edit_mode == EditMode::Source {
                     render_source_editor_ui(ui, tab);
                     return;
                 }
@@ -3489,6 +3572,38 @@ impl MarkdownApp {
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
+                // ---- Live-preview configuration ----
+                let mut live_range: Option<std::ops::Range<usize>> = None;
+                let mut live_cfg: Option<EditRegionConfig> = None;
+                if tab.edit_mode == EditMode::Live {
+                    let spans = tab.cache.top_level_block_spans(&tab.id);
+                    // Resolve the active block from the stored anchor; fall
+                    // back to the first block when set but stale.
+                    let active = tab
+                        .active_edit_byte
+                        .and_then(|a| spans.iter().find(|r| r.contains(&a)).cloned())
+                        .or_else(|| {
+                            tab.active_edit_byte.and_then(|_| spans.first().cloned())
+                        });
+                    if let Some(range) = active {
+                        let editor_id = tab.source_editor_id().with("live");
+                        // Seed the inline buffer only for a NEW activation —
+                        // otherwise in-flight typing would be clobbered.
+                        let key = (tab.content_version, range.start);
+                        if tab.live_seeded_for != Some(key) {
+                            let seed = tab.content[range.clone()].to_string();
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(editor_id, seed));
+                            tab.live_seeded_for = Some(key);
+                        }
+                        live_cfg = Some(EditRegionConfig {
+                            src: range.clone(),
+                            id: editor_id,
+                        });
+                        live_range = Some(range);
+                    }
+                }
+
                 // The renderer owns the ScrollArea now (via show_scrollable),
                 // so we configure scroll_source / pending offset / content
                 // version through builder methods. The returned ScrollAreaOutput
@@ -3496,7 +3611,7 @@ impl MarkdownApp {
                 // selection-preserving wheel hack below.
                 let pending = tab.pending_scroll_offset.take();
                 let default_width = content_default_width(self.full_width_content);
-                let mut scroll_output = CommonMarkViewer::new()
+                let mut viewer = CommonMarkViewer::new()
                     .default_implicit_uri_scheme(&tab.base_uri)
                     .max_image_width(Some(800))
                     .default_width(default_width)
@@ -3516,12 +3631,37 @@ impl MarkdownApp {
                     .heading_spacing_below(0.75)
                     .content_version(tab.content_version)
                     .pending_scroll_offset(pending)
-                    .scroll_source(egui::scroll_area::ScrollSource {
-                        scroll_bar: true,
-                        drag: false,
-                        mouse_wheel: true,
-                    })
-                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+                    .record_block_layout(tab.edit_mode == EditMode::Live);
+                if let Some(cfg) = live_cfg {
+                    viewer = viewer.edit_region(Some(cfg));
+                }
+                let mut scroll_output = viewer.scroll_source(egui::scroll_area::ScrollSource {
+                    scroll_bar: true,
+                    drag: false,
+                    mouse_wheel: true,
+                })
+                .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+
+                // ---- Live preview: splice edited block text back ----
+                if let Some(range) = live_range.clone() {
+                    if let Some(fb) = tab.cache.take_edit_feedback() {
+                        if fb.changed && fb.text != tab.content[range.clone()] {
+                            let anchor = tab.active_edit_byte.unwrap_or(range.start);
+                            let new_anchor = anchor_after_splice(
+                                anchor,
+                                range.start,
+                                range.end,
+                                fb.text.len(),
+                            );
+                            tab.content.replace_range(range.clone(), &fb.text);
+                            tab.active_edit_byte = Some(new_anchor);
+                            tab.mark_edited(Instant::now());
+                        }
+                    }
+                }
+                if tab.edit_mode == EditMode::Live {
+                    tab.last_content_origin = Some(scroll_output.inner_rect.min);
+                }
 
                 tab.scroll_offset = scroll_output.state.offset.y;
                 tab.last_viewport_height = scroll_output.inner_rect.height();
@@ -4499,9 +4639,24 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
                     save_active = true;
                 }
-                // Ctrl+E: Toggle source editing for the active tab
+                // Ctrl+E: Toggle live-preview editing for the active tab
                 if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::E) {
                     toggle_source_mode = true;
+                }
+                // Esc (Live mode, block active, find bar closed): stop
+                // editing the active block, return to the rendered view.
+                if i.key_pressed(egui::Key::Escape)
+                    && !self.search.is_open
+                {
+                    let deactivate = self
+                        .tabs
+                        .get(self.active_tab)
+                        .is_some_and(|t| t.edit_mode == EditMode::Live && t.active_edit_byte.is_some());
+                    if deactivate {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.active_edit_byte = None;
+                        }
+                    }
                 }
                 // Ctrl + scroll wheel for zoom
                 if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
@@ -4549,10 +4704,10 @@ impl eframe::App for MarkdownApp {
                 // -specific keys take priority over document-level ones).
                 let no_scroll_modifier =
                     !i.modifiers.ctrl && !i.modifiers.alt && !i.modifiers.command;
-                let source_mode_owns_keys = self
-                    .tabs
-                    .get(self.active_tab)
-                    .is_some_and(|t| t.source_mode);
+                let source_mode_owns_keys = self.tabs.get(self.active_tab).is_some_and(|t| {
+                    t.edit_mode == EditMode::Source
+                        || (t.edit_mode == EditMode::Live && t.active_edit_byte.is_some())
+                });
                 if no_scroll_modifier && !source_mode_owns_keys {
                     if !self.search.is_open {
                         if i.key_pressed(egui::Key::ArrowUp) {
@@ -4611,7 +4766,7 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_source_mode {
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                tab.toggle_source_mode();
+                tab.cycle_edit_mode();
             }
             self.title_dirty = true;
         }
@@ -4824,22 +4979,52 @@ impl eframe::App for MarkdownApp {
 
                 #[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
                 let view_menu = ui.menu_button("View", |ui| {
-                    let source_editing = self
+                    let current_mode = self
                         .tabs
                         .get(self.active_tab)
-                        .is_some_and(|t| t.source_mode);
-                    let edit_text = if source_editing {
-                        "✓ Edit Markdown (Source)"
-                    } else {
-                        "Edit Markdown (Source)"
+                        .map(|t| t.edit_mode)
+                        .unwrap_or(EditMode::Rendered);
+                    let mode_label = |mode: EditMode, label: &str| -> String {
+                        if current_mode == mode {
+                            format!("✓ {label}")
+                        } else {
+                            label.to_string()
+                        }
                     };
+                    let mut picked_mode: Option<EditMode> = None;
                     if ui
-                        .add(egui::Button::new(edit_text).shortcut_text("Ctrl+E"))
-                        .on_hover_text("Edit the raw markdown; Ctrl+E toggles back to the rendered view")
+                        .add(
+                            egui::Button::new(mode_label(
+                                EditMode::Live,
+                                "Edit Markdown (Live Preview)",
+                            ))
+                            .shortcut_text("Ctrl+E"),
+                        )
+                        .on_hover_text("Everything renders except the block you click into, which shows raw markdown")
                         .clicked()
                     {
+                        picked_mode = Some(EditMode::Live);
+                    }
+                    if ui
+                        .add(egui::Button::new(mode_label(
+                            EditMode::Source,
+                            "Edit Markdown (Source)",
+                        )))
+                        .on_hover_text("Edit the whole file as raw markdown")
+                        .clicked()
+                    {
+                        picked_mode = Some(EditMode::Source);
+                    }
+                    if ui
+                        .add(egui::Button::new(mode_label(EditMode::Rendered, "Rendered")))
+                        .on_hover_text("Reading view")
+                        .clicked()
+                    {
+                        picked_mode = Some(EditMode::Rendered);
+                    }
+                    if let Some(mode) = picked_mode {
                         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                            tab.toggle_source_mode();
+                            tab.set_edit_mode(mode);
                         }
                         self.title_dirty = true;
                         ui.close();
@@ -5643,5 +5828,19 @@ mod tests {
             classify_disk_change(synced, buffer, false, Some(inflight), external),
             DiskChange::Reload
         );
+    }
+
+    #[test]
+    fn anchor_after_splice_keeps_relative_position() {
+        // Block [10..20), anchor at 15 (5 bytes in), text grows to 30 bytes.
+        assert_eq!(anchor_after_splice(15, 10, 20, 30), 15);
+        // Anchor at block start stays at block start.
+        assert_eq!(anchor_after_splice(10, 10, 20, 0), 10);
+        // Deleting the whole block clamps the anchor to its start.
+        assert_eq!(anchor_after_splice(18, 10, 20, 0), 10);
+        // Anchor beyond a shrunken block clamps to the new end.
+        assert_eq!(anchor_after_splice(19, 10, 20, 3), 13);
+        // Anchor before the range is untouched by clamping semantics.
+        assert_eq!(anchor_after_splice(4, 10, 20, 8), 10);
     }
 }

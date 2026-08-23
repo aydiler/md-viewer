@@ -2,6 +2,7 @@ use crate::alerts::AlertBundle;
 use crate::typography::TypographyConfig;
 use egui::{RichText, TextStyle, Ui, text::LayoutJob};
 use std::collections::HashMap;
+use std::ops::Range;
 #[cfg(feature = "math")]
 use std::collections::HashSet;
 #[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid"))]
@@ -62,6 +63,53 @@ pub struct CommonMarkOptions<'f> {
     /// Opt into using the named strong font family. Callers must register
     /// `STRONG_FONT_FAMILY` in egui before enabling this to avoid lookup panics.
     pub use_strong_font_family: bool,
+    /// Live-preview editing: when set, events fully inside this source byte
+    /// range are not painted; an inline multiline TextEdit is rendered in
+    /// their place instead. Its working buffer lives in egui temp state under
+    /// [`EditRegionConfig::id`], so keystrokes persist across frames without
+    /// the caller re-lending the source string; the caller collects the
+    /// current text each frame via [`CommonMarkCache::take_edit_feedback`]
+    /// and splices it back into its own buffer.
+    ///
+    /// Contract: the range must align to top-level block boundaries (as
+    /// produced by [`top_level_block_spans`] on the same content), because
+    /// skipped events bypass the renderer's list/table/blockquote state
+    /// machine — only complete top-level subtrees are safe to skip.
+    pub edit_region: Option<EditRegionConfig>,
+    /// Record the y position of every safe block boundary while painting
+    /// (next to `split_points`). Callers combine this with
+    /// [`top_level_block_spans`] to hit-test clicks into byte ranges for
+    /// click-to-edit activation.
+    pub record_block_layout: bool,
+}
+
+/// Configuration for the inline editor painted by the live-preview mode.
+#[derive(Clone, Debug)]
+pub struct EditRegionConfig {
+    /// Source byte range replaced by the editor.
+    pub src: Range<usize>,
+    /// egui id owning the editor's working text buffer (egui temp state).
+    pub id: egui::Id,
+}
+
+/// One frame's inline-editor result, stashed by the renderer and collected by
+/// the caller via [`CommonMarkCache::take_edit_feedback`].
+#[derive(Clone, Debug)]
+pub struct EditFeedback {
+    /// Current contents of the inline editor buffer.
+    pub text: String,
+    /// True when the buffer changed since the previous frame.
+    pub changed: bool,
+}
+
+/// Byte range + painted y of one block boundary, recorded when
+/// [`CommonMarkOptions::record_block_layout`] is on. `top_y` is the content-
+/// relative y at which the *following* block starts; `next_start` is the byte
+/// offset just after the boundary event (the following block's first byte).
+#[derive(Clone, Debug)]
+pub struct BlockBoundary {
+    pub top_y: f32,
+    pub next_start: usize,
 }
 
 impl std::fmt::Debug for CommonMarkOptions<'_> {
@@ -87,6 +135,8 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             .field("mutable", &self.mutable)
             .field("typography", &self.typography)
             .field("use_strong_font_family", &self.use_strong_font_family)
+            .field("edit_region", &self.edit_region)
+            .field("record_block_layout", &self.record_block_layout)
             .finish()
     }
 }
@@ -111,6 +161,8 @@ impl Default for CommonMarkOptions<'_> {
             html_fn: None,
             typography: TypographyConfig::default(),
             use_strong_font_family: false,
+            edit_region: None,
+            record_block_layout: false,
         }
     }
 }
@@ -1779,11 +1831,14 @@ pub struct CommonMarkCache {
     /// Current scroll offset, set before rendering to calculate content-relative positions.
     current_scroll_offset: f32,
 
-    /// Byte ranges of search matches in the source content. Renderer paints a background
-    /// color on overlapping text events. Sorted ascending by start.
+    /// Byte ranges of search matches in the source content. Renderer paints a
+    /// background color on overlapping text events. Sorted ascending by start.
     search_ranges: Vec<std::ops::Range<usize>>,
     /// Active match — gets a stronger highlight color.
     active_search_range: Option<std::ops::Range<usize>>,
+    /// Inline-editor result stashed during the last paint; collected via
+    /// [`CommonMarkCache::take_edit_feedback`].
+    edit_feedback: Option<EditFeedback>,
     /// Content-relative y position recorded by the renderer when the active match
     /// is painted. Used by the app for precise scroll-into-view, since line-ratio
     /// estimates are unreliable in image-heavy documents.
@@ -1878,6 +1933,7 @@ impl Default for CommonMarkCache {
             search_ranges: Vec::new(),
             active_search_range: None,
             active_search_y: None,
+            edit_feedback: None,
             #[cfg(feature = "mermaid")]
             mermaid_states: HashMap::new(),
             #[cfg(feature = "mermaid")]
@@ -2159,6 +2215,127 @@ impl CommonMarkCache {
     pub fn set_cached_events(&mut self, content_hash: u64, events: Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>) {
         self.cached_events = Some((content_hash, events));
     }
+
+    /// Take the inline-editor feedback stashed by the most recent paint, if
+    /// any. The stash is cleared by the call.
+    pub fn take_edit_feedback(&mut self) -> Option<EditFeedback> {
+        self.edit_feedback.take()
+    }
+
+    /// Stash inline-editor feedback for this frame (renderer-internal use;
+    /// callers read it back with [`Self::take_edit_feedback`]).
+    pub fn stash_edit_feedback(&mut self, feedback: EditFeedback) {
+        self.edit_feedback = Some(feedback);
+    }
+
+    /// Byte ranges of the top-level blocks of the last content parsed for
+    /// `source_id`, derived from the cached event spans. Ranges are extended
+    /// over inter-block whitespace so consecutive blocks tile the source
+    /// exactly (see [`top_level_block_spans`]). Returns an empty vec before
+    /// the first paint or in non-scrollable mode.
+    pub fn top_level_block_spans(&mut self, source_id: &egui::Id) -> Vec<std::ops::Range<usize>> {
+        let sc = scroll_cache(self, source_id);
+        top_level_block_spans(&sc.events)
+    }
+
+    /// Hit-test a content-relative y against the block boundaries recorded
+    /// during the last paint with `record_block_layout(true)`; returns the
+    /// byte range of the clicked top-level block.
+    pub fn block_span_at_content_y(
+        &mut self,
+        source_id: &egui::Id,
+        y: f32,
+    ) -> Option<std::ops::Range<usize>> {
+        let sc = scroll_cache(self, source_id);
+        let last_end = top_level_block_spans(&sc.events).last()?.end;
+        // Boundary i sits between span i and span i+1: its `next_start` opens
+        // the following block, and the next boundary (or the document end)
+        // closes it.
+        let idx = sc
+            .boundaries
+            .iter()
+            .rposition(|b| b.top_y <= y + f32::EPSILON)?;
+        let start = sc.boundaries[idx].next_start.min(last_end);
+        let end = sc
+            .boundaries
+            .get(idx + 1)
+            .map(|b| b.next_start.min(last_end))
+            .unwrap_or(last_end);
+        Some(start..end.max(start))
+    }
+}
+
+/// Compute top-level (depth-0) block byte ranges from cached pulldown events.
+///
+/// A block opens at the first `Start` seen at depth 0 and closes at its
+/// matching container-level `End`; standalone top-level events (rules, …) are
+/// their own blocks. Consecutive ranges are then extended forward over
+/// whitespace so they tile the source without gaps — click-to-edit splices
+/// therefore preserve the blank lines separating blocks.
+pub fn top_level_block_spans(
+    events: &[(pulldown_cmark::Event<'static>, std::ops::Range<usize>)],
+) -> Vec<std::ops::Range<usize>> {
+    use pulldown_cmark::{Event, TagEnd};
+
+    let is_top_level_end = |tag: &TagEnd| {
+        matches!(
+            tag,
+            TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::BlockQuote(_)
+                | TagEnd::CodeBlock
+                | TagEnd::List(_)
+                | TagEnd::FootnoteDefinition
+                | TagEnd::Table
+                | TagEnd::HtmlBlock
+                | TagEnd::MetadataBlock(_)
+                | TagEnd::DefinitionList
+        )
+    };
+
+    let mut raw: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut depth: usize = 0;
+    let mut open_start: Option<usize> = None;
+
+    for (event, span) in events {
+        match event {
+            Event::Start(_) => {
+                if depth == 0 {
+                    open_start.get_or_insert(span.start);
+                }
+                depth += 1;
+            }
+            Event::End(tag_end) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && is_top_level_end(tag_end) {
+                    if let Some(start) = open_start.take() {
+                        raw.push(start..span.end);
+                    }
+                }
+            }
+            _ => {
+                // Standalone top-level events (Rule, inline math blocks…)
+                if depth == 0 && open_start.is_none() {
+                    raw.push(span.clone());
+                }
+            }
+        }
+    }
+
+    // Extend each range forward over whitespace so blocks tile the source.
+    let mut out: Vec<std::ops::Range<usize>> = Vec::with_capacity(raw.len());
+    for range in raw {
+        match out.last_mut() {
+            Some(prev) if range.start <= prev.end => prev.end = prev.end.max(range.end),
+            _ => out.push(range),
+        }
+    }
+    for i in 0..out.len() {
+        if let Some(next) = out.get(i + 1) {
+            out[i].end = next.start;
+        }
+    }
+    out
 }
 
 pub fn scroll_cache<'a>(cache: &'a mut CommonMarkCache, id: &egui::Id) -> &'a mut ScrollableCache {
@@ -2185,4 +2362,56 @@ pub fn prepare_show(cache: &mut CommonMarkCache, ctx: &egui::Context) {
     }
 
     cache.deactivate_link_hooks();
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::top_level_block_spans;
+    use pulldown_cmark::{Options, Parser};
+
+    fn spans(src: &str) -> Vec<std::ops::Range<usize>> {
+        let events: Vec<_> = Parser::new_ext(src, Options::all())
+            .into_offset_iter()
+            .map(|(e, r)| (e.into_static(), r))
+            .collect();
+        top_level_block_spans(&events)
+    }
+
+    #[test]
+    fn tiles_headings_paragraphs_and_lists() {
+        let src = "# Title\n\ntext para\n\n- a\n- b\n";
+        let out = spans(src);
+        assert_eq!(out.len(), 3, "heading, paragraph, list: {out:?}");
+        // Ranges tile the whole source with no gaps.
+        assert_eq!(out.first().unwrap().start, 0);
+        let mut prev_end = 0;
+        for r in &out {
+            assert_eq!(r.start, prev_end, "gap before {r:?}");
+            prev_end = r.end;
+        }
+        assert_eq!(prev_end, src.len());
+    }
+
+    #[test]
+    fn code_fence_is_one_block() {
+        let src = "before\n\n```rust\nlet x = 1;\n```\n\nafter\n";
+        let out = spans(src);
+        assert_eq!(out.len(), 3, "{out:?}");
+        let fence = &out[1];
+        assert!(src[fence.clone()].starts_with("```"));
+    }
+
+    #[test]
+    fn blockquote_and_table_stay_atomic() {
+        let src = "> quoted\n> lines\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let out = spans(src);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(src[out[0].clone()].starts_with('>'));
+        assert!(src[out[1].clone()].starts_with('|'));
+    }
+
+    #[test]
+    fn empty_input_yields_no_blocks() {
+        assert!(spans("").is_empty());
+    }
 }
