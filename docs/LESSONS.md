@@ -266,7 +266,14 @@ egui::Frame::none()
     .show(ui, |ui| { /* content */ });
 ```
 **Why both?** Reduced grab radius alone isn't enough. The 3px margin provides physical separation without creating a visible gap (8px was too much and created a black gap).
+**Update (055):** Shrinking the grab radius traded jitter for un-grabbability — egui gives the press to whichever widget *contains* the pointer (selectable text galleys, scrollbar handles), so only a ~2px corridor started a resize. The definitive fix is app-owned strips registered *after* all content (later registration wins same-layer ties); see `render_panel_resize_strips` and devlog 055.
 **Files:** `src/main.rs`
+
+### A widget that contains the pointer beats any nearby strip in egui hit-testing
+**Context:** Side-panel separators were nearly impossible to grab from the document side
+**Problem:** `hit_test` picks the top-most containing widget or the closest one within `interact_radius` (5px default). Widening `resize_grab_radius_side` cannot rescue presses that land ON text/scrollbar widgets — distance 0 always wins.
+**Fix:** Register your own interaction widget later than the competitors (inside CentralPanel after content) covering the region you want to own, and drive state from its `dragged()` / `double_clicked()`. Keep it in the same layer so wheel routing and popups stay untouched.
+**Files:** `src/main.rs`, `docs/devlog/055-panel-resize-strips.md`
 
 ---
 

@@ -52,6 +52,24 @@ const OUTLINE_DEFAULT_WIDTH: f32 = 208.0; // 200 + 8 margins
 const PANEL_SEPARATORS: f32 = 16.0;
 const OPTIMAL_WINDOW_HEIGHT: f32 = 750.0;
 
+// ── Side-panel resizing (app-owned drag strips) ─────────────────────────
+// egui's built-in SidePanel resize strip is only ±2px wide here (see
+// `resize_grab_radius_side` below) and loses press contests to whatever
+// widget contains the pointer — selectable text galleys and the document
+// scrollbar both steal the drag on the content flank of the outline panel,
+// leaving a ~2px corridor to start a resize (measured, see devlog).
+// Instead we own the interaction: an invisible strip is registered above
+// the panels after all content each frame, so it wins egui's top-most
+// tie-breaking, and the widths live in app state where they can persist.
+const PANEL_RESIZE_STRIP_HALF_WIDTH: f32 = 6.0;
+
+const EXPLORER_MIN_WIDTH: f32 = 150.0;
+const EXPLORER_MAX_WIDTH: f32 = 300.0;
+const OUTLINE_MIN_WIDTH: f32 = 120.0;
+const OUTLINE_MAX_WIDTH: f32 = 400.0;
+/// Width restored by double-clicking a separator.
+const PANEL_RESET_WIDTH: f32 = 200.0;
+
 // Keyboard document scroll deltas are centralized so shortcut wiring and tests
 // share the same line/page behavior.
 const KEYBOARD_LINE_SCROLL_STEP: f32 = 48.0;
@@ -143,6 +161,15 @@ fn format_relative_time(epoch_secs: u64, now: u64) -> String {
     }
 }
 
+/// Per-frame interaction outcome of one side-panel resize strip.
+#[derive(Default)]
+struct StripState {
+    hovered: bool,
+    dragged: bool,
+    double_clicked: bool,
+    pointer_x: Option<f32>,
+}
+
 /// Persisted state saved between sessions
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedState {
@@ -158,6 +185,9 @@ struct PersistedState {
     expanded_dirs: Option<Vec<PathBuf>>,
     explorer_sort_order: Option<SortOrder>,
     recent_files: Option<Vec<RecentEntry>>,
+    // Side-panel widths (app-owned resize strips)
+    explorer_width: Option<f32>,
+    outline_width: Option<f32>,
 }
 
 /// Build the composite cache key for a header position lookup. Combines the
@@ -1363,6 +1393,9 @@ struct MarkdownApp {
     // File explorer state
     file_explorer: FileExplorer,
     show_explorer: bool,
+    // Side-panel widths, dragged via the app-owned resize strips and persisted
+    explorer_width: f32,
+    outline_width: f32,
     // Flash effect for updated files (path -> start time)
     flashing_paths: HashMap<PathBuf, Instant>,
     // True if running on virtual display (e.g., Xvfb :99) - limits frame rate
@@ -1444,6 +1477,14 @@ impl MarkdownApp {
         let show_outline = persisted.show_outline.unwrap_or(true);
         let full_width_content = persisted.full_width_content.unwrap_or(false);
         let show_explorer = persisted.show_explorer.unwrap_or(true);
+        let explorer_width = persisted
+            .explorer_width
+            .unwrap_or(PANEL_RESET_WIDTH)
+            .clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH);
+        let outline_width = persisted
+            .outline_width
+            .unwrap_or(PANEL_RESET_WIDTH)
+            .clamp(OUTLINE_MIN_WIDTH, OUTLINE_MAX_WIDTH);
 
         // Determine initial tabs
         let initial_tabs: Vec<Tab> = if let Some(ref path) = file {
@@ -1529,6 +1570,8 @@ impl MarkdownApp {
             hovered_tab: None,
             file_explorer,
             show_explorer,
+            explorer_width,
+            outline_width,
             flashing_paths: HashMap::new(),
             is_virtual_display,
             egui_ctx: cc.egui_ctx.clone(),
@@ -2429,13 +2472,14 @@ impl MarkdownApp {
 
     /// Render the outline sidebar (right panel)
     /// Rendered at top level for proper layout space allocation
-    fn render_outline(&mut self, ctx: &egui::Context) {
+    /// Returns the panel rect (NOTHING when not shown) so resize strips can track it
+    fn render_outline(&mut self, ctx: &egui::Context) -> egui::Rect {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
-            return;
+            return egui::Rect::NOTHING;
         };
 
         if !self.show_outline || tab.outline_headers.is_empty() {
-            return;
+            return egui::Rect::NOTHING;
         }
 
         // Handle outline header click (store index to access both title and line_number)
@@ -2447,11 +2491,14 @@ impl MarkdownApp {
 
         let is_dragging = ctx.input(|i| i.pointer.any_down());
 
-        egui::SidePanel::right("outline")
-            .resizable(true)
-            .default_width(200.0)
-            .min_width(120.0)
-            .max_width(400.0)
+        // Width is app-owned (see render_panel_resize_strips); exact_width
+        // pins it every frame regardless of egui's cached PanelState.
+        let outline_response = egui::SidePanel::right("outline")
+            .resizable(false)
+            .exact_width(
+                self.outline_width
+                    .clamp(OUTLINE_MIN_WIDTH, OUTLINE_MAX_WIDTH),
+            )
             .frame(
                 egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                     left: 8,
@@ -2640,6 +2687,8 @@ impl MarkdownApp {
                 tab.pending_header_click_key = Some(key);
             }
         }
+
+        outline_response.response.rect
     }
 
     /// Render the active tab's content
@@ -2953,19 +3002,23 @@ impl MarkdownApp {
     }
 
     /// Render the file explorer sidebar
-    /// Returns actions for files to open or close
-    fn render_file_explorer(&mut self, ctx: &egui::Context) -> ExplorerAction {
+    /// Returns actions for files to open or close, plus the panel rect
+    /// (NOTHING when not shown) so resize strips can track it
+    fn render_file_explorer(&mut self, ctx: &egui::Context) -> (ExplorerAction, egui::Rect) {
         let mut action = ExplorerAction::default();
 
         if !self.show_explorer {
-            return action;
+            return (action, egui::Rect::NOTHING);
         }
 
-        egui::SidePanel::left("file_explorer")
-            .resizable(true)
-            .default_width(200.0)
-            .min_width(150.0)
-            .max_width(300.0)
+        // Width is app-owned (see render_panel_resize_strips); exact_width
+        // pins it every frame regardless of egui's cached PanelState.
+        let explorer_response = egui::SidePanel::left("file_explorer")
+            .resizable(false)
+            .exact_width(
+                self.explorer_width
+                    .clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH),
+            )
             .frame(
                 egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                     left: 8,
@@ -3101,7 +3154,98 @@ impl MarkdownApp {
                 }
             });
 
-        action
+        (action, explorer_response.response.rect)
+    }
+
+    /// Register invisible drag strips over both side panels' inner edges and
+    /// apply any resize / double-click reset to the app-owned widths.
+    ///
+    /// Called from inside the CentralPanel pass AFTER the document content:
+    /// widgets registered later win egui's same-position tie-break, so these
+    /// strips outrank the selectable text galleys and the document scrollbar
+    /// that otherwise steal the press (which left only a ~2px corridor on the
+    /// content flank of each separator). They live in the same layer as the
+    /// panels, so wheel routing, tooltips and menus behave as before.
+    fn render_panel_resize_strips(
+        &mut self,
+        ui: &egui::Ui,
+        explorer_rect: egui::Rect,
+        outline_rect: egui::Rect,
+    ) {
+        if self.show_explorer && explorer_rect.is_positive() {
+            let id = egui::Id::new("explorer_resize_strip");
+            let strip = Self::resize_strip_rect(explorer_rect, true);
+            let state = Self::strip_state(ui, id, strip);
+            if state.double_clicked {
+                self.explorer_width = PANEL_RESET_WIDTH;
+            } else if state.dragged {
+                if let Some(pointer_x) = state.pointer_x {
+                    self.explorer_width =
+                        (pointer_x - explorer_rect.left()).clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH);
+                }
+            }
+            Self::paint_strip_feedback(ui, strip, &state);
+        }
+
+        if self.show_outline && outline_rect.is_positive() {
+            let id = egui::Id::new("outline_resize_strip");
+            let strip = Self::resize_strip_rect(outline_rect, false);
+            let state = Self::strip_state(ui, id, strip);
+            if state.double_clicked {
+                self.outline_width = PANEL_RESET_WIDTH;
+            } else if state.dragged {
+                if let Some(pointer_x) = state.pointer_x {
+                    self.outline_width =
+                        (outline_rect.right() - pointer_x).clamp(OUTLINE_MIN_WIDTH, OUTLINE_MAX_WIDTH);
+                }
+            }
+            Self::paint_strip_feedback(ui, strip, &state);
+        }
+    }
+
+    /// Invisible interaction band centered on the panel's inner edge.
+    fn resize_strip_rect(panel_rect: egui::Rect, left_panel: bool) -> egui::Rect {
+        let edge_x = if left_panel {
+            panel_rect.max.x
+        } else {
+            panel_rect.min.x
+        };
+        egui::Rect::from_x_y_ranges(
+            (edge_x - PANEL_RESIZE_STRIP_HALF_WIDTH)..=(edge_x + PANEL_RESIZE_STRIP_HALF_WIDTH),
+            panel_rect.y_range(),
+        )
+    }
+
+    /// Interaction pass for one strip. `click_and_drag` so double-click can
+    /// be detected; plain drags adjust the owned width via the caller.
+    fn strip_state(ui: &egui::Ui, id: egui::Id, rect: egui::Rect) -> StripState {
+        let response = ui.interact(rect, id, egui::Sense::click_and_drag());
+        let state = StripState {
+            hovered: response.hovered(),
+            dragged: response.dragged(),
+            double_clicked: response.double_clicked(),
+            pointer_x: response.interact_pointer_pos().map(|p| p.x),
+        };
+        if state.hovered || state.dragged {
+            ui.ctx()
+                .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        state
+    }
+
+    /// Highlight the separator line while hovered or dragged (the dim
+    /// resting line is drawn by SidePanel itself).
+    fn paint_strip_feedback(ui: &egui::Ui, rect: egui::Rect, state: &StripState) {
+        if !(state.hovered || state.dragged) {
+            return;
+        }
+        let stroke = if state.dragged {
+            ui.style().visuals.widgets.active.fg_stroke
+        } else {
+            ui.style().visuals.widgets.hovered.fg_stroke
+        };
+        let edge_x = (rect.min.x + rect.max.x) * 0.5;
+        ui.painter().vline(edge_x, rect.y_range(), stroke);
     }
 
     /// Calculate flash intensity for a path (0.0 = no flash, 1.0 = full flash)
@@ -3592,6 +3736,8 @@ impl eframe::App for MarkdownApp {
             expanded_dirs: Some(self.file_explorer.expanded_dirs.iter().cloned().collect()),
             explorer_sort_order: Some(self.file_explorer.sort_order),
             recent_files: Some(self.recent_files.clone()),
+            explorer_width: Some(self.explorer_width),
+            outline_width: Some(self.outline_width),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -4302,7 +4448,7 @@ impl eframe::App for MarkdownApp {
         }
 
         // File explorer (left sidebar)
-        let explorer_action = self.render_file_explorer(ctx);
+        let (explorer_action, explorer_rect) = self.render_file_explorer(ctx);
 
         // Open file from explorer (left-click)
         if let Some(path) = explorer_action.file_to_open {
@@ -4317,7 +4463,7 @@ impl eframe::App for MarkdownApp {
         }
 
         // Outline sidebar (right) - at top level for proper layout
-        self.render_outline(ctx);
+        let outline_rect = self.render_outline(ctx);
 
         // Main content area
         let mut open_in_new_tab: Option<PathBuf> = None;
@@ -4325,6 +4471,11 @@ impl eframe::App for MarkdownApp {
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
                 open_in_new_tab = self.render_tab_content(ui, ctrl_held);
+
+                // Panel resize strips register after the document content so
+                // they win egui's same-position tie-break against selectable
+                // text and the document scrollbar.
+                self.render_panel_resize_strips(ui, explorer_rect, outline_rect);
             });
 
         // Open link in new tab if requested
