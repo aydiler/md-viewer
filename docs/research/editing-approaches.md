@@ -91,20 +91,69 @@ No mainstream product ships Obsidian-style live preview in an immediate-mode
 GUI toolkit. **Zed** (GPUI, GPU-drawn rects/glyphs, explicitly post-Electron)
 ships source-mode markdown editing, not hybrid preview. The best non-DOM proof
 that live preview doesn't need a browser is CM6 itself: virtualized text core +
-decoration overlays. In egui specifically, no equivalent component is known
-*(ecosystem agent to confirm)* — if absent, this is greenfield UX work built on
-`TextEdit`, not a drop-in crate.
+decoration overlays. In egui specifically there is **no library** for it, but
+the Ferrite app demonstrates block-switching editing at product level, and
+GPUI projects (`aster`, `Cditor`) prove the architecture — see §3.0. Building
+this is greenfield UX work on `TextEdit` primitives, not a drop-in crate.
 
 ## 3. Candidate approaches
+
+### 3.0 Ecosystem building blocks (what exists today)
+
+**egui `TextEdit` (verified against egui 0.33.3 sources):**
+- Multiline editing, built-in undo/redo (`Undoer<(CCursorRange, String)>`,
+  Ctrl+Z/Y handled inside the widget — `text_edit/builder.rs:1030-1054`),
+  programmatic cursor read/write (`TextEditOutput.cursor_range`,
+  `state.set_char_range` — indices are **char**, not byte), focus control,
+  custom paint per text run via `layouter(...)` (the hook a syntax highlighter
+  uses), `.code_editor()` convenience. No public *programmatic* undo/redo API
+  beyond swapping the stored `Undoer`.
+- **IME supported** (`data/input.rs:495-565`), but 0.33-era has an open Linux
+  X11+Fcitx5 pre-edit-invisible bug (egui#7975); composition visuals were only
+  overhauled in 0.35 (#8083). `Context::text_edit_focused` exists from 0.34.
+- Limits: multiline always wraps (no horizontal-scroll mode); **any keystroke
+  invalidates and re-lays-out the entire document galley** — one monolithic
+  widget with no intra-widget memoization (epaint#4000, open since 2024), so a
+  several-thousand-line single `TextEdit` lags. Per-block editors stay fast:
+  each swapped-in galley is small.
+- No native syntax highlighting.
+
+**pulldown-cmark 0.13 (workspace pin; merman-render separately uses 0.12):**
+`Parser::new_ext(..).into_offset_iter()` yields `(Event, Range<usize>)` —
+byte-span mapping, exactly what the fork already consumes. Block ranges =
+union of child event spans; no parser changes needed.
+
+**Editor-component crates:** `egui_code_editor` is actively maintained
+(p4ymak fork; numbered lines, themes, its own lightweight tokenizer — not
+syntect — feeding a `LayoutJob`). Compatibility: **0.2.20/0.2.21 target egui
+^0.33 → drop-in**; current 0.4.x requires ^0.36. Whole-buffer tokenize per
+frame — fine for source mode, not a hybrid-preview engine. **No
+CodeMirror-equivalent exists for egui** (incremental parse + decorations +
+virtualized buffer): nothing maintained ships it; Zed/GPUI internals are a
+different stack. Ropes (`ropey` 1.6 as in Helix, `crop`, Lapce's xi-rope
+descendant) only matter if we outgrow `String` splices — fine below ~1 MB docs.
+
+**Prior art scan:** no *library* provides Obsidian-style live preview in egui
+(nor Dear ImGui — imgui_markdown/imgui_md are render-only). But at app level,
+**Ferrite** (★~1.8k, Rust + egui 0.34, active 2026) ships exactly this
+spectrum: split view with live scroll sync (= approach A) plus "**one-click
+block switching between headings, paragraphs, lists, and table cells in
+rendered mode**" (= approaches B/C mechanics) — an existence proof that
+block-swap editing works in egui. In GPUI, `aster` (rope-backed single-pane
+inline rendering) and `Cditor` (block-based editor virtualized to ~100k
+blocks) validate the same architecture; both would need reimplementation here.
 
 ### A. Two-pane: source editor + live preview ("VS Code style")
 Edit toggle per tab; left pane `egui::TextEdit::multiline(&mut tab.content)`,
 right pane existing `CommonMarkViewer`. Debounce re-render (bump
 `content_version` on change). Save via Ctrl+S (+ autosave option).
 
-- Hits: F1 (version-keyed cache makes re-render cheap), zero fork changes.
-- Misses: not "live preview"; duplicate scroll contexts; pane-width cost.
-- Effort: **S/M** — mostly app-level; watcher fix (F5) mandatory regardless.
+- Hits: F1 (version-keyed cache makes re-render cheap), zero fork changes;
+  `egui_code_editor` 0.2.x drops in for highlighted source mode (§3.0).
+- Misses: not "live preview"; duplicate scroll contexts; pane-width cost; and
+  on very large docs the single monolithic `TextEdit` re-lays-out its whole
+  galley per keystroke (epaint#4000, §3.0) — laggy past a few thousand lines.
+- Effort: **S** — mostly app-level; watcher fix (F5) mandatory regardless.
 
 Variant A′ (same pane, mode toggle): Ctrl+E flips tab between Rendered and
 Source view — same TextEdit, fullscreen. Even cheaper; Obsidian's Source mode.
@@ -124,7 +173,9 @@ with rendered output everywhere else. Mechanics in this codebase:
    event loop, when iteration enters the active block's event range, emit a
    `TextEdit::multiline` seeded with `&content[src_range]` instead of the
    normal widgets. On change, splice back via one `replace_range`
-   (`CheckboxClickEvent` writeback is the precedent, F4).
+   (`CheckboxClickEvent` writeback is the precedent, F4). Mind the index
+   mismatch: pulldown spans are **byte** offsets while `TextEdit` cursors are
+   **char** offsets — convert at the swap boundary.
 4. **Block exit rules:** click into another block / ↑↓ at text edges / Esc /
    Ctrl+Enter → commit + activate neighbor (Typora-style). Multi-block
    selection and cross-block drag-editing deferred.
@@ -166,11 +217,14 @@ back to markdown on save.
   round-trip tests. Rejected for this codebase's goals; revisit only if the
   product pivots to "canvas notes app".
 
-### E. Embed a web editor (CodeMirror 6 / MilkDown in wry webview)
-Instant fidelity to Obsidian's UX; but eframe(glow)+child-webview compositing
-is fragile, adds a browser engine + IPC bridge to file IO, breaks the ~35 MB
-native footprint story, two toolkits to maintain. Rejected on weight/coherence;
-*(agent to confirm known wry+glow conflicts)*.
+### E. Embed a web editor (CodeMirror 6 / MilkDown in a wry webview)
+Instant fidelity to Obsidian's UX; but wry's GL-coexistence examples are
+GTK-only on Linux — eframe/glow (winit/glutin surface) and WebKitGTK's widget
+tree can't be mixed in one window, no eframe example or egui↔wry bridge crate
+exists. On Win/macOS hole-punching puts the webview *above* the GL surface, so
+egui chrome can't overlay it and input/z-order fights ensue. Also adds a
+browser engine + an IPC bridge for file IO, breaking the ~35 MB native-footprint
+story. Rejected on weight/coherence.
 
 ### F. External-editor handoff (baseline)
 "Edit" menu item opens `$EDITOR`/system default; the existing watcher (F5)
@@ -185,7 +239,7 @@ present via watch mode.
 | `.md` stays source of truth | ✓ | ✓ | ✓ | ✗ (lossy risk) | ✓ (if wired so) |
 | Effort / risk in this codebase | S | M | M/L (incremental) | XL | L + foreign deps |
 | Fork changes needed | none | none–minor | moderate (block segmentation + active-block paint hook + per-block cache keys) | large | none |
-| Perf on large docs | good if F11 fixed; full repaint each frame either way (no virtualization, F2) | same as A | best of native options: per-block cache keys contain keystroke cost; still full repaint | unknown/new engine | outsourced |
+| Perf on large docs | preview side fine (F1); editor TextEdit re-lays-out whole doc galley per keystroke — lags on huge files (epaint#4000) | same as A | **best native option**: small per-block TextEdits dodge monolithic galley cost; per-block cache keys (F11) contain highlight cost; still full repaint each frame (F2) | unknown/new engine | outsourced |
 | Editing UX completeness (undo, IME, selection) | TextEdit-grade | TextEdit-grade | TextEdit-grade per block; cross-block gaps initially | bespoke | best-in-class |
 | Watcher conflict work (F5) | required | required | required | required | required |
 | New infra required (save/dirty, F10) | all of it | all of it | all of it | all of it | all of it |
@@ -245,5 +299,15 @@ Product architecture (fetched primary sources):
 
 Local code evidence: file:line references in the table in §1 and throughout
 §3–5 were verified by direct inspection of this repository at commit `121ae04`
-(`src/main.rs`, `crates/egui_commonmark/`) and of egui 0.33.3 sources in the
-local cargo registry (`text_edit/{builder,state,output}.rs`, `data/input.rs`).
+(`src/main.rs`, `crates/egui_commonmark/`) and of egui 0.33.3 + pulldown-cmark
+0.13 sources in the local cargo registry (`text_edit/{builder,state,output}.rs`,
+`data/input.rs`, `parse.rs`).
+
+Ecosystem (fetched primary metadata/sources):
+- egui TextEdit limits / galley re-layout issue: <https://github.com/emilk/egui/issues/4000>
+- IME pre-edit invisible on X11+Fcitx5 (0.33-era): <https://github.com/emilk/egui/issues/7975> · composition overhaul: <https://github.com/emilk/egui/pull/8083>
+- `egui_code_editor` (maintained fork; 0.2.20/21 = egui ^0.33): <https://github.com/p4ymak/egui_code_editor>
+- Ferrite — egui editor with split view + one-click rendered-block editing: <https://github.com/OlaProeis/Ferrite>
+- GPUI prior art: <https://github.com/kumarUjjawal/aster> · <https://github.com/JYChen-8866/Cditor>
+- wry GL/webview coexistence examples (GTK-only): <https://github.com/rust-windowing/wry/tree/master/examples>
+- Ropes: <https://crates.io/crates/ropey> · <https://github.com/nomad/crop>
