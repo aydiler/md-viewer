@@ -3570,6 +3570,16 @@ impl MarkdownApp {
                                 span.start,
                                 span.end
                             );
+                            if std::env::var_os("MDV_EDIT_DEBUG").is_some() {
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("edit-debug.log")
+                                {
+                                    use std::io::Write as _;
+                                    let _ = writeln!(f, "activate {}..{}", span.start, span.end);
+                                }
+                            }
                             tab.active_edit_byte = Some(span.start);
                         }
                         None if layout_ready => {
@@ -3580,7 +3590,10 @@ impl MarkdownApp {
                         None => {
                             // Layout not recorded yet (first Live frame) — ignore
                             // this click rather than wrongly clearing state.
-                            log::info!("live: click ignored, block layout not recorded yet");
+                            let span_count = tab.cache.top_level_block_spans(&tab.id).len();
+                            log::info!(
+                                "live: click ignored, block layout not recorded yet (spans={span_count})"
+                            );
                         }
                     }
                 }
@@ -3637,6 +3650,11 @@ impl MarkdownApp {
                             ui.ctx()
                                 .data_mut(|d| d.insert_temp(editor_id, seed));
                             tab.live_seeded_for = Some(key);
+                            // A fresh activation must land keyboard focus in
+                            // the newly swapped-in editor immediately —
+                            // otherwise the first characters the user types
+                            // are dropped and the block never feels editable.
+                            ui.ctx().memory_mut(|mem| mem.request_focus(editor_id));
                         }
                         live_cfg = Some(EditRegionConfig {
                             src: range.clone(),

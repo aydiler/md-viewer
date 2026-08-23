@@ -623,6 +623,12 @@ impl CommonMarkViewerInternal {
             // Live-preview editing state for this frame.
             let mut edit_painted = false;
             let _ = cache.take_edit_feedback();
+            // Screen-space origin of the scroll content this pass paints
+            // into. Widget positions from `next_widget_position()` are in
+            // screen space (they shift with scrolling); subtracting this
+            // origin yields stable content-space coordinates, which is what
+            // boundary hit-testing needs.
+            let content_origin_y = ui.max_rect().min.y;
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
@@ -645,11 +651,30 @@ impl CommonMarkViewerInternal {
                             let mut buf = ui.ctx().data_mut(|d| {
                                 d.get_temp::<String>(cfg.id).unwrap_or_default()
                             });
-                            let response = egui::TextEdit::multiline(&mut buf)
-                                .id(cfg.id)
-                                .code_editor()
-                                .desired_width(max_width)
-                                .show(ui);
+                            let seed_len = buf.len();
+                            // Accent border so the editable region is obvious.
+                            let framed = egui::Frame::NONE
+                                .stroke(egui::Stroke::new(
+                                    1.5,
+                                    ui.visuals().selection.bg_fill,
+                                ))
+                                .inner_margin(egui::Margin::symmetric(6, 4))
+                                .show(ui, |ui| {
+                                    egui::TextEdit::multiline(&mut buf)
+                                        .id(cfg.id)
+                                        .code_editor()
+                                        .desired_width(max_width)
+                                        .show(ui)
+                                });
+                            let response = framed.inner;
+                            if crate::misc::edit_debug() {
+                                let focused =
+                                    ui.ctx().memory(|m| m.has_focus(cfg.id));
+                                eprintln!(
+                                    "[mdv-fork] editor painted: rect={:?} seed_len={seed_len} focused={focused}",
+                                    framed.response.rect,
+                                );
+                            }
                             let changed = response.response.changed();
                             ui.ctx()
                                 .data_mut(|d| d.insert_temp(cfg.id, buf.clone()));
@@ -729,10 +754,12 @@ impl CommonMarkViewerInternal {
                         {
                             // `next_start` = first byte after this boundary
                             // event; the following block begins here (modulo
-                            // inter-block whitespace).
+                            // inter-block whitespace). `top_y` is converted to
+                            // CONTENT space so it stays valid no matter where
+                            // the document was scrolled when recorded.
                             scroll_cache.boundaries.push(crate::misc::BlockBoundary {
                                 event_index: index,
-                                top_y: end_position.y,
+                                top_y: end_position.y - content_origin_y,
                                 next_start: src_span_end,
                             });
                             if crate::misc::edit_debug() {
