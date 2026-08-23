@@ -126,10 +126,24 @@ Left sidebar showing all markdown files in a hierarchical directory tree:
 - Refresh button to rescan directory
 - Session persistence for: visibility, root directory, expanded directories
 
-## Editing & Saving (Phase 0/1)
+## Editing & Saving (Phase 0/1 + Live Preview)
 
 Editing roadmap and design rationale live in `docs/research/editing-approaches.md`;
-implementation notes in `docs/devlog/055-editing-phase0-source-mode.md`.
+implementation notes in `docs/devlog/055-editing-phase0-source-mode.md` and
+`docs/devlog/056-live-preview-block-editing.md`.
+
+- **Modes**: `Tab.edit_mode` is `EditMode::{Rendered, Source, Live}`.
+  Ctrl+E toggles Rendered↔Live; the View menu offers all three.
+  - **Source** renders a whole-file monospace `TextEdit`
+    (`render_source_editor_ui`) bound to `Tab.content`.
+  - **Live (Obsidian-style)** renders everything except the active top-level
+    block, which becomes an inline raw-markdown editor. The block's text
+    lives in egui temp state (`EditRegionConfig.id`), avoiding a second
+    borrow of the source string; each frame's feedback is spliced back into
+    `tab.content` via `cache.take_edit_feedback()` with
+    `anchor_after_splice` keeping the caret anchor stable. Clicks are mapped
+    to block byte ranges through recorded boundaries
+    (`block_span_at_content_y`). Esc deactivates the editor.
 
 - **Source mode (Ctrl+E)**: the active tab renders a monospace multiline
   `TextEdit` bound directly to `Tab.content` inside a `ScrollArea`
