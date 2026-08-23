@@ -102,12 +102,22 @@ pub struct EditFeedback {
     pub changed: bool,
 }
 
+/// Cheap opt-in stderr tracing of the live-edit plumbing (`MDV_EDIT_DEBUG=1`).
+pub fn edit_debug() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MDV_EDIT_DEBUG").is_some())
+}
+
 /// Byte range + painted y of one block boundary, recorded when
 /// [`CommonMarkOptions::record_block_layout`] is on. `top_y` is the content-
 /// relative y at which the *following* block starts; `next_start` is the byte
-/// offset just after the boundary event (the following block's first byte).
+/// offset just after the boundary event. `event_index` identifies the boundary
+/// event so recording stays idempotent across frames even when split-point
+/// recording was off earlier (e.g. Rendered-mode frames before switching to
+/// Live).
 #[derive(Clone, Debug)]
 pub struct BlockBoundary {
+    pub event_index: usize,
     pub top_y: f32,
     pub next_start: usize,
 }
@@ -2268,10 +2278,11 @@ impl CommonMarkCache {
         // block k+1 starts painting, its next_start the byte just after the
         // boundary event. The segment between consecutive cuts maps onto the
         // first tiled span overlapping it — the clicked block.
-        let idx = sc
-            .boundaries
-            .iter()
-            .rposition(|b| b.top_y <= y + f32::EPSILON)?;
+        let idx = match sc.boundaries.iter().rposition(|b| b.top_y <= y + f32::EPSILON) {
+            Some(idx) => idx,
+            // Click above every boundary: that's inside the FIRST block.
+            None => return Some(spans[0].clone()),
+        };
         let k = idx.min(spans.len().saturating_sub(1));
         let seg_start = if k == 0 {
             spans[0].start

@@ -196,6 +196,16 @@ fn run_frame_with_source_id(
     cache: &RefCell<CommonMarkCache>,
     source_id: egui::Id,
 ) {
+    run_frame_with_source_id_record(ctx, markdown, cache, source_id, true)
+}
+
+fn run_frame_with_source_id_record(
+    ctx: &Context,
+    markdown: &str,
+    cache: &RefCell<CommonMarkCache>,
+    source_id: egui::Id,
+    record: bool,
+) {
     ctx.run(
         RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
@@ -205,9 +215,47 @@ fn run_frame_with_source_id(
             let mut cache = cache.borrow_mut();
             CentralPanel::default().show(ctx, |ui| {
                 CommonMarkViewer::new()
-                    .record_block_layout(true)
+                    .record_block_layout(record)
                     .show_scrollable(source_id, ui, &mut cache, markdown);
             });
         },
     );
+}
+
+/// Regression for the mode-transition bug: Rendered-mode frames
+/// (`record=false`) fill split_points; when the app switches to Live
+/// (`record=true`) every split point already exists, which used to skip
+/// boundary recording entirely — clicks then never resolved. Boundaries must
+/// dedupe independently and backfill on the first recorded frame.
+#[test]
+fn boundaries_backfill_after_switching_to_live() {
+    let ctx = Context::default();
+    let tab_id = egui::Id::new(std::path::PathBuf::from("/mode/switch/note.md"));
+    let cache = RefCell::new(CommonMarkCache::default());
+
+    // Rendered phase: no boundary recording requested yet.
+    for _ in 0..2 {
+        run_frame_with_source_id_record(&ctx, MARKDOWN, &cache, tab_id, false);
+    }
+    assert!(
+        !cache.borrow_mut().has_block_layout(&tab_id),
+        "no boundaries while recording is off"
+    );
+
+    // Switch to Live: first recorded frame must backfill ALL boundaries.
+    run_frame_with_source_id_record(&ctx, MARKDOWN, &cache, tab_id, true);
+
+    assert!(
+        cache.borrow_mut().has_block_layout(&tab_id),
+        "boundaries must appear on the first Live frame"
+    );
+    let spans = cache.borrow_mut().top_level_block_spans(&tab_id);
+    assert_eq!(spans.len(), 4);
+
+    // And the click path resolves against them immediately.
+    let mid = cache
+        .borrow_mut()
+        .block_span_at_content_y(&tab_id, 10.0)
+        .expect("hit-test works right after switch");
+    assert_eq!(mid.start, spans[0].start, "topmost click hits first block");
 }

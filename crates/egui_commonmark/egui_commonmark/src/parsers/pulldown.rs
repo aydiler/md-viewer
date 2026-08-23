@@ -705,6 +705,11 @@ impl CommonMarkViewerInternal {
                         let scroll_cache = scroll_cache(cache, &source_id);
                         let end_position = ui.next_widget_position();
 
+                        // Split points and boundaries dedupe independently:
+                        // record=false frames (Rendered mode) still fill
+                        // split_points, so a later Live frame must not skip
+                        // boundary recording just because the split point
+                        // already exists.
                         let split_point_exists = scroll_cache
                             .split_points
                             .iter()
@@ -714,14 +719,29 @@ impl CommonMarkViewerInternal {
                             scroll_cache
                                 .split_points
                                 .push((index, start_position, end_position));
-                            if options.record_block_layout {
-                                // `next_start` = first byte after this
-                                // boundary event; the following block begins
-                                // here (modulo inter-block whitespace).
-                                scroll_cache.boundaries.push(crate::misc::BlockBoundary {
-                                    top_y: end_position.y,
-                                    next_start: src_span_end,
-                                });
+                        }
+
+                        if options.record_block_layout
+                            && !scroll_cache
+                                .boundaries
+                                .iter()
+                                .any(|b| b.event_index == index)
+                        {
+                            // `next_start` = first byte after this boundary
+                            // event; the following block begins here (modulo
+                            // inter-block whitespace).
+                            scroll_cache.boundaries.push(crate::misc::BlockBoundary {
+                                event_index: index,
+                                top_y: end_position.y,
+                                next_start: src_span_end,
+                            });
+                            if crate::misc::edit_debug() {
+                                eprintln!(
+                                    "[mdv-fork] boundary pushed idx={index} y={:.1} next={} total={}",
+                                    end_position.y,
+                                    src_span_end,
+                                    scroll_cache.boundaries.len()
+                                );
                             }
                         }
                     }
@@ -768,8 +788,7 @@ impl CommonMarkViewerInternal {
         {
             let sc = scroll_cache(cache, &source_id);
             if sc.events.is_empty() || sc.content_version != version {
-                content_changed = true;
-                // Must mirror `show()`'s `math_enabled` derivation
+                content_changed = true;                // Must mirror `show()`'s `math_enabled` derivation
                 // (parsers/pulldown.rs in this file: `options.math_fn.is_some()
                 // || cfg!(feature = "math")`). The bootstrap branch below
                 // calls `self.show()` which parses again with `cfg!(feature =
@@ -847,6 +866,16 @@ impl CommonMarkViewerInternal {
                 sc.page_size = None;
                 sc.split_points.clear();
                 sc.boundaries.clear();
+            }
+            if crate::misc::edit_debug() {
+                eprintln!(
+                    "[mdv-fork] frame: record={} boundaries={} splits={} events={} version={}",
+                    options.record_block_layout,
+                    sc.boundaries.len(),
+                    sc.split_points.len(),
+                    sc.events.len(),
+                    sc.content_version
+                );
             }
         }
         // Header positions are content-keyed; new content means the cached
