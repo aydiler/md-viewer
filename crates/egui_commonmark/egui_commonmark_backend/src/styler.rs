@@ -315,9 +315,13 @@ pub fn markdown_block_job(
     // ---- assemble ----
     // Effective format key per char: 0=base, 2..6 styled, 6=marker,
     // 8..13 = heading level. Revealed chars always key 0.
+    let quote_block = matches!(kind, EditBlockKind::Quote);
     let fmt_key_of = |i: usize| -> u8 {
         if reveal_line == Some(li.line_of_char[i]) {
             return 0;
+        }
+        if quote_block && tags[i] <= T_MARKER {
+            return 7; // weak-quote base color
         }
         match tags[i] {
             T_STRONG => 2,

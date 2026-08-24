@@ -752,6 +752,25 @@ impl CommonMarkViewerInternal {
                                 )
                                 .inner;
                             ui.end_row();
+
+                            // Typography rhythm matching the rendered view:
+                            // heading above/below + paragraph spacing.
+                            {
+                                let body_h = sty_for_measure.body_size;
+                                match kind {
+                                    crate::styler::EditBlockKind::Heading(l) => {
+                                        let below = body_h
+                                            * sty_for_measure
+                                                .heading_below_scale
+                                                [(l as usize - 1).min(5)];
+                                        ui.add_space(below);
+                                    }
+                                    crate::styler::EditBlockKind::Paragraph => {
+                                        ui.add_space(sty_for_measure.paragraph_gap);
+                                    }
+                                    _ => {}
+                                }
+                            }
                             if crate::misc::edit_debug() {
                                 eprintln!(
                                     "[session] painted blk#{bi} kind={kind:?} rect={:?} chars={}",
