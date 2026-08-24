@@ -3778,12 +3778,16 @@ impl MarkdownApp {
                     let spans = tab.cache.top_level_block_spans(&tab.id);
                     // Resolve the active block from the stored anchor; fall
                     // back to the first block when set but stale.
+                    let content_len = tab.content.len();
                     let active = tab
                         .active_edit_byte
                         .and_then(|a| spans.iter().find(|r| r.contains(&a)).cloned())
                         .or_else(|| {
                             tab.active_edit_byte.and_then(|_| spans.first().cloned())
-                        });
+                        })
+                        // Stale-range guard: splices resize `content` before
+                        // derived caches refresh; drop spans that no longer fit.
+                        .filter(|r| r.end <= content_len && r.start < r.end);
                     if let Some(range) = active {
                         let editor_id = tab.source_editor_id().with("live");
                         // Seed the inline buffer only for a NEW activation —
@@ -3861,7 +3865,14 @@ impl MarkdownApp {
 
                 // ---- Live preview: splice edited block text back ----
                 if let Some(range) = live_range.clone() {
-                    if let Some(fb) = tab.cache.take_edit_feedback() {
+                    let range_valid = range.start < range.end
+                        && range.end <= tab.content.len()
+                        && tab
+                            .active_edit_byte
+                            .is_some_and(|a| range.contains(&a));
+                    if !range_valid {
+                        tab.cache.take_edit_feedback(); // drop stale feedback
+                    } else if let Some(fb) = tab.cache.take_edit_feedback() {
                         if fb.changed && fb.text != tab.content[range.clone()] {
                             log::info!(
                                 "live: splicing edited block {}..{} ({} -> {} bytes)",
