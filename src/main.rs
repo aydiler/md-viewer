@@ -3633,7 +3633,13 @@ impl MarkdownApp {
             (false, None)
         };
         if clicked && pointer_y.is_some() {
-            let origin = tab.last_content_origin.expect("checked above");
+            // Origin can legitimately be absent: a fresh tab that hasn't
+            // painted yet (or clicks landing before first layout) must be
+            // skipped silently rather than panic.
+            let Some(origin) = tab.last_content_origin else {
+                log::debug!("live: click before first layout — ignored");
+                return None;
+            };
             {
                 let py = pointer_y.expect("clicked implies pointer pos");
                 let click_content_y = py - origin.y + tab.scroll_offset;
@@ -3742,7 +3748,9 @@ impl MarkdownApp {
                         }
                     }
                 }
-        }        // Content area (no inner CentralPanel needed - we're already in one)
+        }
+
+        // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::NONE
             .inner_margin(egui::Margin {
