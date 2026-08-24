@@ -5057,12 +5057,18 @@ impl eframe::App for MarkdownApp {
                         .tabs
                         .get(self.active_tab)
                         .is_some_and(|t| t.dirty);
-                    if ui
-                        .add_enabled(
-                            can_save,
-                            egui::Button::new("Save").shortcut_text("Ctrl+S"),
-                        )
-                        .clicked()
+                    let save_btn = ui.add_enabled(
+                        can_save,
+                        egui::Button::new("Save").shortcut_text("Ctrl+S"),
+                    );
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: File → Save",
+                        "button",
+                        &save_btn,
+                        None,
+                    );
+                    if save_btn.clicked()
                     {
                         let idx = self.active_tab;
                         if !self.request_save(idx) {
@@ -5186,34 +5192,48 @@ impl eframe::App for MarkdownApp {
                         }
                     };
                     let mut picked_mode: Option<EditMode> = None;
-                    if ui
-                        .add(
-                            egui::Button::new(mode_label(
-                                EditMode::Live,
-                                "Edit Markdown (Live Preview)",
-                            ))
-                            .shortcut_text("Ctrl+E"),
-                        )
-                        .on_hover_text("Everything renders except the block you click into, which shows raw markdown")
-                        .clicked()
-                    {
+                    #[cfg(feature = "mcp")]
+                    let register = |name: String, btn: &egui::Response| {
+                        self.mcp_bridge.register_widget(&name, "button", btn, None);
+                    };
+                    #[cfg(not(feature = "mcp"))]
+                    let register = |_name: String, _btn: &egui::Response| {};
+
+                    let live_btn = ui.add(
+                        egui::Button::new(mode_label(
+                            EditMode::Live,
+                            "Edit Markdown (Live Preview)",
+                        ))
+                        .shortcut_text("Ctrl+E"),
+                    );
+                    let live_clicked = {
+                        let b = live_btn.on_hover_text("Everything renders except the block you click into, which shows raw markdown");
+                        register("Menu: View → Live Preview".to_string(), &b);
+                        b.clicked()
+                    };
+                    if live_clicked {
                         picked_mode = Some(EditMode::Live);
                     }
-                    if ui
-                        .add(egui::Button::new(mode_label(
-                            EditMode::Source,
-                            "Edit Markdown (Source)",
-                        )))
-                        .on_hover_text("Edit the whole file as raw markdown")
-                        .clicked()
-                    {
+
+                    let source_btn =
+                        ui.add(egui::Button::new(mode_label(EditMode::Source, "Edit Markdown (Source)")));
+                    let source_clicked = {
+                        let b = source_btn.on_hover_text("Edit the whole file as raw markdown");
+                        register("Menu: View → Source".to_string(), &b);
+                        b.clicked()
+                    };
+                    if source_clicked {
                         picked_mode = Some(EditMode::Source);
                     }
-                    if ui
-                        .add(egui::Button::new(mode_label(EditMode::Rendered, "Rendered")))
-                        .on_hover_text("Reading view")
-                        .clicked()
-                    {
+
+                    let rendered_btn =
+                        ui.add(egui::Button::new(mode_label(EditMode::Rendered, "Rendered")));
+                    let rendered_clicked = {
+                        let b = rendered_btn.on_hover_text("Reading view");
+                        register("Menu: View → Rendered".to_string(), &b);
+                        b.clicked()
+                    };
+                    if rendered_clicked {
                         picked_mode = Some(EditMode::Rendered);
                     }
                     if let Some(mode) = picked_mode {
