@@ -3686,11 +3686,18 @@ impl MarkdownApp {
                             ui.ctx()
                                 .data_mut(|d| d.insert_temp(editor_id, seed));
                             tab.live_seeded_for = Some(key);
-                            // A fresh activation must land keyboard focus in
-                            // the newly swapped-in editor immediately —
-                            // otherwise the first characters the user types
-                            // are dropped and the block never feels editable.
-                            ui.ctx().memory_mut(|mem| mem.request_focus(editor_id));
+                        }
+                        // Self-healing focus: the one-shot request issued at
+                        // activation can be lost (egui applies focus at pass
+                        // start, before this widget exists). Keep asking until
+                        // the editor owns the keyboard — idempotent, and moot
+                        // once the block is deactivated.
+                        let editor_has_focus = ui
+                            .ctx()
+                            .memory(|mem| mem.has_focus(editor_id));
+                        if !editor_has_focus {
+                            ui.ctx()
+                                .memory_mut(|mem| mem.request_focus(editor_id));
                         }
                         live_cfg = Some(EditRegionConfig {
                             src: range.clone(),
