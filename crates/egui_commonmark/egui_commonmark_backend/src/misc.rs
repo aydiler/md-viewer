@@ -121,8 +121,29 @@ pub fn edit_debug() -> bool {
 #[derive(Clone, Debug)]
 pub struct BlockBoundary {
     pub event_index: usize,
+    /// RAW screen y recorded during the bootstrap full paint (refreshed every
+    /// frame). Converted into content space by `show_scrollable` after the
+    /// ScrollArea reports its viewport top + scroll offset; hit-testing reads
+    /// only the converted [`Self::top_y`].
+    pub top_y_raw: f32,
+    /// Content-space y where the following block starts.
     pub top_y: f32,
     pub next_start: usize,
+}
+
+/// Convert freshly recorded raw screen ys into stable content-space ys using
+/// this frame's own viewport geometry — self-consistent regardless of scroll
+/// position or panel chrome, because both sides of the subtraction come from
+/// the same frame.
+pub fn convert_boundaries_to_content_space(
+    boundaries: &mut [BlockBoundary],
+    out: &egui::scroll_area::ScrollAreaOutput<()>,
+) {
+    let viewport_top = out.inner_rect.min.y;
+    let scroll = out.state.offset.y;
+    for b in boundaries.iter_mut() {
+        b.top_y = b.top_y_raw - viewport_top + scroll;
+    }
 }
 
 impl std::fmt::Debug for CommonMarkOptions<'_> {

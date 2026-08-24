@@ -12,6 +12,7 @@ use egui_commonmark_backend_extended::elements::{
 };
 use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
+use egui_commonmark_backend_extended::styler;
 use pulldown_cmark::{CowStr, HeadingLevel};
 
 /// Search-match highlight kind for a single rendered text segment.
@@ -623,12 +624,6 @@ impl CommonMarkViewerInternal {
             // Live-preview editing state for this frame.
             let mut edit_painted = false;
             let _ = cache.take_edit_feedback();
-            // Screen-space origin of the scroll content this pass paints
-            // into. Widget positions from `next_widget_position()` are in
-            // screen space (they shift with scrolling); subtracting this
-            // origin yields stable content-space coordinates, which is what
-            // boundary hit-testing needs.
-            let content_origin_y = ui.max_rect().min.y;
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
@@ -780,29 +775,35 @@ impl CommonMarkViewerInternal {
                                 .push((index, start_position, end_position));
                         }
 
-                        if options.record_block_layout
-                            && !scroll_cache
+                        if options.record_block_layout {
+                            // Record RAW screen y every frame (bootstrap full
+                            // paint guarantees each boundary is visited);
+                            // show_scrollable converts to content space after
+                            // the ScrollArea reports viewport top + scroll.
+                            let existing = scroll_cache
                                 .boundaries
-                                .iter()
-                                .any(|b| b.event_index == index)
-                        {
-                            // `next_start` = first byte after this boundary
-                            // event; the following block begins here (modulo
-                            // inter-block whitespace). `top_y` is converted to
-                            // CONTENT space so it stays valid no matter where
-                            // the document was scrolled when recorded.
-                            scroll_cache.boundaries.push(crate::misc::BlockBoundary {
-                                event_index: index,
-                                top_y: end_position.y - content_origin_y,
-                                next_start: src_span_end,
-                            });
-                            if crate::misc::edit_debug() {
-                                eprintln!(
-                                    "[mdv-fork] boundary pushed idx={index} y={:.1} next={} total={}",
-                                    end_position.y,
-                                    src_span_end,
-                                    scroll_cache.boundaries.len()
-                                );
+                                .iter_mut()
+                                .find(|b| b.event_index == index);
+                            match existing {
+                                Some(b) => b.top_y_raw = end_position.y,
+                                None => {
+                                    scroll_cache
+                                        .boundaries
+                                        .push(crate::misc::BlockBoundary {
+                                            event_index: index,
+                                            top_y_raw: end_position.y,
+                                            top_y: f32::NAN, // converted post-paint
+                                            next_start: src_span_end,
+                                        });
+                                    if crate::misc::edit_debug() {
+                                        eprintln!(
+                                        "[mdv-fork] boundary pushed idx={index} y={:.1} next={} total={}",
+                                        end_position.y,
+                                        src_span_end,
+                                        scroll_cache.boundaries.len()
+                                    );
+                                    }
+                                }
                             }
                         }
                     }
@@ -981,9 +982,9 @@ impl CommonMarkViewerInternal {
             sc.available_size = available_size;
             sc.last_content_h = out.content_size.y;
             sc.bootstrap_content_h = out.content_size.y;
+            convert_boundaries_to_content_space(&mut sc.boundaries, &out);
             return out;
-        }
-        // Kept for future restoration once skip-paint is bug-free.
+        }        // Kept for future restoration once skip-paint is bug-free.
         #[allow(unreachable_code)]
         let page_size_opt = scroll_cache(cache, &source_id).page_size;
         #[allow(unreachable_code)]
