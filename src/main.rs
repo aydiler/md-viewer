@@ -3592,18 +3592,86 @@ impl MarkdownApp {
         // Live preview: resolve clicks from the previous frame's layout into
         // the byte anchor of the block to edit. Runs before painting so the
         // new region applies this frame (one frame of latency is imperceptible).
+        //
+        // Self-calibration: recorded boundary ys may carry a constant frame
+        // bias (origin semantics inside the renderer-owned ScrollArea are not
+        // stable across layout changes). The painted editor rect is ground
+        // truth for the active block, so shift the whole boundary table by
+        // (its true content-y minus its recorded y) before hit-testing. Any
+        // constant offset cancels; per-block deltas come from one recording
+        // pass and stay consistent.
         if tab.edit_mode == EditMode::Live
             && ui.ctx().input(|i| i.pointer.primary_clicked())
         {
             if let Some(origin) = tab.last_content_origin {
                 let pointer_y = ui.ctx().input(|i| i.pointer.latest_pos().map(|p| p.y));
                 if let Some(py) = pointer_y {
-                    let content_y = py - origin.y + tab.scroll_offset;
+                    let click_content_y = py - origin.y + tab.scroll_offset;
+
+                    let mut bounds = tab.cache.block_bounds(&tab.id);
+                    let calibrated = if let (Some(rect), Some(active_start)) =
+                        (tab.cache.editor_rect(&tab.id), tab.active_edit_byte)
+                    {
+                        // True content-y of the open editor's top.
+                        let ed_top_content = rect.min.y - origin.y + tab.scroll_offset;
+                        // Recorded top of the active block: last cut starting
+                        // at or before its span.
+                        let rec_top = bounds
+                            .iter()
+                            .filter(|(_, ns)| *ns <= active_start)
+                            .map(|(t, _)| *t)
+                            .next_back()
+                            .unwrap_or(bounds.first().map(|(t, _)| *t).unwrap_or(0.0));
+                        let bias = rec_top - ed_top_content;
+                        for (t, _) in bounds.iter_mut() {
+                            *t -= bias;
+                        }
+                        log::debug!("live: calibration bias={bias:.1}");
+                        Some(click_content_y)
+                    } else {
+                        // No open editor to calibrate against — raw mapping
+                        // (typical first click while scrolled near top).
+                        Some(click_content_y)
+                    };
+                    let _ = &mut bounds;
                     let layout_ready = tab.cache.has_block_layout(&tab.id);
-                    match tab.cache.block_span_at_content_y(&tab.id, content_y) {
+
+                    // Hit-test against the (possibly shifted) table via a
+                    // temporary re-sort: reuse block_span_at_content_y on a
+                    // cloned cache is impossible, so do it inline.
+                    let spans = tab.cache.top_level_block_spans(&tab.id);
+                    let resolved = match calibrated {
+                        None => None,
+                        Some(y) => {
+                            let last_end = spans.last().map(|s| s.end)?;
+                            let idx = match bounds
+                                .iter()
+                                .rposition(|(t, _)| *t <= y + f32::EPSILON)
+                            {
+                                Some(i) => i,
+                                None => 0,
+                            };
+                            let k = idx.min(spans.len().saturating_sub(1));
+                            let seg_start = if k == 0 {
+                                spans[0].start
+                            } else {
+                                bounds[k - 1].1.min(last_end)
+                            };
+                            let seg_end = bounds
+                                .get(k)
+                                .map(|(_, ns)| (*ns).min(last_end))
+                                .unwrap_or(last_end);
+                            spans
+                                .iter()
+                                .find(|s| s.start < seg_end && s.end > seg_start)
+                                .cloned()
+                        }
+                    };
+
+                    match resolved {
                         Some(span) => {
                             log::info!(
-                                "live: click at content_y={content_y:.0} activates block {}..{}",
+                                "live: click at content_y={click_content_y:.0} activates block {}..{}",
                                 span.start,
                                 span.end
                             );
@@ -3614,7 +3682,8 @@ impl MarkdownApp {
                                     .open("edit-debug.log")
                                 {
                                     use std::io::Write as _;
-                                    let _ = writeln!(f, "activate {}..{}", span.start, span.end);
+                                    let _ =
+                                        writeln!(f, "activate {}..{}", span.start, span.end);
                                 }
                             }
                             tab.active_edit_byte = Some(span.start);
@@ -3627,9 +3696,8 @@ impl MarkdownApp {
                         None => {
                             // Layout not recorded yet (first Live frame) — ignore
                             // this click rather than wrongly clearing state.
-                            let span_count = tab.cache.top_level_block_spans(&tab.id).len();
                             log::info!(
-                                "live: click ignored, block layout not recorded yet (spans={span_count})"
+                                "live: click ignored, block layout not recorded yet"
                             );
                         }
                     }

@@ -711,6 +711,10 @@ impl CommonMarkViewerInternal {
                                 text: buf,
                                 changed,
                             });
+                            // Painted geometry anchor for click calibration.
+                            if let Some(sid) = split_points_id {
+                                cache.stash_editor_rect(&sid, framed.response.rect);
+                            }
                         }
                         continue;
                     }

@@ -1873,6 +1873,8 @@ pub struct CommonMarkCache {
     /// Inline-editor result stashed during the last paint; collected via
     /// [`CommonMarkCache::take_edit_feedback`].
     edit_feedback: Option<EditFeedback>,
+    /// Last painted inline-editor rect per document id (click calibration).
+    editor_rects: HashMap<egui::Id, egui::Rect>,
     /// Content-relative y position recorded by the renderer when the active match
     /// is painted. Used by the app for precise scroll-into-view, since line-ratio
     /// estimates are unreliable in image-heavy documents.
@@ -1968,6 +1970,7 @@ impl Default for CommonMarkCache {
             active_search_range: None,
             active_search_y: None,
             edit_feedback: None,
+            editor_rects: HashMap::new(),
             #[cfg(feature = "mermaid")]
             mermaid_states: HashMap::new(),
             #[cfg(feature = "mermaid")]
@@ -2284,6 +2287,29 @@ impl CommonMarkCache {
     pub fn has_block_layout(&mut self, source_id: &egui::Id) -> bool {
         let key = egui::Id::new(source_id);
         !scroll_cache(self, &key).boundaries.is_empty()
+    }
+
+    /// Snapshot of recorded boundaries as `(content_top_y, next_start)`,
+    /// sorted by y. Used by the app for self-calibrated hit-testing.
+    pub fn block_bounds(&mut self, source_id: &egui::Id) -> Vec<(f32, usize)> {
+        let key = egui::Id::new(source_id);
+        let mut v: Vec<_> = scroll_cache(self, &key)
+            .boundaries
+            .iter()
+            .map(|b| (b.top_y, b.next_start))
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    }
+
+    /// Stash the painted inline-editor rect (click calibration anchor).
+    pub fn stash_editor_rect(&mut self, source_id: &egui::Id, rect: egui::Rect) {
+        self.editor_rects.insert(egui::Id::new(source_id), rect);
+    }
+
+    /// The editor rectangle painted last frame for `source_id`, if any.
+    pub fn editor_rect(&self, source_id: &egui::Id) -> Option<egui::Rect> {
+        self.editor_rects.get(&egui::Id::new(source_id)).copied()
     }
 
     /// Hit-test a content-relative y against the block boundaries recorded
