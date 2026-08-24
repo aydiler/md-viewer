@@ -1782,6 +1782,8 @@ struct MarkdownApp {
     last_active_dirty: bool,
     // Awaiting confirmation: closing a tab or quitting with unsaved edits.
     unsaved_confirm: Option<UnsavedConfirm>,
+    // Headless e2e: synthetic click at this content-y, consumed once.
+    sim_click_pending: Option<f32>,
     // Set when "Save All" was chosen in the quit dialog: quit once saves land.
     quit_after_saves: bool,
     // MCP bridge for E2E testing
@@ -1979,6 +1981,9 @@ impl MarkdownApp {
             save_rx,
             last_active_dirty: false,
             unsaved_confirm: None,
+            sim_click_pending: std::env::var("MDV_SIM_CLICK_Y")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok()),
             quit_after_saves: false,
             #[cfg(feature = "mcp")]
             mcp_bridge,
@@ -3600,13 +3605,38 @@ impl MarkdownApp {
         // (its true content-y minus its recorded y) before hit-testing. Any
         // constant offset cancels; per-block deltas come from one recording
         // pass and stay consistent.
-        if tab.edit_mode == EditMode::Live
-            && ui.ctx().input(|i| i.pointer.primary_clicked())
+        //
+        // MDV_SIM_CLICK_Y=<content px> injects a synthetic click at that
+        // document offset through this exact code path (headless e2e).
+        // Headless e2e: auto-enter Live and fire once layout is measurable.
+        if self.sim_click_pending.is_some()
+            && tab.edit_mode == EditMode::Rendered
         {
-            if let Some(origin) = tab.last_content_origin {
-                let pointer_y = ui.ctx().input(|i| i.pointer.latest_pos().map(|p| p.y));
-                if let Some(py) = pointer_y {
-                    let click_content_y = py - origin.y + tab.scroll_offset;
+            tab.set_edit_mode(EditMode::Live);
+            self.title_dirty = true;
+        }
+        let sim_ready = self.sim_click_pending.is_some()
+            && tab.edit_mode == EditMode::Live
+            && tab.last_content_origin.is_some()
+            && tab.cache.has_block_layout(&tab.id);
+        let real_clicked =
+            ui.ctx().input(|i| i.pointer.primary_clicked());
+        let real_pointer_y = ui.ctx().input(|i| i.pointer.latest_pos().map(|p| p.y));
+        let (clicked, pointer_y) = if real_clicked {
+            (true, real_pointer_y)
+        } else if sim_ready {
+            let y_off = self.sim_click_pending.take().unwrap();
+            let origin = tab.last_content_origin.unwrap();
+            log::info!("sim: injecting click at content offset {y_off:.0}");
+            (true, Some(origin.y + y_off))
+        } else {
+            (false, None)
+        };
+        if clicked && pointer_y.is_some() {
+            let origin = tab.last_content_origin.expect("checked above");
+            {
+                let py = pointer_y.expect("clicked implies pointer pos");
+                let click_content_y = py - origin.y + tab.scroll_offset;
 
                     let mut bounds = tab.cache.block_bounds(&tab.id);
                     let calibrated = if let (Some(rect), Some(active_start)) =
@@ -3644,14 +3674,13 @@ impl MarkdownApp {
                         None => None,
                         Some(y) => {
                             let last_end = spans.last().map(|s| s.end)?;
-                            let idx = match bounds
+                            // Number of cuts at/above the click == index of
+                            // the segment containing it.
+                            let k = bounds
                                 .iter()
-                                .rposition(|(t, _)| *t <= y + f32::EPSILON)
-                            {
-                                Some(i) => i,
-                                None => 0,
-                            };
-                            let k = idx.min(spans.len().saturating_sub(1));
+                                .filter(|(t, _)| *t <= y + f32::EPSILON)
+                                .count()
+                                .min(spans.len().saturating_sub(1));
                             let seg_start = if k == 0 {
                                 spans[0].start
                             } else {
@@ -3661,9 +3690,16 @@ impl MarkdownApp {
                                 .get(k)
                                 .map(|(_, ns)| (*ns).min(last_end))
                                 .unwrap_or(last_end);
+                            // Whitespace tiling makes consecutive spans
+                            // share edge bytes; pick the span containing the
+                            // segment MIDPOINT, not the first overlapping one.
+                            let mid = (seg_start + seg_end) / 2;
                             spans
                                 .iter()
-                                .find(|s| s.start < seg_end && s.end > seg_start)
+                                .find(|s| s.start <= mid && mid < s.end)
+                                .or_else(|| {
+                                    spans.iter().find(|s| s.start < seg_end && s.end > seg_start)
+                                })
                                 .cloned()
                         }
                     };
@@ -3682,8 +3718,12 @@ impl MarkdownApp {
                                     .open("edit-debug.log")
                                 {
                                     use std::io::Write as _;
-                                    let _ =
-                                        writeln!(f, "activate {}..{}", span.start, span.end);
+                                    let _ = writeln!(
+                                        f,
+                                        "activate {}..{} ptr_screen={py:.1}",
+                                        span.start,
+                                        span.end
+                                    );
                                 }
                             }
                             tab.active_edit_byte = Some(span.start);
@@ -3702,10 +3742,7 @@ impl MarkdownApp {
                         }
                     }
                 }
-            }
-        }
-
-        // Content area (no inner CentralPanel needed - we're already in one)
+        }        // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::NONE
             .inner_margin(egui::Margin {

@@ -139,10 +139,18 @@ pub fn convert_boundaries_to_content_space(
     boundaries: &mut [BlockBoundary],
     out: &egui::scroll_area::ScrollAreaOutput<()>,
 ) {
+    // Raw ys are SCREEN space and already embed scrolling; content space is
+    // just "relative to the viewport top". Do NOT add state.offset here —
+    // that double-counts scroll and inflates every boundary.
     let viewport_top = out.inner_rect.min.y;
-    let scroll = out.state.offset.y;
     for b in boundaries.iter_mut() {
-        b.top_y = b.top_y_raw - viewport_top + scroll;
+        b.top_y = b.top_y_raw - viewport_top;
+    }
+    if crate::misc::edit_debug() && !boundaries.is_empty() {
+        eprintln!(
+            "[mdv-fork] converted: vp_top={viewport_top:.1} tops={:?}",
+            boundaries.iter().map(|b| b.top_y as i32).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -2328,12 +2336,13 @@ impl CommonMarkCache {
         // block k+1 starts painting, its next_start the byte just after the
         // boundary event. The segment between consecutive cuts maps onto the
         // first tiled span overlapping it — the clicked block.
-        let idx = match sc.boundaries.iter().rposition(|b| b.top_y <= y + f32::EPSILON) {
-            Some(idx) => idx,
-            // Click above every boundary: that's inside the FIRST block.
-            None => return Some(spans[0].clone()),
-        };
-        let k = idx.min(spans.len().saturating_sub(1));
+        // Number of cuts at/above the click == index of its segment.
+        let k = sc
+            .boundaries
+            .iter()
+            .filter(|b| b.top_y <= y + f32::EPSILON)
+            .count()
+            .min(spans.len().saturating_sub(1));
         let seg_start = if k == 0 {
             spans[0].start
         } else {

@@ -711,9 +711,27 @@ impl CommonMarkViewerInternal {
                                 text: buf,
                                 changed,
                             });
-                            // Painted geometry anchor for click calibration.
+                            // Painted geometry anchor + bracket fixup: the
+                            // swapped-in editor changes local layout, so the
+                            // boundaries bracketing this block must track the
+                            // real rect instead of their (now skipped) paint
+                            // positions.
                             if let Some(sid) = split_points_id {
                                 cache.stash_editor_rect(&sid, framed.response.rect);
+                                let sc = scroll_cache(cache, &sid);
+                                let rmin = framed.response.rect.min.y;
+                                let rmax = framed.response.rect.max.y;
+                                let mut prev_done = false;
+                                for b in sc.boundaries.iter_mut() {
+                                    let before = b.next_start <= cfg.src.start;
+                                    let after = b.next_start >= cfg.src.end;
+                                    if before && !prev_done {
+                                        b.top_y_raw = rmin;
+                                        prev_done = true;
+                                    } else if after {
+                                        b.top_y_raw = rmax;
+                                    }
+                                }
                             }
                         }
                         continue;
