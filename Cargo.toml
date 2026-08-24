@@ -32,7 +32,7 @@ eframe = { version = "0.33", default-features = false, features = [
 egui = { version = "0.33", features = ["accesskit"] }
 
 # MCP bridge for E2E testing (optional, local dev only - not on crates.io)
-# egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
+egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
 
 # Markdown rendering with syntax highlighting (fork with typography support)
 egui_commonmark_extended = { version = "0.27.0", features = [
@@ -70,7 +70,7 @@ ttf-parser = "0.25"
 
 [features]
 default = []
-# mcp = ["dep:egui-mcp-bridge"]
+mcp = ["dep:egui-mcp-bridge"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("mcp"))'] }

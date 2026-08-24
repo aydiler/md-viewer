@@ -63,8 +63,13 @@ def main():
     assert b, "bridge never came up on :9877"
     time.sleep(0.3)
 
-    # 1) Enter Live mode
-    b.key("e", ctrl=True)
+    # 1) Enter Live mode via View menu (registered buttons)
+    menu = b.find('button "Menu: View"')
+    b.click_ref(menu)
+    time.sleep(0.6)
+    live = b.find("Live Preview")
+    assert live, "Live Preview button missing from menu"
+    b.click_ref(live)
     time.sleep(0.8)
     tree = b.snap()
     assert "Live" not in tree or True  # mode isn't a widget; rely on editors below
