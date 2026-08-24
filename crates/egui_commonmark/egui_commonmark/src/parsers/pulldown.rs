@@ -617,6 +617,15 @@ impl CommonMarkViewerInternal {
             let events_data = cache.get_cached_events(content_hash)
                 .expect("events just cached")
                 .to_vec();
+            let events_len = events_data.len();
+            if crate::misc::edit_debug() {
+                eprintln!(
+                    "[show] session={:?} region={} events={}",
+                    options.edit_session.as_ref().map(|s| s.blocks.len()),
+                    options.edit_region.is_some(),
+                    events_len
+                );
+            }
             let mut events = events_data
                 .into_iter()
                 .enumerate()
@@ -629,6 +638,15 @@ impl CommonMarkViewerInternal {
             let mut session_fb: HashMap<egui::Id, Vec<crate::misc::SessionBlockFeedback>> =
                 HashMap::new();
             let _ = cache.take_edit_feedback();
+
+            if crate::misc::edit_debug() {
+                eprintln!(
+                    "[show] mode: session={:?} edit_region={:?} events={}",
+                    options.edit_session.as_ref().map(|s| s.blocks.len()),
+                    options.edit_region.is_some(),
+                    events_len
+                );
+            }
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
@@ -703,6 +721,13 @@ impl CommonMarkViewerInternal {
                                         .show(ui)
                                 });
                             let response = framed.inner;
+                            if crate::misc::edit_debug() {
+                                eprintln!(
+                                    "[session] painted blk#{bi} kind={kind:?} rect={:?} chars={}",
+                                    framed.response.rect,
+                                    buf.chars().count()
+                                );
+                            }
 
                             // Persist caret char index for next frame's reveal.
                             if let Some(cr) = response.state.cursor.char_range() {
