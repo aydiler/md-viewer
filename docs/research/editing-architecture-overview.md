@@ -39,7 +39,7 @@ surface?**
 Rendered doc; clicked block becomes a monospace `TextEdit` seeded from its byte range.
 - ✓ Works; minimal surface. ✗ Ugly (raw markdown), swap jump, caret lands wrong, typing felt dead until auto-focus fix.
 
-### B+. Layouter-decorated swap *(upgrade of B)*
+### B+. Layouter-decorated swap *(upgrade of B — **implemented**, devlog 057)*
 Same swap, but the active block paints through a custom `layouter`: markup
 punctuation hidden via equal-char-count substitution (e.g. `**`→two spaces),
 bold/heading/code runs styled per-section, caret line reveals raw syntax.
