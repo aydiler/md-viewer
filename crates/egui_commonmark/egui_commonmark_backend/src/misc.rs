@@ -90,6 +90,9 @@ pub struct EditRegionConfig {
     pub src: Range<usize>,
     /// egui id owning the editor's working text buffer (egui temp state).
     pub id: egui::Id,
+    /// Block kind — drives the styled layouter (heading scale, marker
+    /// blanking, inline run styling).
+    pub kind: crate::styler::EditBlockKind,
 }
 
 /// One frame's inline-editor result, stashed by the renderer and collected by

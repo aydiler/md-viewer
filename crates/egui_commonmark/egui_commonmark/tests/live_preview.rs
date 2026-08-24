@@ -134,6 +134,7 @@ fn live_preview_click_activates_and_types() {
     let cfg = EditRegionConfig {
         src: hit.clone(),
         id: doc_id.with("live_editor"),
+        kind: egui_commonmark_extended::EditBlockKind::Paragraph,
     };
     ctx.data_mut(|d| d.insert_temp(cfg.id, MARKDOWN[hit.clone()].to_string()));
 

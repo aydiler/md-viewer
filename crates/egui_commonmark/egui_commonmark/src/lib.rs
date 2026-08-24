@@ -85,6 +85,9 @@ pub use egui_commonmark_backend_extended::misc::{
     CommonMarkCache, EditFeedback, EditRegionConfig, STRONG_FONT_FAMILY,
 };
 pub use egui_commonmark_backend_extended::misc::{BlockBoundary, top_level_block_spans};
+pub use egui_commonmark_backend_extended::styler::{
+    EditBlockKind, MarkdownEditStyle, markdown_block_job,
+};
 pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 #[cfg(feature = "math")]
 pub use egui_commonmark_backend_extended::render_math;

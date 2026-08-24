@@ -652,6 +652,15 @@ impl CommonMarkViewerInternal {
                                 d.get_temp::<String>(cfg.id).unwrap_or_default()
                             });
                             let seed_len = buf.len();
+
+                            // Caret line for reveal (previous frame's cursor).
+                            let caret_char = ui.ctx().data_mut(|d| {
+                                d.get_temp::<usize>(cfg.id.with("caret_line_char"))
+                            });
+                            let reveal_line = caret_char.map(|ci| {
+                                buf.chars().take(ci).filter(|&c| c == '\n').count()
+                            });
+
                             // Accent border so the editable region is obvious.
                             let framed = egui::Frame::NONE
                                 .stroke(egui::Stroke::new(
@@ -660,18 +669,43 @@ impl CommonMarkViewerInternal {
                                 ))
                                 .inner_margin(egui::Margin::symmetric(6, 4))
                                 .show(ui, |ui| {
+                                    let sty =
+                                        crate::styler::MarkdownEditStyle::from_ui(ui);
+                                    let kind = cfg.kind;
+                                    let mut layouter = move |ui: &egui::Ui,
+                                                            text: &dyn egui::TextBuffer,
+                                                            wrap: f32|
+                                          -> std::sync::Arc<egui::Galley> {
+                                        let job = crate::styler::markdown_block_job(
+                                            text.as_str(),
+                                            kind,
+                                            &sty,
+                                            reveal_line,
+                                            wrap,
+                                        );
+                                        ui.fonts_mut(|f| f.layout_job(job))
+                                    };
                                     egui::TextEdit::multiline(&mut buf)
                                         .id(cfg.id)
-                                        .code_editor()
+                                        .layouter(&mut layouter)
                                         .desired_width(max_width)
                                         .show(ui)
                                 });
                             let response = framed.inner;
+
+                            // Persist caret char index for next frame's reveal.
+                            if let Some(cr) = response.state.cursor.char_range() {
+                                let idx = cr.primary.index;
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(cfg.id.with("caret_line_char"), idx)
+                                });
+                            }
+
                             if crate::misc::edit_debug() {
                                 let focused =
                                     ui.ctx().memory(|m| m.has_focus(cfg.id));
                                 eprintln!(
-                                    "[mdv-fork] editor painted: rect={:?} seed_len={seed_len} focused={focused}",
+                                    "[mdv-fork] editor painted: rect={:?} seed_len={seed_len} focused={focused} reveal_line={reveal_line:?}",
                                     framed.response.rect,
                                 );
                             }

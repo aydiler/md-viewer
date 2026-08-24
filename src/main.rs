@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
-use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer, EditRegionConfig};
+use egui_commonmark_extended::{
+    CommonMarkCache, CommonMarkViewer, EditBlockKind, EditRegionConfig,
+};
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
 use regex::Regex;
@@ -120,6 +122,41 @@ fn byte_offset_of_line_start(text: &str, line: usize) -> usize {
         offset += bytes.len();
     }
     offset.min(text.len())
+}
+
+/// Classify a top-level block's first line into its editing surface kind.
+/// Mirrors what `pulldown-cmark` would emit for the block opener.
+fn block_kind_of(block_text: &str) -> EditBlockKind {
+    let Some(first) = block_text.lines().next() else {
+        return EditBlockKind::Paragraph;
+    };
+    let t = first.trim_start();
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes)
+        && t[hashes..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == ' ' || c == '\t')
+    {
+        return EditBlockKind::Heading(hashes as u8);
+    }
+    if t.starts_with('>') {
+        return EditBlockKind::Quote;
+    }
+    let body = t.trim_start_matches([' ', '\t']);
+    if matches!(body.as_bytes().first(), Some(b'-' | b'*' | b'+'))
+        && body[1..].starts_with(' ')
+    {
+        return EditBlockKind::ListItem;
+    }
+    let digits = body.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 && body[digits..].starts_with(". ") {
+        return EditBlockKind::ListItem;
+    }
+    if body.starts_with("```") {
+        return EditBlockKind::CodeBlock;
+    }
+    EditBlockKind::Paragraph
 }
 
 /// How the watcher should react to an on-disk change for one open tab.
@@ -3639,8 +3676,7 @@ impl MarkdownApp {
                         // Seed the inline buffer only for a NEW activation —
                         // otherwise in-flight typing would be clobbered.
                         let key = (tab.content_version, range.start);
-                        if tab.live_seeded_for != Some(key) {
-                            log::info!(
+                        if tab.live_seeded_for != Some(key) {                            log::info!(
                                 "live: seeding editor for block {}..{} (v{})",
                                 range.start,
                                 range.end,
@@ -3659,6 +3695,7 @@ impl MarkdownApp {
                         live_cfg = Some(EditRegionConfig {
                             src: range.clone(),
                             id: editor_id,
+                            kind: block_kind_of(&tab.content[range.clone()]),
                         });
                         live_range = Some(range);
                     }
@@ -5910,5 +5947,30 @@ mod tests {
         assert_eq!(anchor_after_splice(19, 10, 20, 3), 13);
         // Anchor before the range is untouched by clamping semantics.
         assert_eq!(anchor_after_splice(4, 10, 20, 8), 10);
+    }
+
+    #[test]
+    fn block_kind_detects_all_shapes() {
+        assert_eq!(
+            block_kind_of("## Heading\n\nbody"),
+            EditBlockKind::Heading(2)
+        );
+        assert_eq!(
+            block_kind_of("- item one\n- item two"),
+            EditBlockKind::ListItem
+        );
+        assert_eq!(
+            block_kind_of("12. ordered item"),
+            EditBlockKind::ListItem
+        );
+        assert_eq!(block_kind_of("> quoted"), EditBlockKind::Quote);
+        assert_eq!(
+            block_kind_of("```rust\nfn x() {}\n```\n"),
+            EditBlockKind::CodeBlock
+        );
+        assert_eq!(
+            block_kind_of("Just a paragraph.\n"),
+            EditBlockKind::Paragraph
+        );
     }
 }
