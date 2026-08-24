@@ -696,6 +696,19 @@ impl CommonMarkViewerInternal {
 
                             let sty = crate::styler::MarkdownEditStyle::from_ui(ui);
                             let kind = blk.kind;
+                            let sty_for_measure = sty.clone();
+                            let measure_text = buf.clone();
+                            let content_h = {
+                                let job = crate::styler::markdown_block_job(
+                                    &measure_text,
+                                    kind,
+                                    &sty_for_measure,
+                                    reveal_line,
+                                    max_width,
+                                );
+                                ui.fonts_mut(|f| f.layout_job(job)).size().y
+                            };
+                            let box_h = (content_h + 12.0).max(sty.body_size * 1.5);
                             let mut layouter = move |ui: &egui::Ui,
                                                     text: &dyn egui::TextBuffer,
                                                     wrap: f32|
@@ -710,20 +723,39 @@ impl CommonMarkViewerInternal {
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
 
-                            let framed = egui::Frame::NONE
-                                .inner_margin(egui::Margin::symmetric(6, 2))
-                                .show(ui, |ui| {
-                                    egui::TextEdit::multiline(&mut buf)
-                                        .id(editor_id)
-                                        .layouter(&mut layouter)
-                                        .desired_width(max_width)
-                                        .show(ui)
-                                });
-                            let response = framed.inner;
+                            // Explicit-size allocation: the surrounding
+                            // paint layout is INLINE-FLOW (LTR + wrap), so an
+                            // unconstrained multiline TextEdit would grab all
+                            // remaining width x height as a narrow sliver.
+                            // We pre-measured above; allocate exact height at
+                            // full width and end the row.
+                            let response = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2(max_width, box_h),
+                                    egui::Layout::top_down_justified(egui::Align::LEFT),
+                                    |ui| {
+                                        egui::Frame::NONE
+                                            .inner_margin(egui::Margin::symmetric(6, 2))
+                                            .show(ui, |ui| {
+                                                egui::TextEdit::multiline(&mut buf)
+                                                    .id(editor_id)
+                                                    .layouter(&mut layouter)
+                                                    .desired_width(max_width)
+                                                    .min_size(egui::vec2(
+                                                        max_width,
+                                                        content_h + 4.0,
+                                                    ))
+                                                    .show(ui)
+                                            })
+                                            .inner
+                                    },
+                                )
+                                .inner;
+                            ui.end_row();
                             if crate::misc::edit_debug() {
                                 eprintln!(
                                     "[session] painted blk#{bi} kind={kind:?} rect={:?} chars={}",
-                                    framed.response.rect,
+                                    response.response.rect,
                                     buf.chars().count()
                                 );
                             }
