@@ -567,3 +567,91 @@ mod tests {
         assert_eq!(covered, job.text.len());
     }
 }
+
+pub(crate) fn style() -> MarkdownEditStyle {
+        MarkdownEditStyle {
+            body_size: 14.0,
+            heading_scale: [2.0, 1.6, 1.3, 1.15, 1.05, 1.0],
+            strong_family: FontFamily::Proportional,
+            body_family: FontFamily::Proportional,
+            mono_family: FontFamily::Monospace,
+            text_color: Color32::WHITE,
+            marker_color: Color32::GRAY,
+            code_bg: Color32::BLACK,
+            link_color: Color32::BLUE,
+        }
+    }
+
+#[cfg(test)]
+mod galley_tests {
+    use super::*;
+
+    /// Lays out the styled job inside a REAL egui pass so fonts are
+    /// initialized exactly like production.
+    fn galley_shape(text: &str, kind: EditBlockKind, reveal: Option<usize>, wrap: f32)
+        -> (f32, usize)
+    {
+        let style = style();
+        let mut job = markdown_block_job(text, kind, &style, reveal, wrap);
+        job.wrap.max_width = wrap;
+        // BISECTION: also lay out a trivial simple() job as control.
+        let mut ctrl = egui::text::LayoutJob::simple(
+            "Hello control width".into(),
+            egui::FontId::new(14.0, FontFamily::Proportional),
+            style.text_color,
+            wrap,
+        );
+        let _ = &mut ctrl;
+
+        let ctx = egui::Context::default();
+        let result = std::sync::Mutex::new((0.0f32, 0usize));
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Default::default(),
+                    egui::Vec2::new(wrap + 100.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    {
+                        let cg = ui.fonts_mut(|f| f.layout_job(ctrl.clone()));
+                        eprintln!("CTRL galley w={:.1} rows={}", cg.size().x, cg.rows.len());
+                    }
+                    let galley = ui.fonts_mut(|f| f.layout_job(job.clone()));
+                    let mut res = result.lock().unwrap();
+                    res.0 = galley.size().x;
+                    res.1 = galley.rows.len();
+                });
+            },
+        );
+        result.into_inner().unwrap()
+    }
+
+    #[test]
+    fn paragraph_is_horizontal_not_vertical() {
+        let text = "This paragraph supports *italics*, **bold**, `inline code`, and links.\n";
+        let (w, rows) = galley_shape(text, EditBlockKind::Paragraph, None, 600.0);
+        assert!(
+            w > 300.0,
+            "paragraph collapsed to vertical text: width={w:.1}px rows={rows}"
+        );
+        assert_eq!(rows, 1, "single-line paragraph wrapped into {rows} rows");
+    }
+
+    #[test]
+    fn heading_renders_wide() {
+        let text = "# Live Preview Test Doc";
+        let (w, rows) = galley_shape(text, EditBlockKind::Heading(1), None, 600.0);
+        assert!(w > 150.0, "heading vertical: width={w:.1}");
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn multiline_block_has_one_row_per_line() {
+        let text = "- First\n- Second\n- Third\n";
+        let (_w, rows) = galley_shape(text, EditBlockKind::ListItem, None, 600.0);
+        assert_eq!(rows, 3, "3 list items should be 3 rows, got {rows}");
+    }
+}

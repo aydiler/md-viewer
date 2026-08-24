@@ -13,7 +13,7 @@ use egui_commonmark_backend_extended::elements::{
 };
 use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
-use egui_commonmark_backend_extended::styler;
+
 use pulldown_cmark::{CowStr, HeadingLevel};
 
 /// Search-match highlight kind for a single rendered text segment.
@@ -632,7 +632,6 @@ impl CommonMarkViewerInternal {
                 .peekable();
 
             // Live-preview editing state for this frame.
-            let mut edit_painted = false;
             let mut session_painted: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
             let mut session_fb: HashMap<egui::Id, Vec<crate::misc::SessionBlockFeedback>> =
@@ -757,115 +756,6 @@ impl CommonMarkViewerInternal {
                             }
                             continue;
                         }
-                    }
-                }
-
-                // ---- Live-preview editing region ----
-                // Events fully inside the configured byte range are not
-                // painted; the first of them paints an inline TextEdit bound
-                // to an egui-temp buffer instead. The range must align to
-                // top-level block boundaries (caller contract) so skipping
-                // never strands the list/table/blockquote state machine mid-
-                // container. Partially-overlapping events (misaligned range)
-                // fall through to normal rendering defensively.
-                if let Some(cfg) = &options.edit_region {
-                    let inside =
-                        src_span.start >= cfg.src.start && src_span.end <= cfg.src.end;
-                    if inside {
-                        if !edit_painted {
-                            edit_painted = true;
-                            let mut buf = ui.ctx().data_mut(|d| {
-                                d.get_temp::<String>(cfg.id).unwrap_or_default()
-                            });
-                            let seed_len = buf.len();
-
-                            // Caret line for reveal (previous frame's cursor).
-                            let caret_char = ui.ctx().data_mut(|d| {
-                                d.get_temp::<usize>(cfg.id.with("caret_line_char"))
-                            });
-                            let reveal_line = caret_char.map(|ci| {
-                                buf.chars().take(ci).filter(|&c| c == '\n').count()
-                            });
-
-                            // Accent border so the editable region is obvious.
-                            let framed = egui::Frame::NONE
-                                .stroke(egui::Stroke::new(
-                                    1.5,
-                                    ui.visuals().selection.bg_fill,
-                                ))
-                                .inner_margin(egui::Margin::symmetric(6, 4))
-                                .show(ui, |ui| {
-                                    let sty =
-                                        crate::styler::MarkdownEditStyle::from_ui(ui);
-                                    let kind = cfg.kind;
-                                    let mut layouter = move |ui: &egui::Ui,
-                                                            text: &dyn egui::TextBuffer,
-                                                            wrap: f32|
-                                          -> std::sync::Arc<egui::Galley> {
-                                        let job = crate::styler::markdown_block_job(
-                                            text.as_str(),
-                                            kind,
-                                            &sty,
-                                            reveal_line,
-                                            wrap,
-                                        );
-                                        ui.fonts_mut(|f| f.layout_job(job))
-                                    };
-                                    egui::TextEdit::multiline(&mut buf)
-                                        .id(cfg.id)
-                                        .layouter(&mut layouter)
-                                        .desired_width(max_width)
-                                        .show(ui)
-                                });
-                            let response = framed.inner;
-
-                            // Persist caret char index for next frame's reveal.
-                            if let Some(cr) = response.state.cursor.char_range() {
-                                let idx = cr.primary.index;
-                                ui.ctx().data_mut(|d| {
-                                    d.insert_temp(cfg.id.with("caret_line_char"), idx)
-                                });
-                            }
-
-                            if crate::misc::edit_debug() {
-                                let focused =
-                                    ui.ctx().memory(|m| m.has_focus(cfg.id));
-                                eprintln!(
-                                    "[mdv-fork] editor painted: rect={:?} seed_len={seed_len} focused={focused} reveal_line={reveal_line:?}",
-                                    framed.response.rect,
-                                );
-                            }
-                            let changed = response.response.changed();
-                            ui.ctx()
-                                .data_mut(|d| d.insert_temp(cfg.id, buf.clone()));
-                            cache.stash_edit_feedback(crate::misc::EditFeedback {
-                                text: buf,
-                                changed,
-                            });
-                            // Painted geometry anchor + bracket fixup: the
-                            // swapped-in editor changes local layout, so the
-                            // boundaries bracketing this block must track the
-                            // real rect instead of their (now skipped) paint
-                            // positions.
-                            if let Some(sid) = split_points_id {
-                                cache.stash_editor_rect(&sid, framed.response.rect);
-                                let sc = scroll_cache(cache, &sid);
-                                let rmin = framed.response.rect.min.y;
-                                let rmax = framed.response.rect.max.y;
-                                let mut prev_done = false;
-                                for b in sc.boundaries.iter_mut() {
-                                    let before = b.next_start <= cfg.src.start;
-                                    let after = b.next_start >= cfg.src.end;
-                                    if before && !prev_done {
-                                        b.top_y_raw = rmin;
-                                        prev_done = true;
-                                    } else if after {
-                                        b.top_y_raw = rmax;
-                                    }
-                                }
-                            }
-                        }
-                        continue;
                     }
                 }
 
