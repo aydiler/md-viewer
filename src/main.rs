@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use eframe::egui;
 use egui_commonmark_extended::{
-    CommonMarkCache, CommonMarkViewer, EditBlockKind, EditRegionConfig,
+    CommonMarkCache, CommonMarkViewer, EditBlockKind, EditRegionConfig, EditSessionConfig,
+    SessionBlock,
 };
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
@@ -914,6 +915,15 @@ struct Tab {
     /// Which (content_version, block_start) the inline editor buffer was last
     /// seeded for — prevents clobbering in-flight typing with re-seeds.
     live_seeded_for: Option<(u64, usize)>,
+    /// PSE session: live text per top-level block, parallel to serialized
+    /// segmentation. Buffers hold marker-stripped text for styled kinds.
+    session_buffers: Vec<String>,
+    /// Kinds per block at seed time (parallel to session_buffers).
+    session_kinds: Vec<EditBlockKind>,
+    /// True when any session buffer differs from its seeded snapshot.
+    session_dirty: bool,
+    /// Last painted session blocks (survives cache-refresh gaps).
+    session_last_blocks: Vec<SessionBlock>,
     /// Derived caches (`outline_headers`, `local_links`, `content_lines`,
     /// `search_matches`) are stale relative to `content` after an edit.
     derived_stale: bool,
@@ -982,6 +992,10 @@ impl Tab {
             edit_mode: EditMode::Rendered,
             active_edit_byte: None,
             live_seeded_for: None,
+            session_buffers: Vec::new(),
+            session_kinds: Vec::new(),
+            session_dirty: false,
+            session_last_blocks: Vec::new(),
             derived_stale: false,
             last_edit_at: None,
             close_after_save: false,
@@ -1055,12 +1069,113 @@ impl Tab {
         self.last_edit_at = Some(now);
     }
 
+    // ---- PSE (Persistent Styled Editors) session ----
+
+    /// Seed (or re-seed) session buffers from the serialized content's
+    /// top-level blocks. Marker-stripping applies to Heading (leading `# `)
+    /// and Quote (leading `> `); other kinds keep raw text.
+    fn session_seed(&mut self) {
+        let spans = self.cache.top_level_block_spans(&self.id);
+        let mut buffers = Vec::with_capacity(spans.len());
+        let mut kinds = Vec::with_capacity(spans.len());
+        for span in &spans {
+            if span.end > self.content.len() {
+                break; // stale cache; remaining blocks invalid this frame
+            }
+            let raw = &self.content[span.clone()];
+            let kind = block_kind_of(raw);
+            let stripped = match kind {
+                EditBlockKind::Heading(_) => {
+                    let t = raw.trim_start_matches('#');
+                    t.strip_prefix([' ', '\t']).unwrap_or(t).to_string()
+                }
+                EditBlockKind::Quote => raw
+                    .lines()
+                    .map(|l| l.strip_prefix("> ").unwrap_or(l.strip_prefix('>').unwrap_or(l)))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => raw.to_string(),
+            };
+            buffers.push(stripped.to_string());
+            kinds.push(kind);
+        }
+        self.session_buffers = buffers;
+        self.session_kinds = kinds;
+        self.session_dirty = false;
+    }
+
+    /// Materialize one buffer back into markdown for its kind.
+    fn session_materialize(kind: EditBlockKind, buf: &str) -> String {
+        match kind {
+            EditBlockKind::Heading(level) => {
+                let hashes = "#".repeat(level as usize);
+                let mut out = String::new();
+                for (i, line) in buf.split_inclusive('\n').enumerate() {
+                    if i == 0 {
+                        out.push_str(&hashes);
+                        out.push(' ');
+                    }
+                    out.push_str(line);
+                }
+                out
+            }
+            EditBlockKind::Quote => buf
+                .split_inclusive('\n')
+                .map(|l| format!("> {l}"))
+                .collect(),
+            _ => buf.to_string(),
+        }
+    }
+
+    /// Fold session buffers back into `content`. Returns true when anything
+    /// changed (content replaced, derived caches invalidated).
+    fn session_serialize(&mut self) -> bool {
+        if !self.session_dirty {
+            return false;
+        }
+        let spans = self.cache.top_level_block_spans(&self.id);
+        let mut out = String::with_capacity(self.content.len() + 256);
+        let mut cursor = 0usize;
+        for (i, span) in spans.iter().enumerate() {
+            if span.start < cursor || span.end > self.content.len() {
+                break;
+            }
+            out.push_str(&self.content[cursor..span.start]);
+            match self.session_buffers.get(i) {
+                Some(buf) => {
+                    let kind = self
+                        .session_kinds
+                        .get(i)
+                        .copied()
+                        .unwrap_or(EditBlockKind::Paragraph);
+                    out.push_str(&Self::session_materialize(kind, buf));
+                }
+                None => out.push_str(&self.content[span.clone()]),
+            }
+            cursor = span.end;
+        }
+        out.push_str(&self.content[cursor..]);
+
+        if out == self.content {
+            self.session_dirty = false;
+            return false;
+        }
+        self.content = out;
+        self.content_lines = self.content.lines().count();
+        self.content_version = self.content_version.wrapping_add(1);
+        self.mark_edited(Instant::now());
+        true
+    }
+
     /// Switch editing mode. Leaving Source/Live with un-refreshed edits
     /// rebuilds derived caches immediately so outline, links and search match
     /// what gets rendered again. Deactivates any live-edit block.
     fn set_edit_mode(&mut self, mode: EditMode) {
         if self.edit_mode == mode {
             return;
+        }
+        if self.edit_mode == EditMode::Live {
+            self.session_serialize();
         }
         self.edit_mode = mode;
         self.active_edit_byte = None;
@@ -1073,6 +1188,9 @@ impl Tab {
     /// Ctrl+E: cycle Rendered → Live → Source → Rendered so every press
     /// visibly changes the surface.
     fn cycle_edit_mode(&mut self) {
+        if self.edit_mode == EditMode::Live {
+            self.session_serialize();
+        }
         let next = match self.edit_mode {
             EditMode::Rendered => EditMode::Live,
             EditMode::Live => EditMode::Source,
@@ -2143,6 +2261,11 @@ impl MarkdownApp {
         };
         if !tab.dirty && tab.in_flight_save_hash.is_none() {
             return false;
+        }
+        if tab.edit_mode == EditMode::Live {
+            // Buffers are canonical while Live; fold them into `content`
+            // before hashing/writing so disk matches what the user sees.
+            tab.session_serialize();
         }
         let hash = hash_content(&tab.content);
         if Some(hash) == tab.in_flight_save_hash {
@@ -3594,161 +3717,6 @@ impl MarkdownApp {
             tab.cache.clear_search_ranges();
         }
 
-        // Live preview: resolve clicks from the previous frame's layout into
-        // the byte anchor of the block to edit. Runs before painting so the
-        // new region applies this frame (one frame of latency is imperceptible).
-        //
-        // Self-calibration: recorded boundary ys may carry a constant frame
-        // bias (origin semantics inside the renderer-owned ScrollArea are not
-        // stable across layout changes). The painted editor rect is ground
-        // truth for the active block, so shift the whole boundary table by
-        // (its true content-y minus its recorded y) before hit-testing. Any
-        // constant offset cancels; per-block deltas come from one recording
-        // pass and stay consistent.
-        //
-        // MDV_SIM_CLICK_Y=<content px> injects a synthetic click at that
-        // document offset through this exact code path (headless e2e).
-        // Headless e2e: auto-enter Live and fire once layout is measurable.
-        if self.sim_click_pending.is_some()
-            && tab.edit_mode == EditMode::Rendered
-        {
-            tab.set_edit_mode(EditMode::Live);
-            self.title_dirty = true;
-        }
-        let sim_ready = self.sim_click_pending.is_some()
-            && tab.edit_mode == EditMode::Live
-            && tab.last_content_origin.is_some()
-            && tab.cache.has_block_layout(&tab.id);
-        let real_clicked =
-            ui.ctx().input(|i| i.pointer.primary_clicked());
-        let real_pointer_y = ui.ctx().input(|i| i.pointer.latest_pos().map(|p| p.y));
-        let (clicked, pointer_y) = if real_clicked {
-            (true, real_pointer_y)
-        } else if sim_ready {
-            let y_off = self.sim_click_pending.take().unwrap();
-            let origin = tab.last_content_origin.unwrap();
-            log::info!("sim: injecting click at content offset {y_off:.0}");
-            (true, Some(origin.y + y_off))
-        } else {
-            (false, None)
-        };
-        if clicked && pointer_y.is_some() {
-            // Origin can legitimately be absent: a fresh tab that hasn't
-            // painted yet (or clicks landing before first layout) must be
-            // skipped silently rather than panic.
-            let Some(origin) = tab.last_content_origin else {
-                log::debug!("live: click before first layout — ignored");
-                return None;
-            };
-            {
-                let py = pointer_y.expect("clicked implies pointer pos");
-                let click_content_y = py - origin.y + tab.scroll_offset;
-
-                    let mut bounds = tab.cache.block_bounds(&tab.id);
-                    let calibrated = if let (Some(rect), Some(active_start)) =
-                        (tab.cache.editor_rect(&tab.id), tab.active_edit_byte)
-                    {
-                        // True content-y of the open editor's top.
-                        let ed_top_content = rect.min.y - origin.y + tab.scroll_offset;
-                        // Recorded top of the active block: last cut starting
-                        // at or before its span.
-                        let rec_top = bounds
-                            .iter()
-                            .filter(|(_, ns)| *ns <= active_start)
-                            .map(|(t, _)| *t)
-                            .next_back()
-                            .unwrap_or(bounds.first().map(|(t, _)| *t).unwrap_or(0.0));
-                        let bias = rec_top - ed_top_content;
-                        for (t, _) in bounds.iter_mut() {
-                            *t -= bias;
-                        }
-                        log::debug!("live: calibration bias={bias:.1}");
-                        Some(click_content_y)
-                    } else {
-                        // No open editor to calibrate against — raw mapping
-                        // (typical first click while scrolled near top).
-                        Some(click_content_y)
-                    };
-                    let _ = &mut bounds;
-                    let layout_ready = tab.cache.has_block_layout(&tab.id);
-
-                    // Hit-test against the (possibly shifted) table via a
-                    // temporary re-sort: reuse block_span_at_content_y on a
-                    // cloned cache is impossible, so do it inline.
-                    let spans = tab.cache.top_level_block_spans(&tab.id);
-                    let resolved = match calibrated {
-                        None => None,
-                        Some(y) => {
-                            let last_end = spans.last().map(|s| s.end)?;
-                            // Number of cuts at/above the click == index of
-                            // the segment containing it.
-                            let k = bounds
-                                .iter()
-                                .filter(|(t, _)| *t <= y + f32::EPSILON)
-                                .count()
-                                .min(spans.len().saturating_sub(1));
-                            let seg_start = if k == 0 {
-                                spans[0].start
-                            } else {
-                                bounds[k - 1].1.min(last_end)
-                            };
-                            let seg_end = bounds
-                                .get(k)
-                                .map(|(_, ns)| (*ns).min(last_end))
-                                .unwrap_or(last_end);
-                            // Whitespace tiling makes consecutive spans
-                            // share edge bytes; pick the span containing the
-                            // segment MIDPOINT, not the first overlapping one.
-                            let mid = (seg_start + seg_end) / 2;
-                            spans
-                                .iter()
-                                .find(|s| s.start <= mid && mid < s.end)
-                                .or_else(|| {
-                                    spans.iter().find(|s| s.start < seg_end && s.end > seg_start)
-                                })
-                                .cloned()
-                        }
-                    };
-
-                    match resolved {
-                        Some(span) => {
-                            log::info!(
-                                "live: click at content_y={click_content_y:.0} activates block {}..{}",
-                                span.start,
-                                span.end
-                            );
-                            if std::env::var_os("MDV_EDIT_DEBUG").is_some() {
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("edit-debug.log")
-                                {
-                                    use std::io::Write as _;
-                                    let _ = writeln!(
-                                        f,
-                                        "activate {}..{} ptr_screen={py:.1}",
-                                        span.start,
-                                        span.end
-                                    );
-                                }
-                            }
-                            tab.active_edit_byte = Some(span.start);
-                        }
-                        None if layout_ready => {
-                            // Click below/above every recorded block → leave editing.
-                            log::info!("live: click outside blocks deactivates editor");
-                            tab.active_edit_byte = None;
-                        }
-                        None => {
-                            // Layout not recorded yet (first Live frame) — ignore
-                            // this click rather than wrongly clearing state.
-                            log::info!(
-                                "live: click ignored, block layout not recorded yet"
-                            );
-                        }
-                    }
-                }
-        }
 
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
@@ -3771,57 +3739,38 @@ impl MarkdownApp {
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
-                // ---- Live-preview configuration ----
-                let mut live_range: Option<std::ops::Range<usize>> = None;
-                let mut live_cfg: Option<EditRegionConfig> = None;
+                // ---- PSE session configuration ----
+                let mut live_salt: Option<egui::Id> = None;
+                let mut live_blocks: Option<Vec<SessionBlock>> = None;
                 if tab.edit_mode == EditMode::Live {
+                    // Seed/refresh session buffers from serialized content.
+                    // Empty spans == caches mid-refresh: fall back to last
+                    // known blocks so editors never flicker away.
                     let spans = tab.cache.top_level_block_spans(&tab.id);
-                    // Resolve the active block from the stored anchor; fall
-                    // back to the first block when set but stale.
-                    let content_len = tab.content.len();
-                    let active = tab
-                        .active_edit_byte
-                        .and_then(|a| spans.iter().find(|r| r.contains(&a)).cloned())
-                        .or_else(|| {
-                            tab.active_edit_byte.and_then(|_| spans.first().cloned())
-                        })
-                        // Stale-range guard: splices resize `content` before
-                        // derived caches refresh; drop spans that no longer fit.
-                        .filter(|r| r.end <= content_len && r.start < r.end);
-                    if let Some(range) = active {
-                        let editor_id = tab.source_editor_id().with("live");
-                        // Seed the inline buffer only for a NEW activation —
-                        // otherwise in-flight typing would be clobbered.
-                        let key = (tab.content_version, range.start);
-                        if tab.live_seeded_for != Some(key) {                            log::info!(
-                                "live: seeding editor for block {}..{} (v{})",
-                                range.start,
-                                range.end,
-                                tab.content_version
-                            );
-                            let seed = tab.content[range.clone()].to_string();
-                            ui.ctx()
-                                .data_mut(|d| d.insert_temp(editor_id, seed));
-                            tab.live_seeded_for = Some(key);
-                        }
-                        // Self-healing focus: the one-shot request issued at
-                        // activation can be lost (egui applies focus at pass
-                        // start, before this widget exists). Keep asking until
-                        // the editor owns the keyboard — idempotent, and moot
-                        // once the block is deactivated.
-                        let editor_has_focus = ui
-                            .ctx()
-                            .memory(|mem| mem.has_focus(editor_id));
-                        if !editor_has_focus {
-                            ui.ctx()
-                                .memory_mut(|mem| mem.request_focus(editor_id));
-                        }
-                        live_cfg = Some(EditRegionConfig {
-                            src: range.clone(),
-                            id: editor_id,
-                            kind: block_kind_of(&tab.content[range.clone()]),
-                        });
-                        live_range = Some(range);
+                    let span_count = spans.len();
+                    if span_count > 0 && tab.session_kinds.len() != span_count {
+                        tab.session_seed();
+                    }
+                    let blocks: Vec<SessionBlock> = if span_count > 0
+                        && tab.session_kinds.len() == span_count
+                    {
+                        spans
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, r)| {
+                                tab.session_kinds.get(i).map(|k| SessionBlock {
+                                    src: r.clone(),
+                                    kind: *k,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        std::mem::take(&mut tab.session_last_blocks)
+                    };
+                    if !blocks.is_empty() {
+                        tab.session_last_blocks = blocks.clone();
+                        live_salt = Some(tab.source_editor_id().with("pse"));
+                        live_blocks = Some(blocks);
                     }
                 }
 
@@ -3852,9 +3801,12 @@ impl MarkdownApp {
                     .heading_spacing_below(0.75)
                     .content_version(tab.content_version)
                     .pending_scroll_offset(pending)
-                    .record_block_layout(tab.edit_mode == EditMode::Live);
-                if let Some(cfg) = live_cfg {
-                    viewer = viewer.edit_region(Some(cfg));
+                    .record_block_layout(false);
+                if let Some(blocks) = live_blocks.clone() {
+                    viewer = viewer.edit_session(Some(EditSessionConfig {
+                        id_salt: tab.source_editor_id().with("pse"),
+                        blocks,
+                    }));
                 }
                 let mut scroll_output = viewer.scroll_source(egui::scroll_area::ScrollSource {
                     scroll_bar: true,
@@ -3863,34 +3815,29 @@ impl MarkdownApp {
                 })
                 .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
 
-                // ---- Live preview: splice edited block text back ----
-                if let Some(range) = live_range.clone() {
-                    let range_valid = range.start < range.end
-                        && range.end <= tab.content.len()
-                        && tab
-                            .active_edit_byte
-                            .is_some_and(|a| range.contains(&a));
-                    if !range_valid {
-                        tab.cache.take_edit_feedback(); // drop stale feedback
-                    } else if let Some(fb) = tab.cache.take_edit_feedback() {
-                        if fb.changed && fb.text != tab.content[range.clone()] {
-                            log::info!(
-                                "live: splicing edited block {}..{} ({} -> {} bytes)",
-                                range.start,
-                                range.end,
-                                range.len(),
-                                fb.text.len()
-                            );
-                            let anchor = tab.active_edit_byte.unwrap_or(range.start);
-                            let new_anchor = anchor_after_splice(
-                                anchor,
-                                range.start,
-                                range.end,
-                                fb.text.len(),
-                            );
-                            tab.content.replace_range(range.clone(), &fb.text);
-                            tab.active_edit_byte = Some(new_anchor);
-                            tab.mark_edited(Instant::now());
+                // ---- PSE: fold per-block feedback into session buffers ----
+                if live_salt.is_some() {
+                    // Drop any legacy single-editor feedback; sessions use
+                    // take_session_feedback exclusively.
+                    tab.cache.take_edit_feedback();
+                    for fb in tab.cache.take_session_feedback(
+                        &tab.source_editor_id().with("pse"),
+                    ) {
+                        if fb.changed {
+                            if let Some(buf) = tab.session_buffers.get_mut(fb.index) {
+                                if *buf != fb.text {
+                                    log::debug!(
+                                        "live: block {} changed ({} -> {} chars)",
+                                        fb.index,
+                                        buf.chars().count(),
+                                        fb.text.chars().count()
+                                    );
+                                    *buf = fb.text;
+                                    tab.session_dirty = true;
+                                    tab.dirty = true;
+                                    tab.mark_edited(Instant::now());
+                                }
+                            }
                         }
                     }
                 }

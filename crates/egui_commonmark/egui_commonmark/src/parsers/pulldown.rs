@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -623,11 +624,116 @@ impl CommonMarkViewerInternal {
 
             // Live-preview editing state for this frame.
             let mut edit_painted = false;
+            let mut session_painted: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            let mut session_fb: HashMap<egui::Id, Vec<crate::misc::SessionBlockFeedback>> =
+                HashMap::new();
             let _ = cache.take_edit_feedback();
 
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
                 let src_span_end = src_span.end;
+
+                if crate::misc::edit_debug() && std::env::var("MDV_PROBE").is_ok() {
+                    eprintln!(
+                        "[probe] session_blocks={:?} span={}..{}",
+                        options.edit_session.as_ref().map(|s| s.blocks.len()),
+                        src_span.start,
+                        src_span.end
+                    );
+                }
+                // ---- Persistent editing session ----
+                // Every text block paints as a styled TextEdit bound to its
+                // own temp buffer; non-text blocks fall through to normal
+                // rendering. Per-block feedback is stashed for the caller.
+                if let Some(session) = &options.edit_session {
+                    let block_idx = session.blocks.iter().position(|b| {
+                        src_span.start >= b.src.start && src_span.end <= b.src.end
+                    });
+                    if let Some(bi) = block_idx {
+                        let blk = &session.blocks[bi];
+                        let text_kind = matches!(
+                            blk.kind,
+                            crate::styler::EditBlockKind::Heading(_)
+                                | crate::styler::EditBlockKind::Paragraph
+                                | crate::styler::EditBlockKind::Quote
+                                | crate::styler::EditBlockKind::ListItem
+                        );
+                        if text_kind && !session_painted.contains(&bi) {
+                            session_painted.insert(bi);
+                            let editor_id = session.id_salt.with(("blk", bi));
+                            // Seed from source on first paint of this
+                            // block; later frames read the live buffer.
+                            let (mut buf, seeded) = ui.ctx().data_mut(|d| {
+                                match d.get_temp::<String>(editor_id) {
+                                    Some(b) => (b, false),
+                                    None => (text.get(blk.src.clone()).unwrap_or("").to_string(), true),
+                                }
+                            });
+                            let _ = seeded;
+                            let caret_char = ui
+                                .ctx()
+                                .data_mut(|d| d.get_temp::<usize>(editor_id.with("caret")));
+                            let reveal_line = caret_char
+                                .map(|ci| buf.chars().take(ci).filter(|&c| c == '\n').count());
+
+                            let sty = crate::styler::MarkdownEditStyle::from_ui(ui);
+                            let kind = blk.kind;
+                            let mut layouter = move |ui: &egui::Ui,
+                                                    text: &dyn egui::TextBuffer,
+                                                    wrap: f32|
+                                  -> std::sync::Arc<egui::Galley> {
+                                let job = crate::styler::markdown_block_job(
+                                    text.as_str(),
+                                    kind,
+                                    &sty,
+                                    reveal_line,
+                                    wrap,
+                                );
+                                ui.fonts_mut(|f| f.layout_job(job))
+                            };
+
+                            let framed = egui::Frame::NONE
+                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    egui::TextEdit::multiline(&mut buf)
+                                        .id(editor_id)
+                                        .layouter(&mut layouter)
+                                        .desired_width(max_width)
+                                        .show(ui)
+                                });
+                            let response = framed.inner;
+
+                            // Persist caret char index for next frame's reveal.
+                            if let Some(cr) = response.state.cursor.char_range() {
+                                let idx = cr.primary.index.min(buf.chars().count());
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(editor_id.with("caret"), idx)
+                                });
+                            }
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(editor_id, buf.clone()));
+                            session_fb.entry(session.id_salt).or_default().push(
+                                crate::misc::SessionBlockFeedback {
+                                    index: bi,
+                                    text: buf,
+                                    changed: response.response.changed(),
+                                },
+                            );
+
+                            // Consume remaining events of this block.
+                            while let Some((_, (_, sp_next))) =
+                                events.next_if(|&(_, ref pair)| {
+                                    pair.1.start >= blk.src.start
+                                        && pair.1.end <= blk.src.end
+                                })
+                            {
+                                let _ = sp_next;
+                            }
+                            continue;
+                        }
+                    }
+                }
 
                 // ---- Live-preview editing region ----
                 // Events fully inside the configured byte range are not
@@ -839,6 +945,18 @@ impl CommonMarkViewerInternal {
             if let Some(source_id) = split_points_id {
                 scroll_cache(cache, &source_id).page_size =
                     Some(ui.next_widget_position().to_vec2());
+            }
+            // Flush persistent-session feedback collected this frame.
+            for (salt, mut fb) in session_fb {
+                if crate::misc::edit_debug() && std::env::var("MDV_PROBE").is_ok() {
+                    eprintln!(
+                        "[flush] salt_changed={:?} n={}",
+                        fb.iter().map(|f| (f.index, f.changed)).collect::<Vec<_>>(),
+                        fb.len()
+                    );
+                }
+                fb.iter_mut().for_each(|f| f.changed = false); // reset AFTER log
+                cache.stash_session_feedback(&salt, fb);
             }
         });
 

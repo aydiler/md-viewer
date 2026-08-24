@@ -76,6 +76,8 @@ pub struct CommonMarkOptions<'f> {
     /// skipped events bypass the renderer's list/table/blockquote state
     /// machine — only complete top-level subtrees are safe to skip.
     pub edit_region: Option<EditRegionConfig>,
+    /// Persistent editing session (supersedes `edit_region` when set).
+    pub edit_session: Option<EditSessionConfig>,
     /// Record the y position of every safe block boundary while painting
     /// (next to `split_points`). Callers combine this with
     /// [`top_level_block_spans`] to hit-test clicks into byte ranges for
@@ -93,6 +95,37 @@ pub struct EditRegionConfig {
     /// Block kind — drives the styled layouter (heading scale, marker
     /// blanking, inline run styling).
     pub kind: crate::styler::EditBlockKind,
+}
+
+/// Persistent-editing session: every text block paints as a styled TextEdit;
+/// non-text blocks (images, math, mermaid, tables, code fences) render
+/// normally. Buffers live in egui temp state under `<id_salt>/blk/<i>`.
+#[derive(Clone, Debug)]
+pub struct EditSessionConfig {
+    /// Namespace for per-block editor ids and state.
+    pub id_salt: egui::Id,
+    /// One entry per top-level block, in document order.
+    pub blocks: Vec<SessionBlock>,
+}
+
+/// A single session block.
+#[derive(Clone, Debug)]
+pub struct SessionBlock {
+    /// Source byte range of the block (whitespace-tiled).
+    pub src: Range<usize>,
+    /// Kind drives styling and marker stripping.
+    pub kind: crate::styler::EditBlockKind,
+}
+
+/// Result of one painted session block.
+#[derive(Clone, Debug)]
+pub struct SessionBlockFeedback {
+    /// Index into [`EditSessionConfig::blocks`].
+    pub index: usize,
+    /// Current buffer text (materialized markdown NOT included).
+    pub text: String,
+    /// Buffer changed since previous frame.
+    pub changed: bool,
 }
 
 /// One frame's inline-editor result, stashed by the renderer and collected by
@@ -178,6 +211,7 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             .field("typography", &self.typography)
             .field("use_strong_font_family", &self.use_strong_font_family)
             .field("edit_region", &self.edit_region)
+            .field("edit_session", &self.edit_session)
             .field("record_block_layout", &self.record_block_layout)
             .finish()
     }
@@ -204,6 +238,7 @@ impl Default for CommonMarkOptions<'_> {
             typography: TypographyConfig::default(),
             use_strong_font_family: false,
             edit_region: None,
+            edit_session: None,
             record_block_layout: false,
         }
     }
@@ -1883,6 +1918,8 @@ pub struct CommonMarkCache {
     edit_feedback: Option<EditFeedback>,
     /// Last painted inline-editor rect per document id (click calibration).
     editor_rects: HashMap<egui::Id, egui::Rect>,
+    /// Per-frame persistent-session feedback, keyed by salt id.
+    session_feedback: HashMap<egui::Id, Vec<SessionBlockFeedback>>,
     /// Content-relative y position recorded by the renderer when the active match
     /// is painted. Used by the app for precise scroll-into-view, since line-ratio
     /// estimates are unreliable in image-heavy documents.
@@ -1979,6 +2016,7 @@ impl Default for CommonMarkCache {
             active_search_y: None,
             edit_feedback: None,
             editor_rects: HashMap::new(),
+            session_feedback: HashMap::new(),
             #[cfg(feature = "mermaid")]
             mermaid_states: HashMap::new(),
             #[cfg(feature = "mermaid")]
@@ -2307,6 +2345,41 @@ impl CommonMarkCache {
             .map(|b| (b.top_y, b.next_start))
             .collect();
         v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    }
+
+    /// Replace this frame's session feedback for `salt`.
+    pub fn stash_session_feedback(
+        &mut self,
+        salt: &egui::Id,
+        feedback: Vec<SessionBlockFeedback>,
+    ) {
+        self.session_feedback.insert(*salt, feedback);
+    }
+
+    /// Take session feedback accumulated during the last paint
+    /// (destructive; prefer [`Self::get_session_feedback`] with multi-pass
+    /// egui layouts where the closure runs more than once).
+    pub fn take_session_feedback(
+        &mut self,
+        salt: &egui::Id,
+    ) -> Vec<SessionBlockFeedback> {
+        self.session_feedback.remove(salt).unwrap_or_default()
+    }
+
+    /// Non-destructive snapshot of the latest session feedback.
+    pub fn get_session_feedback(
+        &self,
+        salt: &egui::Id,
+    ) -> Vec<SessionBlockFeedback> {
+        let v = self
+            .session_feedback
+            .get(salt)
+            .cloned()
+            .unwrap_or_default();
+        if crate::misc::edit_debug() {
+            eprintln!("[get_fb] salt={salt:?} n={} keys={:?}", v.len(), self.session_feedback.keys().collect::<Vec<_>>());
+        }
         v
     }
 

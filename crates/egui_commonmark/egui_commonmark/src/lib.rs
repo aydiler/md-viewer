@@ -85,6 +85,9 @@ pub use egui_commonmark_backend_extended::misc::{
     CommonMarkCache, EditFeedback, EditRegionConfig, STRONG_FONT_FAMILY,
 };
 pub use egui_commonmark_backend_extended::misc::{BlockBoundary, top_level_block_spans};
+pub use egui_commonmark_backend_extended::misc::{
+    EditSessionConfig, SessionBlock, SessionBlockFeedback,
+};
 pub use egui_commonmark_backend_extended::styler::{
     EditBlockKind, MarkdownEditStyle, markdown_block_job,
 };
@@ -449,6 +452,15 @@ impl<'f> CommonMarkViewer<'f> {
     /// changed text back into your own buffer.
     pub fn edit_region(mut self, region: Option<EditRegionConfig>) -> Self {
         self.options.edit_region = region;
+        self
+    }
+
+    /// Persistent editing session: every text block in `blocks` paints as a
+    /// styled TextEdit bound to per-block temp buffers; other blocks render
+    /// normally. Collect per-block results via
+    /// [`CommonMarkCache::take_session_feedback`] right after painting.
+    pub fn edit_session(mut self, session: Option<EditSessionConfig>) -> Self {
+        self.options.edit_session = session;
         self
     }
 
