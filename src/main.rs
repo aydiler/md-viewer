@@ -1058,6 +1058,12 @@ impl Tab {
             self.in_flight_save_hash = None;
             self.derived_stale = false;
             self.last_edit_at = None;
+
+            // PSE session state is derived from content; force re-seed.
+            self.session_buffers.clear();
+            self.session_kinds.clear();
+            self.session_last_blocks.clear();
+            self.session_dirty = false;
         }
     }
 
@@ -1277,6 +1283,12 @@ impl Tab {
             self.in_flight_save_hash = None;
             self.derived_stale = false;
             self.last_edit_at = None;
+
+            // PSE session state is derived from content; force re-seed.
+            self.session_buffers.clear();
+            self.session_kinds.clear();
+            self.session_last_blocks.clear();
+            self.session_dirty = false;
         }
     }
 
