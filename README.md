@@ -61,6 +61,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **Keyboard Scrolling** - Scroll documents with ↑/↓ by line or Page Up/Page Down by page when the find bar is closed
 - **Live Reload** - Auto-refresh on file changes (enabled by default)
 - **Custom Colors** - Customize highlight and link text colors (View → Colors…)
+- **Font Selection** - Browse and apply installed system fonts via View menu (searchable, persistent)
 
 *Full Width, Formula Size and the colour picker all live in the View menu*
 
