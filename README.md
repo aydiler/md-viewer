@@ -62,6 +62,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **Live Reload** - Auto-refresh on file changes (enabled by default)
 - **Custom Colors** - Customize highlight and link text colors (View → Colors…)
 - **Font Selection** - Browse and apply installed system fonts via View menu (searchable, persistent)
+- **Smooth Text Rendering** - Optional toggle (View → Smooth Text Rendering) that disables glyph pixel-snapping for less jagged-looking text at fractional zoom levels
 
 *Full Width, Formula Size and the colour picker all live in the View menu*
 
