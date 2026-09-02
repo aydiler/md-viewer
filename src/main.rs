@@ -372,6 +372,11 @@ struct PersistedState {
     /// Preferred document body/heading font family name. `None` means use the
     /// auto-detected system sans-serif (see `system_fonts::setup_fonts`).
     selected_font_family: Option<String>,
+    /// Disable egui's pixel-snapping for glyph positions (see
+    /// `TessellationOptions::round_text_to_pixels`). Off by default, matching
+    /// today's behavior; `Some(true)` trades a touch of sharpness for glyphs
+    /// that no longer look unevenly spaced at fractional zoom levels.
+    smooth_text_rendering: Option<bool>,
     open_tabs: Option<Vec<PathBuf>>,
     active_tab: Option<usize>,
     // File explorer state
@@ -1758,6 +1763,10 @@ struct MarkdownApp {
     show_font_dialog: bool,
     // Transient UI-only search text for the font picker (not persisted).
     font_filter: String,
+    // Disables egui's glyph pixel-snapping when true. Applied unconditionally
+    // every frame (see ctx.set_zoom_factor below) since it's a single write
+    // into egui's own memory, not worth a last-applied change-gate.
+    smooth_text_rendering: bool,
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
@@ -1865,6 +1874,7 @@ impl MarkdownApp {
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
         let full_width_content = persisted.full_width_content.unwrap_or(false);
+        let smooth_text_rendering = persisted.smooth_text_rendering.unwrap_or(false);
         let show_explorer = persisted.show_explorer.unwrap_or(true);
         let explorer_width =
             restored_sidebar_width(persisted.explorer_width, EXPLORER_DEFAULT_WIDTH);
@@ -1964,6 +1974,7 @@ impl MarkdownApp {
             available_font_families_lower,
             show_font_dialog: false,
             font_filter: String::new(),
+            smooth_text_rendering,
             watch_enabled: watch,
             error_message: startup_error,
             is_dragging: false,
@@ -4205,6 +4216,7 @@ impl eframe::App for MarkdownApp {
             show_outline: Some(self.show_outline),
             full_width_content: Some(self.full_width_content),
             selected_font_family: self.selected_font_family.clone(),
+            smooth_text_rendering: Some(self.smooth_text_rendering),
             open_tabs: Some(self.get_open_tab_paths()),
             active_tab: Some(self.active_tab),
             show_explorer: Some(self.show_explorer),
@@ -4292,6 +4304,16 @@ impl eframe::App for MarkdownApp {
         }
 
         ctx.set_zoom_factor(self.zoom_level);
+
+        // Disabling pixel-snapping lets glyphs render at their exact
+        // sub-pixel position instead of each being individually rounded to
+        // the physical pixel grid — the rounding is what makes text look
+        // unevenly spaced/jagged at the fractional effective pixel ratios
+        // this app's zoom levels commonly produce. Trivial cost (one write
+        // into egui's own memory), so no last-applied change-gate needed.
+        ctx.tessellation_options_mut(|opts| {
+            opts.round_text_to_pixels = !self.smooth_text_rendering;
+        });
 
         // Update window title only when dirty
         if self.title_dirty {
@@ -4768,6 +4790,24 @@ impl eframe::App for MarkdownApp {
                     );
                     if font_btn.clicked() {
                         self.show_font_dialog = true;
+                        ui.close();
+                    }
+
+                    let smooth_text_text = if self.smooth_text_rendering {
+                        "✓ Smooth Text Rendering"
+                    } else {
+                        "Smooth Text Rendering"
+                    };
+                    let smooth_text_btn = ui.add(egui::Button::new(smooth_text_text));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Smooth Text Rendering",
+                        "button",
+                        &smooth_text_btn,
+                        Some(if self.smooth_text_rendering { "on" } else { "off" }),
+                    );
+                    if smooth_text_btn.clicked() {
+                        self.smooth_text_rendering = !self.smooth_text_rendering;
                         ui.close();
                     }
 
