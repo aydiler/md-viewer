@@ -375,6 +375,14 @@ struct PersistedState {
     zoom_level: Option<f32>,
     show_outline: Option<bool>,
     full_width_content: Option<bool>,
+    /// Preferred document body/heading font family name. `None` means use the
+    /// auto-detected system sans-serif (see `system_fonts::setup_fonts`).
+    selected_font_family: Option<String>,
+    /// Disable egui's pixel-snapping for glyph positions (see
+    /// `TessellationOptions::round_text_to_pixels`). Off by default, matching
+    /// today's behavior; `Some(true)` trades a touch of sharpness for glyphs
+    /// that no longer look unevenly spaced at fractional zoom levels.
+    smooth_text_rendering: Option<bool>,
     open_tabs: Option<Vec<PathBuf>>,
     active_tab: Option<usize>,
     // File explorer state
@@ -1751,6 +1759,24 @@ struct MarkdownApp {
     zoom_level: f32,
     show_outline: bool,
     full_width_content: bool,
+    // Document body/heading font. `None` = auto-detected system sans-serif.
+    selected_font_family: Option<String>,
+    // All installed system font family names, scanned once at startup.
+    available_font_families: Vec<String>,
+    // Lowercased copy of `available_font_families`, precomputed once so the
+    // font-picker search filter doesn't re-lowercase every name on every
+    // frame it's open (see docs/EGUI_WORKFLOW.md: never allocate in the
+    // render loop what can be cached).
+    available_font_families_lower: Vec<String>,
+    // Mirrors `last_applied_dark_mode`: only reload fonts when this changes.
+    last_applied_font_family: Option<String>,
+    show_font_dialog: bool,
+    // Transient UI-only search text for the font picker (not persisted).
+    font_filter: String,
+    // Disables egui's glyph pixel-snapping when true. Applied unconditionally
+    // every frame (see ctx.set_zoom_factor below) since it's a single write
+    // into egui's own memory, not worth a last-applied change-gate.
+    smooth_text_rendering: bool,
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
@@ -1803,8 +1829,20 @@ struct MarkdownApp {
 
 impl MarkdownApp {
     fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>, watch: bool) -> Self {
+        // Load persisted state (needed before font setup, which reads the
+        // persisted font preference)
+        let persisted: PersistedState = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, APP_KEY))
+            .unwrap_or_default();
+        let selected_font_family = persisted.selected_font_family;
+
         // Setup fonts with system font fallbacks for Unicode support
-        setup_fonts(&cc.egui_ctx);
+        let available_font_families = setup_fonts(&cc.egui_ctx, selected_font_family.as_deref());
+        let available_font_families_lower: Vec<String> = available_font_families
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
 
         // Clear stale egui widget data loaded from disk (scroll offsets, panel sizes, etc.)
         // We don't persist egui memory (see persist_egui_memory), but eframe always
@@ -1840,18 +1878,13 @@ impl MarkdownApp {
             style.interaction.resize_grab_radius_side = SIDEBAR_RESIZE_GRAB_RADIUS;
         });
 
-        // Load persisted state
-        let persisted: PersistedState = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, APP_KEY))
-            .unwrap_or_default();
-
         let dark_mode = persisted
             .dark_mode
             .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
         let full_width_content = persisted.full_width_content.unwrap_or(false);
+        let smooth_text_rendering = persisted.smooth_text_rendering.unwrap_or(false);
         let show_explorer = persisted.show_explorer.unwrap_or(true);
         let explorer_width =
             restored_sidebar_width(persisted.explorer_width, EXPLORER_DEFAULT_WIDTH);
@@ -1943,6 +1976,15 @@ impl MarkdownApp {
             zoom_level,
             show_outline,
             full_width_content,
+            // Already applied above via setup_fonts(); last_applied starts in
+            // sync so update() doesn't redundantly reload fonts on frame 1.
+            last_applied_font_family: selected_font_family.clone(),
+            selected_font_family,
+            available_font_families,
+            available_font_families_lower,
+            show_font_dialog: false,
+            font_filter: String::new(),
+            smooth_text_rendering,
             watch_enabled: watch,
             error_message: startup_error,
             is_dragging: false,
@@ -3835,6 +3877,102 @@ impl MarkdownApp {
         action
     }
 
+    fn render_font_settings(&mut self, ctx: &egui::Context) {
+        if !self.show_font_dialog {
+            return;
+        }
+
+        let mut open = true;
+        // Set inside the window closure, applied after `.show()` returns —
+        // keeps the closure from needing a second mutable borrow of `self`
+        // beyond the local `open` flag used by `.open(&mut open)`.
+        let mut new_selection: Option<Option<String>> = None;
+
+        egui::Window::new("Document Font")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    let filter_edit = ui.text_edit_singleline(&mut self.font_filter);
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Font Dialog: Search",
+                        "textbox",
+                        &filter_edit,
+                        None,
+                    );
+                    #[cfg(not(feature = "mcp"))]
+                    let _ = filter_edit;
+                });
+                ui.separator();
+
+                // Only the empty-filter (common) case avoids allocating: it
+                // reuses `available_font_families` directly. A non-empty
+                // filter needs one Vec<usize> of matching indices, built from
+                // the precomputed lowercase names (no per-name allocation).
+                let filter = self.font_filter.to_ascii_lowercase();
+                let filtered_indices: Option<Vec<usize>> = if filter.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.available_font_families_lower
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, lower)| lower.contains(&filter))
+                            .map(|(i, _)| i)
+                            .collect(),
+                    )
+                };
+                let match_count = filtered_indices
+                    .as_ref()
+                    .map_or(self.available_font_families.len(), Vec::len);
+
+                let row_height = ui.spacing().interact_size.y;
+                egui::ScrollArea::vertical().max_height(360.0).show_rows(
+                    ui,
+                    row_height,
+                    match_count + 1, // + 1 for the pinned "System Default" row
+                    |ui, rows| {
+                        for row in rows {
+                            if row == 0 {
+                                let default_selected = self.selected_font_family.is_none();
+                                let default_btn =
+                                    ui.selectable_label(default_selected, "System Default");
+                                #[cfg(feature = "mcp")]
+                                self.mcp_bridge.register_widget(
+                                    "Font Dialog: System Default",
+                                    "button",
+                                    &default_btn,
+                                    Some(if default_selected { "selected" } else { "" }),
+                                );
+                                if default_btn.clicked() {
+                                    new_selection = Some(None);
+                                }
+                                continue;
+                            }
+                            let font_index = filtered_indices
+                                .as_ref()
+                                .map_or(row - 1, |indices| indices[row - 1]);
+                            let name = &self.available_font_families[font_index];
+                            let is_selected =
+                                self.selected_font_family.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(is_selected, name).clicked() {
+                                new_selection = Some(Some(name.clone()));
+                            }
+                        }
+                    },
+                );
+            });
+
+        self.show_font_dialog = open;
+        if let Some(choice) = new_selection {
+            self.selected_font_family = choice;
+        }
+    }
+
     fn render_lightbox(&mut self, ctx: &egui::Context) {
         let Some(lightbox) = &mut self.lightbox else {
             return;
@@ -4095,6 +4233,8 @@ impl eframe::App for MarkdownApp {
             zoom_level: Some(self.zoom_level),
             show_outline: Some(self.show_outline),
             full_width_content: Some(self.full_width_content),
+            selected_font_family: self.selected_font_family.clone(),
+            smooth_text_rendering: Some(self.smooth_text_rendering),
             open_tabs: Some(self.get_open_tab_paths()),
             active_tab: Some(self.active_tab),
             show_explorer: Some(self.show_explorer),
@@ -4173,7 +4313,25 @@ impl eframe::App for MarkdownApp {
             ctx.set_visuals(visuals);
         }
 
+        // Reload fonts only when the selected family actually changes —
+        // rescanning the system font collection on every frame would be
+        // expensive and is unnecessary (see docs/EGUI_WORKFLOW.md).
+        if self.last_applied_font_family != self.selected_font_family {
+            self.last_applied_font_family = self.selected_font_family.clone();
+            setup_fonts(ctx, self.selected_font_family.as_deref());
+        }
+
         ctx.set_zoom_factor(self.zoom_level);
+
+        // Disabling pixel-snapping lets glyphs render at their exact
+        // sub-pixel position instead of each being individually rounded to
+        // the physical pixel grid — the rounding is what makes text look
+        // unevenly spaced/jagged at the fractional effective pixel ratios
+        // this app's zoom levels commonly produce. Trivial cost (one write
+        // into egui's own memory), so no last-applied change-gate needed.
+        ctx.tessellation_options_mut(|opts| {
+            opts.round_text_to_pixels = !self.smooth_text_rendering;
+        });
 
         // Update window title only when dirty
         if self.title_dirty {
@@ -4634,6 +4792,43 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    let font_label = format!(
+                        "Font: {}…",
+                        self.selected_font_family
+                            .as_deref()
+                            .unwrap_or("System Default")
+                    );
+                    let font_btn = ui.add(egui::Button::new(font_label));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Font",
+                        "button",
+                        &font_btn,
+                        self.selected_font_family.as_deref(),
+                    );
+                    if font_btn.clicked() {
+                        self.show_font_dialog = true;
+                        ui.close();
+                    }
+
+                    let smooth_text_text = if self.smooth_text_rendering {
+                        "✓ Smooth Text Rendering"
+                    } else {
+                        "Smooth Text Rendering"
+                    };
+                    let smooth_text_btn = ui.add(egui::Button::new(smooth_text_text));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Smooth Text Rendering",
+                        "button",
+                        &smooth_text_btn,
+                        Some(if self.smooth_text_rendering { "on" } else { "off" }),
+                    );
+                    if smooth_text_btn.clicked() {
+                        self.smooth_text_rendering = !self.smooth_text_rendering;
+                        ui.close();
+                    }
+
                     ui.separator();
 
                     let zoom_in_btn = ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"));
@@ -4879,6 +5074,9 @@ impl eframe::App for MarkdownApp {
 
         // Lightbox overlay for enlarged diagrams or images
         self.render_lightbox(ctx);
+
+        // Document font picker window
+        self.render_font_settings(ctx);
 
         // Drag and drop overlay
         if self.is_dragging {

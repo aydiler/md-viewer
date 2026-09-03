@@ -219,30 +219,67 @@ fn install_regular_fonts(
     source_cache: &mut SourceCache,
     definitions: &mut FontDefinitions,
     locale: Option<&str>,
+    preferred_family: Option<&str>,
 ) -> Vec<InstalledFont> {
     let mut installed = Vec::new();
     let mut loaded_faces = HashSet::new();
 
-    let families: Vec<_> = collection
-        .generic_families(GenericFamily::SansSerif)
-        .collect();
-    if let Some(selected) = select_from_families(
-        collection,
-        source_cache,
-        &families,
-        FontWeight::NORMAL,
-        "Aa",
-        false,
-    ) {
-        install_regular_font(
-            definitions,
-            &mut installed,
-            &mut loaded_faces,
-            "SystemSans",
-            selected,
+    if let Some(name) = preferred_family {
+        match collection.family_id(name) {
+            Some(family_id) => {
+                if let Some(selected) = select_from_families(
+                    collection,
+                    source_cache,
+                    &[family_id],
+                    FontWeight::NORMAL,
+                    "Aa",
+                    false,
+                ) {
+                    install_regular_font(
+                        definitions,
+                        &mut installed,
+                        &mut loaded_faces,
+                        "SystemSans",
+                        selected,
+                        "Aa",
+                        true,
+                    );
+                } else {
+                    log::warn!(
+                        "Preferred font '{name}' has no usable regular face; falling back to system default."
+                    );
+                }
+            }
+            None => {
+                log::warn!("Preferred font '{name}' not found; falling back to system default.");
+            }
+        }
+    }
+
+    // Auto-detect the system sans-serif only if no preferred family was
+    // requested, or the preferred family couldn't be installed above.
+    if installed.is_empty() {
+        let families: Vec<_> = collection
+            .generic_families(GenericFamily::SansSerif)
+            .collect();
+        if let Some(selected) = select_from_families(
+            collection,
+            source_cache,
+            &families,
+            FontWeight::NORMAL,
             "Aa",
-            true,
-        );
+            false,
+        ) {
+            install_regular_font(
+                definitions,
+                &mut installed,
+                &mut loaded_faces,
+                "SystemSans",
+                selected,
+                "Aa",
+                true,
+            );
+        }
     }
 
     for spec in SCRIPT_FALLBACKS {
@@ -414,10 +451,20 @@ fn install_strong_font_family(
 ///
 /// Fontique delegates to fontconfig on Linux/FreeBSD, DirectWrite on Windows,
 /// CoreText on Apple platforms, and the system configuration on Android.
-pub(crate) fn setup_fonts(ctx: &egui::Context) {
+///
+/// `preferred_family` optionally names a specific installed family (matched
+/// case-insensitively) to use as the primary proportional font instead of the
+/// auto-detected system sans-serif; an unset or unresolvable preference falls
+/// back to today's auto-detect behavior. Returns the sorted, deduplicated
+/// list of installed family names so callers can build a font picker without
+/// scanning the font collection a second time.
+pub(crate) fn setup_fonts(ctx: &egui::Context, preferred_family: Option<&str>) -> Vec<String> {
     let started = std::time::Instant::now();
     let mut collection = Collection::new(CollectionOptions::default());
-    let family_count = collection.family_names().count();
+    let mut family_names: Vec<String> = collection.family_names().map(str::to_owned).collect();
+    family_names.sort_by_key(|name| name.to_lowercase());
+    family_names.dedup();
+    let family_count = family_names.len();
     let mut source_cache = SourceCache::default();
     let locale = sys_locale::get_locale();
     let mut definitions = FontDefinitions::default();
@@ -431,6 +478,7 @@ pub(crate) fn setup_fonts(ctx: &egui::Context) {
         &mut source_cache,
         &mut definitions,
         locale.as_deref(),
+        preferred_family,
     );
     let bold_count = install_strong_font_family(
         &mut collection,
@@ -451,6 +499,7 @@ pub(crate) fn setup_fonts(ctx: &egui::Context) {
         );
     }
     ctx.set_fonts(definitions);
+    family_names
 }
 
 #[cfg(test)]
@@ -506,10 +555,67 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires installed system fonts"]
+    fn unknown_preferred_family_falls_back_to_auto_detect() {
+        let mut collection = Collection::new(CollectionOptions::default());
+        let mut source_cache = SourceCache::default();
+        let mut definitions = FontDefinitions::default();
+        let installed = install_regular_fonts(
+            &mut collection,
+            &mut source_cache,
+            &mut definitions,
+            None,
+            Some("Definitely Not An Installed Font Name 12345"),
+        );
+        assert!(
+            installed.iter().any(|f| f.primary),
+            "auto-detect fallback should still install a primary font"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed system fonts"]
+    fn known_preferred_family_becomes_primary() {
+        let mut collection = Collection::new(CollectionOptions::default());
+        let mut source_cache = SourceCache::default();
+
+        // Discover whatever the system's default sans-serif family is, then
+        // request it explicitly by name and confirm it round-trips as
+        // primary. Avoids hardcoding a font name that may not exist on every
+        // machine/CI image.
+        let mut baseline_definitions = FontDefinitions::default();
+        let baseline = install_regular_fonts(
+            &mut collection,
+            &mut source_cache,
+            &mut baseline_definitions,
+            None,
+            None,
+        );
+        let Some(baseline_primary) = baseline.iter().find(|f| f.primary) else {
+            return; // no system fonts available in this environment
+        };
+        let family_name = baseline_primary.selected.family.clone();
+
+        let mut definitions = FontDefinitions::default();
+        let installed = install_regular_fonts(
+            &mut collection,
+            &mut source_cache,
+            &mut definitions,
+            None,
+            Some(&family_name),
+        );
+        let primary = installed
+            .iter()
+            .find(|f| f.primary)
+            .expect("primary font installed");
+        assert_eq!(primary.selected.family, family_name);
+    }
+
+    #[test]
     #[ignore = "requires installed multilingual regular and bold fonts"]
     fn installed_fonts_cover_reported_scripts() {
         let context = egui::Context::default();
-        setup_fonts(&context);
+        setup_fonts(&context, None);
         context.begin_pass(Default::default());
         let regular = egui::FontId::proportional(16.0);
         let strong = egui::FontId::new(16.0, FontFamily::Name(STRONG_FONT_FAMILY.into()));
