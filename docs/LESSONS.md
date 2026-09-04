@@ -510,6 +510,30 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 ```
 **Files:** `.github/workflows/release.yml`
 
+### A fail-fast check belongs in its own job, not in a gate everything needs
+**Context:** crates.io publishing had been silently broken since 2026-07-23 — `md-viewer` stuck at 0.1.15 — because the token expired and `publish-crates` runs last, after the snap, both AUR packages and the GitHub Release have already published. The release *looked* delivered. #135 added a one-second `GET /api/v1/me` pre-flight so a dead token fails immediately instead of twenty minutes in.
+
+**The mistake:** the check went into `validate`, which every other job declares in `needs`. So an expired token stopped being a crates.io problem and became a **total** release outage — no snap, no AUR, no GitHub Release, no binaries. The fix for a silent partial failure created a loud complete one.
+
+It surfaced the same day: the token really was expired, so `v0.2.0` could not be tagged at all.
+
+**The rule:** placing a check where it fails fast and placing it where it fails *narrowly* are different decisions, and CI's `needs` graph couples them. Before adding a validation step, ask what depends on the job it lands in. A check for channel X belongs in its own job that only X's publish step needs:
+
+```yaml
+check-crates-token:
+  needs: —                                   # gates nothing by itself
+publish-crates:
+  needs: [validate, build, check-crates-token]
+publish-snap:
+  needs: [validate, build]                   # unaffected
+```
+
+The fast-fail benefit is fully preserved — it still fails in a second, and the run still goes red under an obvious name — while one dead credential costs one channel instead of four.
+
+**Corollary for `validate`:** it should only hold checks whose failure genuinely invalidates *every* channel. Today that is the tag/`Cargo.toml`/snapcraft version comparison and the vendored-fork publishability check; both are true release-wide contracts.
+
+**Files:** `.github/workflows/release.yml`, PRs #135 and #151
+
 ### Docker bind-mount `chown` breaks host runner ownership
 **Context:** Regenerating `.SRCINFO` inside a containerized `archlinux/archlinux:base-devel` because `makepkg` refuses to run as root
 **Problem:** After `docker run --rm -v "$PWD/aur-repo:/pkg" ... bash -c 'useradd -m builder && chown -R builder /pkg && sudo -u builder makepkg --printsrcinfo'`, the next host step failed with `error: could not lock config file .git/config: Permission denied`. The container's `chown -R builder` propagates through the bind mount, so the host runner can no longer write inside `aur-repo`.
