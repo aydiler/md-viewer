@@ -1185,3 +1185,54 @@ Do not change renderer soft-break behavior to satisfy a fixture whose syntax exp
 **Never accept a PASS without a control run.** #114 changes table layout, so a clean run on the new build could equally mean the blank moved somewhere the walk no longer visits. The check that settles it is re-running the identical guard against the *previous* build in the same session: it still reported the blank, so the PASS was a real PASS and not a broken probe. Confirming in both width modes (Full Width on and off, two different table geometries) closed the remaining gap. A green test whose detector has quietly stopped detecting is indistinguishable from a fix.
 
 **Files:** `scripts/scroll-regression.sh`, `docs/devlog/058-scroll-regression-guard.md`
+
+### A FAIL blames the branch only if the control is *current main*, not the PR's base
+**Context:** Issue #121's guard reported a blank document pane on PR #115 but not on `main`, so the merge was held and the finding was reported to the contributor as theirs.
+**The hold was wrong.** The control ran against `main` @ 2cca28a — the commit the PR was *branched from*. #131, which fixes table height reservation, landed after that. So the comparison never contained the fix, and a defect belonging to `main` was attributed to the branch.
+
+**What settles it** is rebasing the branch onto current `main` and running the identical guard, same session, same display, same fixture:
+
+| build | f011 `content_px` | verdict |
+|---|---|---|
+| PR on its own base (no #131) | 197 | FAIL — blank |
+| PR rebased onto `main` (with #131) | 1954 | PASS |
+
+The neighbouring frames barely move (f010 1814 → 1811, f012 2176 → 2173, f013 1927 → 1924), which is what rules out the alternative reading — that the blank merely moved somewhere the walk no longer visits.
+
+**The general rule, sharpening the "never accept a PASS without a control run" entry above:** a control run answers *"is the detector still working?"*. It does not answer *"whose bug is this?"*. For attribution the comparison must be `branch-rebased-onto-main` versus `main`, both current. Comparing a branch against its own base measures the branch plus everything main fixed since — and on a fast-moving repository that difference is usually larger than the branch.
+
+**Cheap check before any deep diagnosis:** `git merge-base --is-ancestor <suspected-fix> <branch>`. If the fix is not in the branch, rebase and re-run before writing a single line of analysis.
+
+**Files:** `scripts/scroll-regression.sh`, PR #115
+
+### A textually clean rebase can still be a broken build
+**Context:** Rebasing PR #116 (table cell wrapping) onto `main` after #113, #114, #129 and #131 had all touched the same renderer.
+**Symptom:** git reported exactly one conflict, in a test file. After resolving it the build failed with two `E0061` errors.
+**Cause:** both branches added a *parameter* to the same function, at different lines. git sees no textual overlap, so it merges silently:
+- `table_cell_height` gained `options: &CommonMarkOptions` on `main` (#129, image heights); the branch still called it with five arguments.
+- `collect_painted_text` gained a `clip_rect` parameter on the branch; `main`'s helper from #114 still called the two-argument form.
+
+Neither is visible in `git status`, in the conflict markers, or in GitHub's `mergeable` field. A PR marked CLEAN can be un-buildable.
+
+**Rule:** always `cargo build` (or at minimum `cargo check`) after a rebase, before reporting the rebase as done — and never treat GitHub's mergeable state as evidence that a branch compiles.
+
+**Second trap, in the conflict resolution itself:** when both sides of a hunk end mid-block, the closing brace lives in the *shared tail below* the `>>>>>>>` marker. "Keep both sides" then leaves the first block unclosed — `error: this file contains an unclosed delimiter`. It bit twice in one session:
+- two test functions in `wrapping.rs` (#116);
+- two dialog functions and two menu-button `if` blocks in `src/main.rs` (#119), where the shared prologue (`if !flag { return; } let mut open = true;`) belongs to *each* function and must be duplicated, not shared.
+
+Check `count('{') - count('}')` on the resolved file before compiling; a non-zero balance names the mistake immediately.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `src/main.rs`, PRs #116 and #119
+
+### A rebase that drops tests looks exactly like a rebase that adds them
+**Context:** Verifying rebases of #115, #116 and #119.
+**Problem:** `cargo test` prints one `test result:` line per test binary. Reading "76 passed" from one run and "69 passed" from another compares different binaries and invents a regression — I did exactly that and briefly believed #116 had deleted seven tests.
+**Fix:** compare inventories, not counts, with the identical command on both trees:
+```bash
+cargo test --locked -- --list | grep ': test' | sed 's/: test//' | sort > /tmp/a.txt
+comm -23 /tmp/main.txt /tmp/a.txt   # present on main, missing on the branch
+comm -13 /tmp/main.txt /tmp/a.txt   # added by the branch
+```
+An empty first list is the assertion worth making. It also explains rises in the *ignored* count without alarm — #119's two new `system_fonts` tests are skipped for want of installed fonts, exactly like the existing CJK one.
+
+**Files:** N/A (verification discipline)
