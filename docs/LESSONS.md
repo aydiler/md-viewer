@@ -758,6 +758,27 @@ ui.vertical(|ui| {
 **Mitigation:** Filter empty rows before rendering: `rows.into_iter().filter(|r| !r.is_empty()).collect::<Vec<_>>()`. Without this, TableBuilder's `body.row()` runs with no cells and may render a 0-cell phantom row (no visible effect, but wasted work).
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`table`)
 
+### A structural parser event that reaches the painter becomes invisible content
+**Context:** Issue #116 — table cells wrapped a line early and clipped their last line near a wrap boundary, and the PR's CI failed a multi-link regression that looked unrelated.
+
+**Root cause, one missing `continue`.** `parse_row` (`egui_commonmark_backend/src/pulldown.rs`) closed a cell on `Event::End(TagEnd::TableCell)` by pushing `column` and resetting it — then fell through the rest of the loop body, which appended the same event to the *new* column. Every column after the first therefore began with an `End(TableCell)` marker it did not own.
+
+The renderer's TableCell-end handler paints that event as a two-space label. Result: roughly 6 px of first-line indent on every column but the first, present in the paint pass and **absent from the height measurement**, which walks the same events but ignores structural ones. Near a wrap boundary those 6 px push one word onto a new line, the row is one line taller than reserved, and the last line is clipped.
+
+**Why it is worth a lesson rather than a footnote:** the symptom is a *layout* bug, the measurement and paint passes disagree, and the cause is in neither of them — it is in the parser handing the painter something that is not content. Two independent rewrites of the row-height logic (#98, #116's own galley measurement) could not have fixed it, because both measure what they are given.
+
+**The diagnostic:** when paint and measurement disagree about a cell, dump the event stream the painter actually receives and check for `Event::End(..)` markers inside it. `parse_table`'s cells should contain only content events. #116 added exactly that as a test:
+
+```rust
+for cell in table.header.iter().chain(table.rows.iter().flatten()) {
+    assert!(!cell.iter().any(|(event, _)| matches!(event, Event::End(TagEnd::TableCell))));
+}
+```
+
+**Related trap already recorded above:** `parse_table trailing empty row from pulldown_cmark`. Both come from the same place — the boundary between "events the parser emits" and "events a cell contains" is not enforced by a type, so every consumer has to get it right by hand.
+
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`parse_row`), PR #116
+
 ### Inline-code wrap segmentation: blind char-count cut, not break-friendly chars
 **Context:** Issue #5 — long inline-code tokens (file paths) overflowed the content column, clipping leading characters and overlapping adjacent text. Fixed by splitting long tokens into chunks separated by `ui.end_row()` in `Event::Code` handling.
 **First attempt that regressed:** Splitting at break-friendly characters (`/ \ - _ . :`) past 56 chars to keep paths readable. At narrow window widths the variable-length segments (60-120 chars) still exceeded the column width, and egui's intra-widget wrap re-introduced the original clipping bug.
