@@ -34,42 +34,6 @@ jobs:
             exit 1
           fi
 
-      - name: crates.io token is valid
-        # The publish job runs ~20 minutes in, after the whole build matrix and
-        # the snap. When the token is dead it fails there, at the very end, while
-        # every other channel has already published — so the release looks
-        # finished and the crates.io gap goes unnoticed. That is exactly what
-        # happened to v0.1.16 and v0.1.17: both failed here with
-        # `403 Forbidden: authentication failed`, and crates.io sat four versions
-        # behind for six weeks before anyone looked.
-        #
-        # `GET /api/v1/me` is read-only and costs a second, so the same failure
-        # now lands before anything is built or published anywhere.
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
-            echo "::notice::CARGO_REGISTRY_TOKEN is unset — crates.io publish will be skipped."
-            exit 0
-          fi
-          CODE=$(curl -sS -o /tmp/me.json -w '%{http_code}' \
-            -H "Authorization: ${CARGO_REGISTRY_TOKEN}" \
-            -H "User-Agent: md-viewer-release (https://github.com/aydiler/md-viewer)" \
-            https://crates.io/api/v1/me || echo 000)
-          case "$CODE" in
-            200)
-              echo "crates.io token accepted for: $(python3 -c 'import json;print(json.load(open("/tmp/me.json"))["user"]["login"])')"
-              ;;
-            401|403)
-              echo "::error::crates.io rejected CARGO_REGISTRY_TOKEN (HTTP $CODE). Mint a new token at https://crates.io/settings/tokens and update the repository secret, then re-tag."
-              exit 1
-              ;;
-            *)
-              echo "::error::Could not reach crates.io to validate the token (HTTP $CODE). Re-run the job."
-              exit 1
-              ;;
-          esac
-
       - name: Vendored fork is publishable to crates.io
         # Fails the release if the vendored egui_commonmark fork's source differs
         # from what is already published at its pinned version. crates.io is
@@ -77,6 +41,59 @@ jobs:
         # would build against stale fork code (source builds — snap/AUR/binaries
         # — use the local fork via [patch.crates-io] and are unaffected).
         run: bash scripts/check-fork-publishable.sh
+
+  check-crates-token:
+    # Deliberately its own job, gating `publish-crates` only.
+    #
+    # This check first lived in `validate`, which every other job needs — so a
+    # dead token blocked the snap, both AUR packages, the GitHub Release and
+    # the binaries as well. Losing four channels to one expired credential is
+    # worse than the silent crates.io gap the check exists to prevent.
+    #
+    # Here it still fails in about a second rather than twenty minutes in, and
+    # the run still goes red under an obvious name, but the other channels
+    # publish.
+    name: crates.io token is valid
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+        - name: crates.io token is valid
+          # The publish job runs ~20 minutes in, after the whole build matrix and
+          # the snap. When the token is dead it fails there, at the very end, while
+          # every other channel has already published — so the release looks
+          # finished and the crates.io gap goes unnoticed. That is exactly what
+          # happened to v0.1.16 and v0.1.17: both failed here with
+          # `403 Forbidden: authentication failed`, and crates.io sat four versions
+          # behind for six weeks before anyone looked.
+          #
+          # `GET /api/v1/me` is read-only and costs a second, so the same failure
+          # now lands before anything is built or published anywhere.
+          env:
+            CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          run: |
+            if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+              echo "::notice::CARGO_REGISTRY_TOKEN is unset — crates.io publish will be skipped."
+              exit 0
+            fi
+            CODE=$(curl -sS -o /tmp/me.json -w '%{http_code}' \
+              -H "Authorization: ${CARGO_REGISTRY_TOKEN}" \
+              -H "User-Agent: md-viewer-release (https://github.com/aydiler/md-viewer)" \
+              https://crates.io/api/v1/me || echo 000)
+            case "$CODE" in
+              200)
+                echo "crates.io token accepted for: $(python3 -c 'import json;print(json.load(open("/tmp/me.json"))["user"]["login"])')"
+                ;;
+              401|403)
+                echo "::error::crates.io rejected CARGO_REGISTRY_TOKEN (HTTP $CODE). Mint a new token at https://crates.io/settings/tokens and update the repository secret, then re-tag."
+                exit 1
+                ;;
+              *)
+                echo "::error::Could not reach crates.io to validate the token (HTTP $CODE). Re-run the job."
+                exit 1
+                ;;
+            esac
 
   build:
     name: Build (${{ matrix.asset_name }})
@@ -174,7 +191,7 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [validate, build]
+    needs: [validate, build, check-crates-token]
     timeout-minutes: 20
     permissions:
       contents: read
