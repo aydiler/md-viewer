@@ -4,7 +4,7 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [0.2.0] - 2026-09-04
 
-The largest release so far: 51 merged pull requests, most of them contributed by [@RichardCao](https://github.com/RichardCao) and [@Pat9496](https://github.com/Pat9496). Viewport-clipped rendering is back on for long documents, tables were rebuilt around content-driven column widths, and font fallback now asks the platform instead of guessing family names.
+The largest release so far: 52 merged pull requests, most of them contributed by [@RichardCao](https://github.com/RichardCao) and [@Pat9496](https://github.com/Pat9496). Viewport-clipped rendering is back on for long documents, tables were rebuilt around content-driven column widths, and font fallback now asks the platform instead of guessing family names.
 
 ### Features
 
@@ -32,6 +32,8 @@ The largest release so far: 51 merged pull requests, most of them contributed by
 - **CJK text inside math renders real glyphs (PR #77, contributed by [@RichardCao](https://github.com/RichardCao)).** Fontconfig is asked for a sans-serif face covering Simplified Chinese, added to the Typst font collection as a fallback only, without hardcoding distribution-specific names.
 
 ### Robustness
+
+- **A link resolves the same way with and without Ctrl (PR #147).** Plain click and Ctrl+click went through two different resolvers: the Ctrl path percent-decoded and understood `file://` after #78, the plain path still did a raw join. So `docs%20with%20spaces/guide.md` opened in a new tab on Ctrl+click and, on a plain click, looked for a directory literally named `docs%20with%20spaces`, found nothing, and did nothing — no navigation, no error, no feedback. Both paths now share one resolver.
 
 - **A failed read no longer destroys the open document (PR #86, contributed by [@RichardCao](https://github.com/RichardCao)).** Read failures were swallowed and an empty document opened in place of the real one, taking the navigation history with it. Content is applied only after a successful read, history is mutated only after navigation succeeds, and startup, open, reload and navigation errors all surface in the existing error bar.
 - **Watcher recovery is bounded for real (PR #85, contributed by [@RichardCao](https://github.com/RichardCao)).** The retry counter reset whenever watcher *construction* succeeded, so repeated disconnects before the first event restarted forever. User-requested starts are now separated from automatic recovery, the limit is enforced, and a bridge thread that fails to start is reported instead of panicking.
