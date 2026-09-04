@@ -255,18 +255,26 @@ if raw_scroll.abs() > 0.0 {
 ### Resize handle and scrollbar overlap causes jitter
 **Context:** Resizing outline panel caused mouse jitter when near content scrollbar
 **Problem:** The SidePanel resize handle sensing area overlaps with the adjacent ScrollArea scrollbar, causing rapid switching between resize and scroll modes.
-**Fix:** Combine reduced grab radius with minimal margin:
-```rust
-// 1. Reduce resize grab radius
-style.interaction.resize_grab_radius_side = 2.0; // Default ~5.0
+**Original fix (no longer what the code does):** shrink the grab radius to 2.0 and add a 3 px right margin. Reduced radius alone was not enough; the margin provided physical separation without a visible gap.
 
-// 2. Add minimal right margin to content area (not visually noticeable)
-egui::Frame::none()
-    .inner_margin(egui::Margin { right: 3, ..Default::default() })
-    .show(ui, |ui| { /* content */ });
+**Superseded by #79 (`616989e`), which inverted the strategy.** Sidebars became freely resizable with full labels, and the geometry is now a *large* grab radius plus named gutters wider than it:
+
+```rust
+const SIDEBAR_RESIZE_GRAB_RADIUS: f32 = 8.0;   // was 2.0; egui's default is ~5.0
+const EXPLORER_RIGHT_RESIZE_GUTTER: i8 = 12;   // explorer's right edge
+const CONTENT_RIGHT_RESIZE_GUTTER: i8 = 10;    // document's right edge
 ```
-**Why both?** Reduced grab radius alone isn't enough. The 3px margin provides physical separation without creating a visible gap (8px was too much and created a black gap).
-**Files:** `src/main.rs`
+
+Current geometry at each boundary — both gutters exceed the grab radius:
+
+| boundary | adjacent margins | grab radius |
+|---|---|---|
+| explorer ↔ document | explorer right **12**, document left 8 | 8.0 |
+| document ↔ outline | document right **10**, outline left 8 | 8.0 |
+
+**Do not "restore" the 2.0 radius from the old entry.** It would make the divider hard to grab, which is what #79 widened it to fix. If the jitter returns (see #139), the lever is the gutter-to-radius ratio at the specific boundary, not the radius alone — and note the asymmetry: #139 reports the *left* boundary reproducing more readily even though it has the *wider* gutter, which a pure ratio model does not explain.
+
+**Files:** `src/main.rs` (the three constants above), issue #139
 
 ---
 
