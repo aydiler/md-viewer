@@ -1055,8 +1055,14 @@ impl Tab {
             return Ok(false);
         };
 
-        let path_part = link.split('#').next().unwrap_or(link);
-        let target_path = current_dir.join(path_part);
+        // Share one resolver with `resolve_link` (the ctrl+click path).
+        // These used to differ: #78 taught percent-decoding and `file://`
+        // handling to `resolve_local_link_path`, but this function still did a
+        // raw `join`, so a link with an encoded space opened in a new tab on
+        // ctrl+click and silently did nothing on a plain click.
+        let Some(target_path) = resolve_local_link_path(link, current_dir) else {
+            return Ok(false);
+        };
 
         let target_path = match target_path.canonicalize() {
             Ok(p) => p,
@@ -5447,6 +5453,92 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].byte_start, 7);
         assert_eq!(matches[0].byte_end, 11);
+    }
+
+    #[test]
+    fn shared_resolver_keeps_absolute_paths_and_literal_percent_names() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-edges-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let home = root.join("home.md");
+        let abs = root.join("absolute.md");
+        // `%` not followed by two hex digits is not an escape and must survive.
+        let literal = root.join("100%done.md");
+        fs::write(&home, "# Home").unwrap();
+        fs::write(&abs, "# Abs").unwrap();
+        fs::write(&literal, "# Literal").unwrap();
+
+        let mut tab = Tab::new(home.clone()).unwrap();
+
+        let abs_link = abs.to_string_lossy().to_string();
+        assert!(tab.navigate_to_link(&abs_link).unwrap(), "absolute path");
+        assert_eq!(tab.path, abs.canonicalize().unwrap());
+
+        assert!(
+            tab.navigate_to_link("100%done.md").unwrap(),
+            "literal percent"
+        );
+        assert_eq!(tab.path, literal.canonicalize().unwrap());
+
+        // an anchor-only destination is still not a path
+        assert!(!tab.navigate_to_link("#section").unwrap());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn plain_click_and_ctrl_click_resolve_the_same_link_identically() {
+        // #141: `resolve_link` (ctrl+click) and `navigate_to_link` (plain click)
+        // must resolve a destination identically. #78 taught percent-decoding
+        // and `file://` to the former only, so an encoded space opened in a new
+        // tab on ctrl+click and silently did nothing on a plain click.
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-baseline-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let spaced = root.join("docs with spaces");
+        fs::create_dir_all(&spaced).unwrap();
+        let home = root.join("home.md");
+        let guide = spaced.join("guide.md");
+        fs::write(&home, "# Home").unwrap();
+        fs::write(&guide, "# Guide").unwrap();
+
+        let mut tab = Tab::new(home.clone()).unwrap();
+        let encoded = "docs%20with%20spaces/guide.md";
+
+        // ctrl+click path: decodes, resolves
+        assert_eq!(
+            tab.resolve_link(encoded),
+            Some(guide.canonicalize().unwrap()),
+            "resolve_link should decode percent escapes"
+        );
+
+        // plain-click path must reach the same file
+        assert!(
+            tab.navigate_to_link(encoded).unwrap(),
+            "navigate_to_link must decode percent escapes too"
+        );
+        assert_eq!(tab.path, guide.canonicalize().unwrap());
+        assert!(tab.navigate_to_path(&home).unwrap());
+
+        // same divergence for file:// destinations
+        let uri = format!("file://{}", guide.canonicalize().unwrap().display());
+        assert_eq!(
+            tab.resolve_link(&uri),
+            Some(guide.canonicalize().unwrap()),
+            "resolve_link should accept file:// URIs"
+        );
+        assert!(
+            tab.navigate_to_link(&uri).unwrap(),
+            "navigate_to_link must accept file:// URIs too"
+        );
+        assert_eq!(tab.path, guide.canonicalize().unwrap());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
