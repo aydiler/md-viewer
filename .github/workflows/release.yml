@@ -34,6 +34,42 @@ jobs:
             exit 1
           fi
 
+      - name: crates.io token is valid
+        # The publish job runs ~20 minutes in, after the whole build matrix and
+        # the snap. When the token is dead it fails there, at the very end, while
+        # every other channel has already published — so the release looks
+        # finished and the crates.io gap goes unnoticed. That is exactly what
+        # happened to v0.1.16 and v0.1.17: both failed here with
+        # `403 Forbidden: authentication failed`, and crates.io sat four versions
+        # behind for six weeks before anyone looked.
+        #
+        # `GET /api/v1/me` is read-only and costs a second, so the same failure
+        # now lands before anything is built or published anywhere.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::notice::CARGO_REGISTRY_TOKEN is unset — crates.io publish will be skipped."
+            exit 0
+          fi
+          CODE=$(curl -sS -o /tmp/me.json -w '%{http_code}' \
+            -H "Authorization: ${CARGO_REGISTRY_TOKEN}" \
+            -H "User-Agent: md-viewer-release (https://github.com/aydiler/md-viewer)" \
+            https://crates.io/api/v1/me || echo 000)
+          case "$CODE" in
+            200)
+              echo "crates.io token accepted for: $(python3 -c 'import json;print(json.load(open("/tmp/me.json"))["user"]["login"])')"
+              ;;
+            401|403)
+              echo "::error::crates.io rejected CARGO_REGISTRY_TOKEN (HTTP $CODE). Mint a new token at https://crates.io/settings/tokens and update the repository secret, then re-tag."
+              exit 1
+              ;;
+            *)
+              echo "::error::Could not reach crates.io to validate the token (HTTP $CODE). Re-run the job."
+              exit 1
+              ;;
+          esac
+
       - name: Vendored fork is publishable to crates.io
         # Fails the release if the vendored egui_commonmark fork's source differs
         # from what is already published at its pinned version. crates.io is
