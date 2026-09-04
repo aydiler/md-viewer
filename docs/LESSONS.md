@@ -1186,6 +1186,28 @@ Do not change renderer soft-break behavior to satisfy a fixture whose syntax exp
 
 **Files:** `scripts/scroll-regression.sh`, `docs/devlog/058-scroll-regression-guard.md`
 
+### The screenshot guards are blind to one-frame artifacts, and burst capture does not fix it
+**Context:** Issue #140 reports an intermittent *one-frame* blank document pane, distinct from the table-boundary blank #131 fixed. Tried to make `scripts/scroll-regression.sh` reproduce it.
+
+**The fixture worked.** Unloaded images in table cells reserve `column_width.min(line_height * 8.0)`; a 12×12 px icon in a ~200 px column reserves ~192 px and paints ~12 px. Viewport slicing means images below the fold are never painted and so never loaded — they load as you scroll onto them, which is exactly a "content shrinks while the offset is deep" trigger. A 60-row icon table after twelve ordinary sections collapsed the document mid-walk: bottom reached at frame 51 instead of 103, painted pixels dropping 2770 → 1313 at the shrink.
+
+**No blank appeared, and that result is worthless.** The guard does three wheel clicks, sleeps 0.45 s, then takes **one** screenshot — about one sample out of ~27 frames at 60 fps. A single-frame artifact has roughly a 1-in-27 chance of being seen per step.
+
+**Burst capture does not rescue it.** Six `import -window` captures back-to-back inside the settle window, 366 frames instead of 61, still zero blanks — and then the control that mattered:
+
+```
+steps where all 6 burst frames were identical: 61
+steps where the burst captured >1 distinct state:  0
+```
+
+Every burst photographed the same settled state six times. `import -window` takes long enough that the app finishes settling before the first capture completes, and md-viewer only repaints on demand (`request_repaint_after`, plus the 16 ms virtual-display sleep), so afterwards there are no new frames to catch at all.
+
+**The general rule:** X11 screenshot capture samples *settled states*, not frames. `scripts/scroll-regression.sh` and `scripts/visual-regression.sh` can only detect an artifact that persists until the app stops repainting. They are strong evidence about steady-state rendering — they found #125, the #114 residue, and a #115 false alarm — and **no evidence at all** about transient one-frame behavior. A PASS from either script must never be quoted against a transient-artifact report.
+
+**What would work instead:** in-app instrumentation that observes every frame regardless of when a screenshot lands — a debug counter of painted shapes per frame, or a renderer-side assertion that the selected slice intersects the viewport. Both fire on the bad frame itself.
+
+**Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh`, issue #140
+
 ### A FAIL blames the branch only if the control is *current main*, not the PR's base
 **Context:** Issue #121's guard reported a blank document pane on PR #115 but not on `main`, so the merge was held and the finding was reported to the contributor as theirs.
 **The hold was wrong.** The control ran against `main` @ 2cca28a — the commit the PR was *branched from*. #131, which fixes table height reservation, landed after that. So the comparison never contained the fix, and a defect belonging to `main` was attributed to the branch.
