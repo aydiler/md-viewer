@@ -28,7 +28,9 @@ set -uo pipefail
 BIN="${1:-target/debug/md-viewer}"
 DOC="${2:-}"
 TAG="visreg"
-DISPLAY_NUM=99
+# Override when :99 is occupied or wedged: MDV_DISPLAY=98 scripts/visual-regression.sh
+# (scroll-regression.sh honours the same variable.)
+DISPLAY_NUM="${MDV_DISPLAY:-99}"
 
 if [ ! -x "$BIN" ]; then
     echo "error: $BIN is not an executable — build it first (cargo build)" >&2
