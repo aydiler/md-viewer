@@ -1213,6 +1213,26 @@ Do not change renderer soft-break behavior to satisfy a fixture whose syntax exp
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`ContentGeometry`), `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `crates/egui_commonmark/egui_commonmark/tests/slice_perf.rs`, `scripts/visual-regression.sh`, `docs/devlog/055-viewport-slice-layout.md`
 
+### An option-gated render path makes a test measure something else entirely
+**Context:** Regression test for frontmatter values being clipped instead of wrapped (defect in #128, found while taking 0.2.0 README screenshots).
+**Problem:** The test passed identically before and after the fix — worthless as a guard. `CommonMarkOptions::render_frontmatter` defaults to `false` and gates **both** parsing and rendering: `latex_delimiters::parse_events` only enables pulldown-cmark's metadata-block option when it is set. The shared `render_geometry` test helper never enabled it, so a `---` block parsed as an ordinary paragraph. Ordinary paragraphs wrap on their own, so the assertions were satisfied by content that never touched `render_frontmatter_table`.
+**Fix:** a `render_geometry_frontmatter` helper that turns the option on, plus an assertion *inside* the test that the table was actually rendered:
+```rust
+assert!(
+    painted.iter().any(|t| t.text.contains("abstract")),
+    "frontmatter table was not rendered; the test would prove nothing: {painted:#?}"
+);
+```
+**Control matrix** (the step that caught it — the test had to be observed red):
+
+| build | result |
+|---|---|
+| `ui.label(value)` (clipping) | FAIL — `value should wrap across rows, got 1` |
+| `Label::new(value).wrap()` | PASS |
+
+**General lesson:** when a feature sits behind a default-off option, a test that does not enable it does not fail — it silently exercises the fallback path and reports success. Shared render helpers are where this hides, because the option is set by the *application*, not the helper. Two defenses: assert a marker that only the intended path can produce, and never trust a test that has not been observed red. Same family as the `#157` fixtures that all landed in the excluded dense regime, and the `#115` control run against a stale `main`: in each case the setup sat outside the region it was meant to probe, and the result still looked like an answer.
+**Files:** `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `docs/devlog/063-frontmatter-wrap.md`
+
 ### A scroll-regression fixture only proves anything if the sampling is fine enough to land in the failure window
 **Context:** Issue #121 — scrolling the wrench `asset_reference.md` intermittently painted an empty document pane. Writing `scripts/scroll-regression.sh` to guard the fix.
 **What the guard has to catch:** a viewport slice that anchors outside the viewport and paints nothing, so scrolling appears to skip whole sections. `scripts/visual-regression.sh` does not catch it — on the broken build (main @ 7b8f53b) it reports PASS while four of sixty-one captured frames are blank.
