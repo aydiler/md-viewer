@@ -24,4 +24,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked
+      # --all-targets so test code compiles here too. Without it, a test
+      # behind `#[cfg(target_os = "windows")]` is not merely unexecuted on
+      # Windows — it is never compiled anywhere, which is how
+      # `windows_drive_prefixes_are_not_treated_as_uri_schemes` (#154) ended up
+      # guarding the one branch Linux cannot exercise while itself being
+      # unchecked. Still `check`, not `test`: this job is a portability guard,
+      # and running the suite on three platforms is a separate decision.
+      - run: cargo check --locked --all-targets
