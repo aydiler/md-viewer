@@ -154,7 +154,16 @@ jobs:
 
       - name: Generate changelog
         if: runner.os == 'Linux'
-        run: git-cliff --latest --strip header > RELEASE_NOTES.md
+        # From CHANGELOG.md, not `git-cliff --latest`. git-cliff parses
+        # conventional commits and this history does not conform: v0.1.17's
+        # release page carried eleven lines while its CHANGELOG entry was a page
+        # of prose. The Release page is the only changelog most users ever see —
+        # snap and AUR users never open the repository. Falls back to git-cliff
+        # when the tagged version has no section.
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          bash scripts/release-notes.sh "$VERSION" > RELEASE_NOTES.md
+          echo "release notes: $(wc -l < RELEASE_NOTES.md) lines"
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
