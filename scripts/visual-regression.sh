@@ -192,7 +192,16 @@ for path, (content, edge) in zip(shots, results):
     if content < 500:
         failures.append(f"{path}: only {content} content pixels — frame is effectively blank")
     # Content must stay in the same column at every scroll position.
-    if edge is not None and baseline_edge is not None and abs(edge - baseline_edge) > 2:
+    # Tolerance, deliberately loose. The defect this guard exists for moved
+    # content by 38 px (docs/LESSONS.md, "Viewport slices must reproduce the
+    # bootstrap's layout"). A 2 px bound was far tighter than that needs and
+    # flagged legitimate layout instead: #164 gives Markdown table cells 4 px
+    # of inset per side, so any frame showing a table reports a 4-6 px "shift"
+    # against a baseline frame that shows flush-left prose. The metric compares
+    # the leftmost pixel of *whatever content a frame happens to show*, not the
+    # same content across frames, so a bound near the noise floor is a false
+    # alarm generator. 12 px still catches the 38 px class by a factor of three.
+    if edge is not None and baseline_edge is not None and abs(edge - baseline_edge) > 12:
         failures.append(
             f"{path}: content starts at x={edge}, baseline is x={baseline_edge} "
             f"({abs(edge - baseline_edge)}px shift)")
