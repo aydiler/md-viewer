@@ -73,27 +73,51 @@ export DISPLAY=":$DISPLAY_NUM" WINIT_UNIX_BACKEND=x11 WAYLAND_DISPLAY=
 # at the top of the document.
 export XDG_DATA_HOME="/tmp/mdv-$TAG-data" XDG_CONFIG_HOME="/tmp/mdv-$TAG-config"
 
+APP_PID=""
+XVFB_PID=""
+# Safe to call mid-run: touches only the application.
+kill_app() {
+    # Kill by recorded PID, matching scroll-regression.sh. Name matching is not
+    # reliable: Linux truncates a process's comm to 15 characters, so a binary
+    # copied to a longer name is missed, and `pkill -f` would match this
+    # script's own command line and kill the run itself.
+    [ -n "$APP_PID" ] && kill -9 "$APP_PID" 2>/dev/null
+    true
+}
+
+# EXIT trap only — never call this while the run still needs the display.
 cleanup() {
-    # Match process NAMES, not the full command line — a `pkill -f` pattern
-    # would also match this script and kill the run itself.
-    pkill -9 '^md-viewer$' 2>/dev/null
+    kill_app
+    # Kill the Xvfb this run started. Leaving it behind means the next run's
+    # blunt `pkill -9 Xvfb` has to clean up after us — which also kills any
+    # unrelated Xvfb on the machine, and races with a concurrent guard run.
+    [ -n "$XVFB_PID" ] && kill -9 "$XVFB_PID" 2>/dev/null
     true
 }
 trap cleanup EXIT
 
 echo "== starting Xvfb on :$DISPLAY_NUM =="
-pkill -9 Xvfb 2>/dev/null
+# Kill only an Xvfb on *our* display, never every Xvfb on the machine:
+# this box runs a systemd user unit `xvfb99.service` (Restart=always),
+# and a blanket `pkill -9 Xvfb` takes it down on every guard run — which
+# is both rude and a source of races when two runs overlap. `pgrep -f`
+# is safe here because this pattern cannot match the script's own
+# command line.
+for pid in $(pgrep -f "Xvfb :$DISPLAY_NUM " 2>/dev/null); do
+    kill -9 "$pid" 2>/dev/null
+done
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 # Redirect: a backgrounded process that inherits stdout holds the pipe open,
 # so `scripts/visual-regression.sh | tail` would hang forever waiting for EOF.
 Xvfb ":$DISPLAY_NUM" -screen 0 1920x1080x24 >/dev/null 2>&1 &
+XVFB_PID=$!
 sleep 2
 if ! xdpyinfo >/dev/null 2>&1; then
     echo "error: Xvfb is not responding on :$DISPLAY_NUM" >&2
     exit 2
 fi
 
-cleanup
+kill_app
 rm -rf "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "/tmp/shot-$TAG-"*.png
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
 
@@ -108,6 +132,7 @@ fi
 
 echo "== launching $BIN =="
 setsid "$BIN" --foreground "$DOC" </dev/null >"/tmp/mdv-$TAG.log" 2>&1 &
+APP_PID=$!
 sleep 5
 
 WINDOWS=$(xdotool search --name "Markdown Viewer" 2>/dev/null)
