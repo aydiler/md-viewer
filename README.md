@@ -17,7 +17,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **LaTeX Math** - Inline `$…$` and display `$$…$$` equations rendered via typst + mitex — fractions, sub/superscripts, `\boxed`, accents, matrices, and more — sized and baseline-aligned to the surrounding text
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, and more rendered natively via [merman](https://github.com/Latias94/merman) (click to enlarge)
-- **Resizable Table Columns** - Drag column dividers to fit content (new in v0.1.5)
+- **Tables that fit their content** - Column widths follow what each column actually needs, cell text wraps instead of clipping, and widths are optimized so rows wrap less; drag the dividers to override
 - **HTML Tables** - Rendered as formatted grids with proper cell padding
 - **YAML Frontmatter** - A leading `---` block renders as a key/value table instead of raw text
 - **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
@@ -25,15 +25,33 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **60 FPS Rendering** - Viewport virtualization keeps scroll smooth on 100k+ line docs
 - **Typography** - 1.5x line height for optimal readability (WCAG 2.1 compliant)
 
+*200+ languages via syntect, and mermaid diagrams rendered natively*
+
+![Syntax highlighting and a mermaid sequence diagram](screenshots/syntax-highlighting.png)
+
+*Wide tables, same document and same window width. Before, three of five columns sat outside the pane behind a horizontal scrollbar; now every column fits and long cell text wraps instead of being clipped*
+
+| v0.1.17 | 0.2.0 |
+|---|---|
+| ![Table columns clipped in v0.1.17](screenshots/tables-before.png) | ![Table columns fitted in 0.2.0](screenshots/tables-after.png) |
+
+*A leading `---` block renders as a key/value table rather than raw text; nested items and folded scalars keep their source spelling*
+
+![YAML frontmatter rendered as a key/value table](screenshots/frontmatter.png)
+
 ### Navigation
 - **Tab System** - Open multiple documents with tab bar (Ctrl+Click links to open in new tab)
 - **In-Document Search (Ctrl+F)** - Find bar with inline highlights, Enter/Shift+Enter to cycle matches
-- **File Explorer** - Hierarchical sidebar with lazy-loading directories and sorting options
+- **File Explorer** - Hierarchical sidebar with lazy-loading directories and sorting options; freely resizable, width remembered
 - **Open Folder** - Use File → Open Folder… to choose and persist the file explorer root
-- **Outline Sidebar** - Click-to-navigate table of contents from document headers
+- **Outline Sidebar** - Click-to-navigate table of contents from document headers; freely resizable, width remembered
 - **Navigation Buttons** - Back/forward buttons in title bar for quick history navigation
 - **Per-Tab History** - Independent back/forward navigation within each tab (Alt+Left/Right)
 - **Internal Links** - Navigate between markdown files with relative links
+
+*Find bar with inline highlights and a match counter; Enter and Shift+Enter cycle*
+
+![In-document search](screenshots/search.png)
 
 ### View
 - **Dark & Light Themes** - Toggle with Ctrl+D
@@ -44,59 +62,22 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **Live Reload** - Auto-refresh on file changes (enabled by default)
 - **Custom Colors** - Customize highlight and link text colors (View → Colors…)
 
+*Full Width, Formula Size and the colour picker all live in the View menu*
+
+![The View menu](screenshots/view-menu.png)
+
+*The same document on both themes — syntax highlighting, mermaid diagrams and both sidebars*
+
+| Dark | Light |
+|---|---|
+| ![Dark mode](screenshots/dark-mode.png) | ![Light mode](screenshots/light-mode.png) |
+
 ### Usability
 - **Drag and Drop** - Drop markdown files onto the window to open
 - **Native Dialogs** - System file and folder picker integration
 - **Welcome Page & Recent Files** - Open files or folders from the idle screen and reopen recent documents
 - **Session Persistence** - Remembers open tabs, theme, zoom, and sidebar state
 - **Cross-Platform** - Works on X11 and Wayland
-
-## Screenshots
-
-### Scientific paper — math, tables, figures, and navigation
-*A DESI dark-energy paper: display & inline LaTeX equations, a data table with math headers, an embedded figure, the file explorer, and the click-to-navigate outline — all at once*
-
-![Scientific paper in dark mode](screenshots/math-rendering.png)
-
-### Same document, light mode
-*The χ² comparison table, inline math, and the BAO-fit figure rendered on the light theme*
-
-![Scientific paper in light mode](screenshots/math-light.png)
-
-### Figures, equations, and lists together
-*Embedded plots with math captions, a checklist with inline equations and emoji, and both sidebars*
-
-![Math, figures and lists](screenshots/model-doc.png)
-
-### Dark Mode — Diagrams & Tables
-*Mermaid flowchart, tech-stack table, file explorer, and outline sidebar*
-
-![Dark Mode](screenshots/dark-mode.png)
-
-### Syntax Highlighting
-*Rust and YAML code blocks with semantic coloring and a mermaid sequence diagram*
-
-![Syntax Highlighting](screenshots/syntax-highlighting.png)
-
-### Light Mode — Prose & Code
-*Documentation with bullet lists, blockquotes, inline code, and bash code blocks*
-
-![Light Mode](screenshots/light-mode.png)
-
-### Tables & Lists
-*Troubleshooting table with inline code in cells, ordered list, and resizable columns (drag dividers)*
-
-![Tables](screenshots/tables.png)
-
-### Search (Ctrl+F)
-*Find bar with inline highlights and match counter; Enter / Shift+Enter to cycle*
-
-![Search](screenshots/search.png)
-
-### Resizable Table Columns
-*Drag column dividers to fit wide content*
-
-![Resizable Tables](screenshots/resizable-tables.png)
 
 ## Keyboard Shortcuts
 
