@@ -116,6 +116,27 @@ fn fitted_columns_do_not_split_short_header_words() {
 }
 
 #[test]
+fn fitted_markdown_cells_keep_visible_horizontal_padding() {
+    let markdown = concat!(
+        "| Owner | Mitigation |\n",
+        "|---|---|\n",
+        "| preserve the final visual rendering | clamp the bias during processing |\n",
+    );
+    let (_, _, painted) = render_geometry(markdown, 308.0);
+    let left = painted
+        .iter()
+        .find(|entry| entry.text == "preserve the final visual rendering")
+        .unwrap();
+    let right = painted
+        .iter()
+        .find(|entry| entry.text == "clamp the bias during processing")
+        .unwrap();
+    let gap = right.rect.left() - left.rect.right();
+
+    assert!(gap >= 8.0, "adjacent cell text gap was only {gap}: {painted:#?}");
+}
+
+#[test]
 fn markdown_table_uses_height_aware_column_widths() {
     let markdown = "| Key | Description |\n|---|---|\n| A | ALPHA long prose that wraps over several lines and benefits from extra width in this column |\n| LongerKey | BETA another differently sized explanation that should determine the actual row maximum |";
     let (body, _, painted) = render_geometry(markdown, 360.0);

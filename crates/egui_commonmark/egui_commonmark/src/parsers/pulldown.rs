@@ -2224,36 +2224,49 @@ impl CommonMarkViewerInternal {
                                                     row_ui.col(|ui| {
                                                         ui.style_mut().wrap_mode =
                                                             Some(egui::TextWrapMode::Wrap);
-                                                        let col_w = ui.max_rect().width();
-                                                        ui.set_width(col_w);
-                                                        // Isolate the wrapping cursor from the
-                                                        // preallocated TableBuilder row height.
-                                                        // Otherwise egui uses that entire height as
-                                                        // the first text line's minimum height and
-                                                        // later inline widgets overflow the row.
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for (e, src_span) in col {
-                                                                let tmp_start = std::mem::replace(
-                                                                    &mut self.line.should_start_newline,
-                                                                    false,
-                                                                );
-                                                                let tmp_end = std::mem::replace(
-                                                                    &mut self.line.should_end_newline,
-                                                                    false,
-                                                                );
-                                                                self.event(
-                                                                    ui,
-                                                                    e.clone(),
-                                                                    src_span.clone(),
-                                                                    cache,
-                                                                    options,
-                                                                    col_w,
-                                                                );
-                                                                self.line.should_start_newline =
-                                                                    tmp_start;
-                                                                self.line.should_end_newline = tmp_end;
-                                                            }
-                                                        });
+                                                        ui.set_width(ui.max_rect().width());
+                                                        egui::Frame::NONE
+                                                            .inner_margin(egui::Margin::symmetric(4, 0))
+                                                            .show(ui, |ui| {
+                                                                let col_w = ui.available_width();
+                                                                ui.set_width(col_w);
+                                                                // Isolate the wrapping cursor from the
+                                                                // preallocated TableBuilder row height.
+                                                                // Otherwise egui uses that entire height as
+                                                                // the first text line's minimum height and
+                                                                // later inline widgets overflow the row.
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    for (e, src_span) in col {
+                                                                        let tmp_start =
+                                                                            std::mem::replace(
+                                                                                &mut self
+                                                                                    .line
+                                                                                    .should_start_newline,
+                                                                                false,
+                                                                            );
+                                                                        let tmp_end =
+                                                                            std::mem::replace(
+                                                                                &mut self
+                                                                                    .line
+                                                                                    .should_end_newline,
+                                                                                false,
+                                                                            );
+                                                                        self.event(
+                                                                            ui,
+                                                                            e.clone(),
+                                                                            src_span.clone(),
+                                                                            cache,
+                                                                            options,
+                                                                            col_w,
+                                                                        );
+                                                                        self.line
+                                                                            .should_start_newline =
+                                                                            tmp_start;
+                                                                        self.line.should_end_newline =
+                                                                            tmp_end;
+                                                                    }
+                                                                });
+                                                            });
                                                     });
                                                 }
                                         });
