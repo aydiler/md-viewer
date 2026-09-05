@@ -282,7 +282,14 @@ fn render_frontmatter_table(
                         ui.label(egui::RichText::new(key).strong());
                         ui.add_space(12.0);
                     });
-                    ui.label(value);
+                    // Wrap rather than clip. `ui.label` inside a Grid does
+                    // not wrap on its own — the column simply grows and the
+                    // frame's `set_max_width` clips whatever runs past it, so
+                    // a long value was cut mid-word with no scrollbar and no
+                    // way to read the rest. `Label::wrap` inside the grid
+                    // cell is enough — the frame's max width already bounds
+                    // the column, it just was not being wrapped against.
+                    ui.add(egui::Label::new(value).wrap());
                     ui.end_row();
                 }
             });
