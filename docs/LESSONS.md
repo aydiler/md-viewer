@@ -1261,6 +1261,29 @@ Every burst photographed the same settled state six times. `import -window` take
 
 **Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh`, issue #140
 
+### A null result is evidence only if the instrument is proven live in the same run
+**Context:** This failure mode hit four times in one session, each time in a different disguise, and each time it nearly produced a confident wrong statement.
+
+| what was measured | the null | why it meant nothing |
+|---|---|---|
+| Burst screenshots for #140 | 366 frames, zero blanks | all six captures per step were **byte-identical** — `import` is slower than the settle, so the burst photographed one state six times |
+| `until ! pgrep -f 'scroll-regression'` wait loop | never exited | the pattern matched the **wrapper's own command line**; the guard had finished minutes earlier |
+| `MDV_DIAG_OPT` probe in #157 | "0 OPT lines — the optimizer is never called" | the build had **failed**; `tail -1` on its output hid the error and the old binary ran |
+| Three fixtures for #157 | zero differing pixels, "does not engage" | all three sat in the **dense case the PR deliberately excludes**, where every column is already at its word floor |
+
+**The rule:** before reporting that something did not happen, prove the instrument could have seen it happen — in the same run, from its own output, not by reasoning about the setup.
+
+Concretely:
+- A probe should report on **every** occurrence, not only on failure. That is why the #140 slice probe prints each frame: its silence is only evidence because its output shows it was working (3 419 lines).
+- After building an instrumented binary, check the instrument is *in* the binary (`strings target/debug/app | grep -c MARKER`), not merely that the build command exited.
+- Never `tail -1` the output of a build you are about to trust.
+- For a differential test, first confirm the two sides differ **at all** on some input. Three identical renders should prompt "am I in the right regime?" before "the change does nothing".
+- `pgrep -f` / `pkill -f` patterns must describe a *foreign* command line. `pgrep -f 'scroll-regression'` inside a script that mentions `scroll-regression` matches itself; `pgrep -f "Xvfb :98 "` cannot.
+
+**The same question in a destructive form:** a step that destroys something must not run unconditionally after a step that can fail. A `gh pr merge` answered with `HTTP 503` was followed by an unconditional branch delete in the same chain, which closed the pull request; the commit survived only because git had not garbage-collected it. Chain destructive cleanup behind a checked success, or run it separately.
+
+**Files:** N/A (verification discipline)
+
 ### A FAIL blames the branch only if the control is *current main*, not the PR's base
 **Context:** Issue #121's guard reported a blank document pane on PR #115 but not on `main`, so the merge was held and the finding was reported to the contributor as theirs.
 **The hold was wrong.** The control ran against `main` @ 2cca28a — the commit the PR was *branched from*. #131, which fixes table height reservation, landed after that. So the comparison never contained the fix, and a defect belonging to `main` was attributed to the branch.
