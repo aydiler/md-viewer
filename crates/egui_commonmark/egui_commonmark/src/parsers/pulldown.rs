@@ -696,6 +696,43 @@ fn forward_shift_wheel_to_horizontal_scroll<R>(
     }
 }
 
+/// Diagnostic instrument for issue #140 (intermittent one-frame blank pane).
+///
+/// Inert unless `MDV_DIAG_SLICE` is set: the variable is read once and cached,
+/// so a normal build pays one relaxed bool load per painted slice.
+///
+/// It reports, for every frame, where the viewport slice is *placed*
+/// (`first_end_y`) against the viewport that frame actually shows. That is the
+/// shape the issue's candidate path would produce — a slice selected correctly
+/// from a stale scroll offset but positioned at its pre-shrink coordinate, so
+/// nothing lands on screen.
+///
+/// It deliberately reports **every** frame rather than only suspicious ones.
+/// A probe that prints only on failure cannot distinguish "did not happen"
+/// from "was not running", and the value of this instrument is that its
+/// silence means something.
+///
+/// This asserts nothing about the cause. It is an observation channel for the
+/// next real reproduction; the product fix belongs to whatever it captures.
+fn diag_report_slice(first_end_y: f32, viewport_top: f32, viewport_bottom: f32, events: usize) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("MDV_DIAG_SLICE").is_some()) {
+        return;
+    }
+    // A slice legitimately starts above the viewport: it resumes at the last
+    // complete block before it, which on a long document can be far up. Only a
+    // start below the viewport, or absurdly far above it, indicates the slice
+    // was placed outside what the frame shows.
+    const IMPLAUSIBLE_LEAD: f32 = 20_000.0;
+    let off_screen = first_end_y > viewport_bottom || first_end_y < viewport_top - IMPLAUSIBLE_LEAD;
+    eprintln!(
+        "DIAG slice first_end_y={first_end_y:.0} viewport=[{viewport_top:.0},{viewport_bottom:.0}] \
+events={events}{}",
+        if off_screen { " OFF-SCREEN" } else { "" }
+    );
+}
+
 fn markdown_table_id(source_id: Id, source_start: usize) -> Id {
     source_id.with("_markdown_table").with(source_start)
 }
@@ -1353,7 +1390,8 @@ impl CommonMarkViewerInternal {
             let content_left =
                 ui.max_rect().left() + recorded_geometry.map_or(0.0, |g| g.left_offset);
 
-            let (first_event_index, first_end_y, events_range) = {
+            let (first_event_index, first_end_y, events_range,
+                 diag_viewport_min_y, diag_viewport_max_y) = {
                 let scroll_cache = scroll_cache(cache, &source_id);
 
                 // Resume after the last complete block above the viewport.
@@ -1384,7 +1422,8 @@ impl CommonMarkViewerInternal {
                     Vec::new()
                 };
 
-                (first_event_index, first_end_position.y, events_range)
+                (first_event_index, first_end_position.y, events_range,
+                 viewport.min.y, viewport.max.y)
             };
 
             // Match egui's show_rows strategy: size the parent to the full
@@ -1398,6 +1437,8 @@ impl CommonMarkViewerInternal {
             // extent and let the scroll offset run past the real document.
             let content_top = ui.max_rect().top();
             let slice_top = content_top + first_end_y;
+            diag_report_slice(first_end_y, diag_viewport_min_y, diag_viewport_max_y, events_range.len());
+
             let slice_rect = egui::Rect::from_min_size(
                 egui::pos2(content_left, slice_top),
                 egui::vec2(max_width, 0.0),
