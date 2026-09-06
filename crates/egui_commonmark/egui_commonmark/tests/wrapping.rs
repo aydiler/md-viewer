@@ -48,7 +48,14 @@ fn render_geometry_with_hooks(
     width: f32,
     hooks: &[&str],
 ) -> (Rect, f32, Vec<PaintedText>) {
-    render_geometry_with_body_size(markdown, width, hooks, None)
+    render_geometry_with_body_size(markdown, width, hooks, None, false)
+}
+
+/// `render_frontmatter` gates both parsing and rendering of a `---` block, so
+/// a frontmatter test that leaves it off silently measures an ordinary
+/// paragraph instead of the key/value table.
+fn render_geometry_frontmatter(markdown: &str, width: f32) -> (Rect, f32, Vec<PaintedText>) {
+    render_geometry_with_body_size(markdown, width, &[], None, true)
 }
 
 fn render_geometry_with_body_size(
@@ -56,6 +63,7 @@ fn render_geometry_with_body_size(
     width: f32,
     hooks: &[&str],
     body_size: Option<f32>,
+    frontmatter: bool,
 ) -> (Rect, f32, Vec<PaintedText>) {
     let ctx = Context::default();
     if let Some(size) = body_size {
@@ -81,6 +89,7 @@ fn render_geometry_with_body_size(
                 .default_width(Some(width as usize))
                 .table_max_width(Some(width as usize))
                 .line_height(1.5)
+                .render_frontmatter(frontmatter)
                 .show(ui, &mut cache, markdown);
             body_rect = response.response.rect;
         });
@@ -106,7 +115,7 @@ fn fitted_columns_do_not_split_short_header_words() {
         "|---|---|---|---|---|\n",
         "| core | For a mission instance with a deliberately long description | Instances | No | DL |",
     );
-    let (_, _, painted) = render_geometry_with_body_size(markdown, 400.0, &[], Some(16.0));
+    let (_, _, painted) = render_geometry_with_body_size(markdown, 400.0, &[], Some(16.0), false);
     let required = painted
         .iter()
         .find(|entry| entry.text == "Required")
@@ -342,6 +351,61 @@ fn html_table_reflows_after_panel_width_changes() {
 
     assert!(heights[1] < heights[0], "table did not widen: {heights:?}");
     assert!(heights[2] > heights[1], "table did not narrow: {heights:?}");
+}
+
+#[test]
+fn frontmatter_wraps_a_long_value_instead_of_clipping_it() {
+    // A frontmatter value longer than its column used to be clipped mid-word:
+    // `ui.label` inside a Grid does not wrap, so the frame's max width simply
+    // cut it off, with no scrollbar and no way to read the rest.
+    let markdown = "\
+---
+title: Short
+abstract: A deliberately long single value that has to go somewhere when the column is narrower than the text
+---
+
+AFTER_FRONTMATTER";
+    let width = 320.0;
+    let (_, _, painted) = render_geometry_frontmatter(markdown, width);
+
+    // Guard the guard: without the frontmatter option this markdown renders as
+    // an ordinary paragraph that wraps anyway, and the assertions below pass on
+    // a clipping build. The key column only exists on the table path.
+    assert!(
+        painted.iter().any(|t| t.text.contains("abstract")),
+        "frontmatter table was not rendered; the test would prove nothing: {painted:#?}"
+    );
+
+    let value_rows: Vec<_> = painted
+        .iter()
+        .filter(|t| t.text.contains("deliberately") || t.text.contains("narrower"))
+        .collect();
+    assert!(
+        !value_rows.is_empty(),
+        "the long value was not painted at all: {painted:#?}"
+    );
+
+    // Clipping shows up as text that is painted but cut by its clip rect.
+    for t in &value_rows {
+        assert!(
+            t.rect.right() <= t.clip_rect.right() + 0.5,
+            "value is clipped rather than wrapped: {t:#?}"
+        );
+    }
+
+    // Wrapping shows up as the value occupying more than one row.
+    let rows: usize = value_rows.iter().map(|t| t.rows).max().unwrap_or(1);
+    assert!(
+        rows > 1,
+        "value should wrap across rows, got {rows}: {value_rows:#?}"
+    );
+
+    // And the whole value must survive, not just its first line.
+    let joined: String = value_rows.iter().map(|t| t.text.as_str()).collect();
+    assert!(
+        joined.contains("narrower than the text"),
+        "value was truncated: {joined:?}"
+    );
 }
 
 #[test]
