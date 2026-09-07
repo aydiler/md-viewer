@@ -1235,6 +1235,22 @@ Deterministic: at 1040 the last of 203 frames was byte-identical to the first, s
 **And the diagnostic that settled it in minutes:** `MDV_DIAG_SPLIT=1` dumping the split-point table plus both `partition_point` results. `MDV_DIAG_SLICE=1` reported *zero* off-screen placements in both the working and broken runs — a true negative that correctly excluded the placement hypothesis and pointed at range selection instead. Both probes report every frame, which is why their silence carried information.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`render_frontmatter_table`), `docs/devlog/064-frontmatter-wrap-revert.md`, issues #166 / #167
 
+**Resolved** by bounding the value column against the measured key width and
+`max_width` (devlog 065). The bound also fixed a second symptom the original
+#128 report never mentioned: because the oversized block widens the *content
+column for the whole document*, the prose of every later block was clipped too
+— visible at 1200 px as "md-viewer rende…". A frontmatter document now lays out
+identically to the same document with the `---` block removed.
+
+**The test lesson from the fix is worth as much as the fix.** Two of the three
+assertions first landed in a regime where they could not fail: at a 700 px
+content column the fixture value *nearly* fits on one line, so `rows > 1` broke
+on the fixed build and the content-column assertion **passed on the broken
+one**. Narrowing to 400 made both detect the defect, the second one reporting
+`657.06 > 400`. That is #166's mistake committed a second time, three days
+later, by the same author — caught only because the control run is now
+mandatory rather than optional.
+
 ### An option-gated render path makes a test measure something else entirely
 **Context:** Regression test for the #166 frontmatter clipping fix (since reverted — see the entry above — but this lesson is independent of that outcome).
 **Problem:** The test passed identically before and after the fix, so it was worthless as a guard. `CommonMarkOptions::render_frontmatter` defaults to `false` and gates **both** parsing and rendering: `latex_delimiters::parse_events` only enables pulldown-cmark's metadata-block option when it is set. The shared `render_geometry` test helper never enabled it, so a `---` block parsed as an ordinary paragraph. Ordinary paragraphs wrap on their own, so the assertions were satisfied by content that never reached `render_frontmatter_table`.
