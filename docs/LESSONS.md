@@ -510,6 +510,19 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 ```
 **Files:** `.github/workflows/release.yml`
 
+### A probe that can never pass is worse than no probe
+**Context:** #135 added a crates.io token pre-flight to catch the dead credential that had left the registry four versions behind. #151 moved it into its own job so one bad token would not cost four channels. Both changes were right about the *structure* and wrong about the *check*.
+**The check could never succeed.** It called `GET /api/v1/me` with the token in an `Authorization` header. That endpoint is session-only — crates.io answers **any** API token with:
+```
+403 {"errors":[{"detail":"this action can only be performed on the crates.io website"}]}
+```
+So a perfectly valid token failed the gate, `publish-crates` was skipped, and the pipeline manufactured exactly the silent crates.io gap the job existed to prevent.
+**Why it survived two PRs and a code review:** the token really was dead when the check landed, so its failure looked like a success — the probe reported what the author expected, for the wrong reason. It was never once exercised against a working token, which is the only run that could have distinguished the two.
+**The cost was not theoretical.** It rejected two freshly minted tokens on the maintainer's behalf and reported them as "rejected by crates.io", sending him to mint a replacement that was then rejected the same way. A separate ad-hoc `curl` compounded it: crates.io returns `403` to a generic `curl/8.x` User-Agent even on public endpoints, so the same status code had two unrelated causes in the same investigation.
+**crates.io has no read-only endpoint that authenticates with an API token.** There is nothing to probe. The gate is now a shape check (`^cio[A-Za-z0-9]{32}$`), which still catches the two failure modes that actually occur — an unset secret and a paste that lost characters — in a second, before anything is built. A genuinely revoked token fails in `publish-crates`, which since #151 gates nothing else.
+**General lesson, and it generalizes past credentials:** a check whose passing condition has never been observed is not a check. Before trusting a new guard, make it succeed once on input known to be good — the same discipline as "never trust a test that has not been observed red", in the other direction. Both halves are needed: a guard must be seen to pass on the good case *and* fail on the bad one. This one was only ever seen to fail.
+**Files:** `.github/workflows/release.yml` (`check-crates-token`), `~/.local/bin/mdv-set-crates-token`, PRs #135 / #151
+
 ### A fail-fast check belongs in its own job, not in a gate everything needs
 **Context:** crates.io publishing had been silently broken since 2026-07-23 — `md-viewer` stuck at 0.1.15 — because the token expired and `publish-crates` runs last, after the snap, both AUR packages and the GitHub Release have already published. The release *looked* delivered. #135 added a one-second `GET /api/v1/me` pre-flight so a dead token fails immediately instead of twenty minutes in.
 
