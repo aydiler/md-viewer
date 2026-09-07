@@ -59,17 +59,32 @@ jobs:
     permissions:
       contents: read
     steps:
-        - name: crates.io token is valid
-          # The publish job runs ~20 minutes in, after the whole build matrix and
-          # the snap. When the token is dead it fails there, at the very end, while
-          # every other channel has already published — so the release looks
-          # finished and the crates.io gap goes unnoticed. That is exactly what
-          # happened to v0.1.16 and v0.1.17: both failed here with
-          # `403 Forbidden: authentication failed`, and crates.io sat four versions
-          # behind for six weeks before anyone looked.
+        - name: crates.io token is present and well formed
+          # This job previously called `GET /api/v1/me` with the token in an
+          # `Authorization` header. That check could never pass. The endpoint is
+          # session-only, and crates.io answers *any* API token with
           #
-          # `GET /api/v1/me` is read-only and costs a second, so the same failure
-          # now lands before anything is built or published anywhere.
+          #   403 {"detail":"this action can only be performed on the crates.io website"}
+          #
+          # so a perfectly valid token failed the gate and `publish-crates` was
+          # skipped — manufacturing exactly the silent crates.io gap this job
+          # exists to prevent. It was added in #135 and never exercised against a
+          # working token, because the token was already dead when it landed.
+          #
+          # crates.io publishes no read-only endpoint that authenticates with an
+          # API token, so there is nothing to probe: the only proof of validity
+          # is a publish. What is left is a shape check, which still catches the
+          # two failure modes that actually occur — an unset secret and a paste
+          # that lost characters — in about a second, before anything is built.
+          #
+          # A genuinely revoked token now fails in `publish-crates`, which since
+          # #151 gates nothing else: the snap, both AUR packages and the GitHub
+          # Release publish regardless, and the run still goes red.
+          #
+          # Historical note: v0.1.16 and v0.1.17 really did fail with
+          # `403 Forbidden: authentication failed` — but from `cargo publish`,
+          # which is genuinely token-authenticated. That diagnosis stands; only
+          # the probe built to catch it was wrong.
           env:
             CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           run: |
@@ -77,23 +92,14 @@ jobs:
               echo "::notice::CARGO_REGISTRY_TOKEN is unset — crates.io publish will be skipped."
               exit 0
             fi
-            CODE=$(curl -sS -o /tmp/me.json -w '%{http_code}' \
-              -H "Authorization: ${CARGO_REGISTRY_TOKEN}" \
-              -H "User-Agent: md-viewer-release (https://github.com/aydiler/md-viewer)" \
-              https://crates.io/api/v1/me || echo 000)
-            case "$CODE" in
-              200)
-                echo "crates.io token accepted for: $(python3 -c 'import json;print(json.load(open("/tmp/me.json"))["user"]["login"])')"
-                ;;
-              401|403)
-                echo "::error::crates.io rejected CARGO_REGISTRY_TOKEN (HTTP $CODE). Mint a new token at https://crates.io/settings/tokens and update the repository secret, then re-tag."
-                exit 1
-                ;;
-              *)
-                echo "::error::Could not reach crates.io to validate the token (HTTP $CODE). Re-run the job."
-                exit 1
-                ;;
-            esac
+            # Shape only. See the comment above for why there is nothing to probe.
+            if printf '%s' "${CARGO_REGISTRY_TOKEN}" | grep -qE '^cio[A-Za-z0-9]{32}$'; then
+              echo "CARGO_REGISTRY_TOKEN is present and well formed; validity is proven by publish-crates."
+            else
+              LEN=$(printf '%s' "${CARGO_REGISTRY_TOKEN}" | wc -c)
+              echo "::error::CARGO_REGISTRY_TOKEN is not the shape of a crates.io token (expected 'cio' followed by 32 alphanumerics, got ${LEN} characters). Re-copy it from https://crates.io/settings/tokens — a truncated paste looks exactly like this."
+              exit 1
+            fi
 
   build:
     name: Build (${{ matrix.asset_name }})
