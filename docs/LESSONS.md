@@ -1328,6 +1328,32 @@ Poll `systemctl --user is-active <unit>`; read the verdict from the log and `Exe
 
 **The fixture worked.** Unloaded images in table cells reserve `column_width.min(line_height * 8.0)`; a 12×12 px icon in a ~200 px column reserves ~192 px and paints ~12 px. Viewport slicing means images below the fold are never painted and so never loaded — they load as you scroll onto them, which is exactly a "content shrinks while the offset is deep" trigger. A 60-row icon table after twelve ordinary sections collapsed the document mid-walk: bottom reached at frame 51 instead of 103, painted pixels dropping 2770 → 1313 at the shrink.
 
+**Follow-up, 2026-09-07: that recipe did not reproduce the shrink a second time,
+and the reason matters.** Two fresh fixtures built from this description — a
+60-row icon table after twelve ordinary sections, once with the icon alone in a
+narrow column and once sharing a wide column with a long caption — produced no
+height change at all across ~2000 instrumented frames each:
+
+| attempt | icon column | distinct `extent` values observed |
+|---|---|---|
+| 1 | narrow (icon only) | 2 (10142, 10145) |
+| 2 | wide (icon + caption) | **1** (11581) |
+
+The first was my own misreading: the reservation is a `min`, so a *narrow*
+column reserves little and there is nothing to over-reserve. The second fixed
+that and still did not move.
+
+A screenshot of the table explains it. The icons render and the rows are
+compact — **a 296-byte local PNG on a warm filesystem is loaded by the time its
+row is painted**, so the placeholder phase this trigger depends on never
+persists. The paragraph above reads as though any unloaded image works; it does
+not. Reproducing it needs images that are genuinely slow — remote URLs, or files
+large enough that decode takes real time.
+
+Recorded rather than fixed, because the useful fix is a fixture that actually
+reproduces and I do not have one. The measurements above are so that the next
+attempt starts after these two rather than repeating them.
+
 **No blank appeared, and that result is worthless.** The guard does three wheel clicks, sleeps 0.45 s, then takes **one** screenshot — about one sample out of ~27 frames at 60 fps. A single-frame artifact has roughly a 1-in-27 chance of being seen per step.
 
 **Burst capture does not rescue it.** Six `import -window` captures back-to-back inside the settle window, 366 frames instead of 61, still zero blanks — and then the control that mattered:
