@@ -1110,6 +1110,33 @@ if out.state.offset.y > real_max_scroll {
 | Fix 1 only (no drift signal from skip) | 3 | 68246 | 34030 (still overshoots) | No, but blank at scroll>33880 |
 | Fix 1 + Fix 2 (clamp) | 3 | 68246 | 34022→clamped to 33880 | No |
 
+**Verified under the condition it defends against, 2026-09-07.** The clamp was
+added from a failure trace; nobody had since watched it work while the document
+actually shrank underneath a deep offset. A fixture of eighty 12000×120 noise
+PNGs (4 MB each, incompressible so decode costs real time, wide-and-flat so each
+renders ~4 px against a ~160 px placeholder reservation) collapses the document
+as rows finish decoding:
+
+| | |
+|---|---|
+| extent | **21973 → 14464 → 12631**, a 43 % collapse |
+| viewport bottom at those transitions | 8430, then 8585 — deep, not at the top |
+| deepest viewport bottom over the run | **12631** |
+| smallest extent over the run | **12631** |
+
+The offset tracks the shrinking document exactly to its new end and never past
+it — the two extremes are the same number. Over 1767 instrumented frames,
+`MDV_DIAG_SPLIT` reported zero offset-exceeds-extent frames and zero degenerate
+slice ranges.
+
+Two traps on the way to that fixture, both worth avoiding next time: small local
+images do not work at all (a 296-byte PNG is decoded before its row is painted,
+so the placeholder phase never persists), and *large square* images make the
+document **grow** rather than shrink — 2600×2600 noise took it from 16020 to
+38482, the wrong direction entirely. The reservation is
+`column_width.min(line_height * 8.0)`, so the image must render *shorter* than
+that to shrink anything.
+
 **General lesson:** when one stored quantity is the authoritative source of truth (here: `page_size.y` from bootstrap), don't let derived/observed values from a different code path (here: `out.content_size.y` from skip-paint) feed back into anything that affects state. Treat the skip-paint output as a paint-only artifact, not a measurement.
 
 **Why simpler alternatives don't work:**
