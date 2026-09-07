@@ -1213,25 +1213,41 @@ Do not change renderer soft-break behavior to satisfy a fixture whose syntax exp
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`ContentGeometry`), `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `crates/egui_commonmark/egui_commonmark/tests/slice_perf.rs`, `scripts/visual-regression.sh`, `docs/devlog/055-viewport-slice-layout.md`
 
+### Making a block's height depend on ambient width breaks viewport-slice selection
+**Context:** #166 fixed a frontmatter value being clipped mid-word by changing one line — `ui.label(value)` to `ui.add(egui::Label::new(value).wrap())`. It shipped. It caused #167: at a 1040 px window the *entire document below the frontmatter table stopped painting*.
+
+**What the fix traded away.** Clipping is cosmetic and local — one value is cut, everything else renders. The regression is total: the outline still lists later headings and the scroll thumb still reports a long document, but the pane below the first paragraph is blank. A worse bug in every respect, shipped to fix a smaller one.
+
+**Mechanism, measured.** `split_points` record each block's start/end y during the bootstrap pass; the slice path then selects an event range with `partition_point(|(_, start, _)| start.y <= viewport.max.y)` and takes `split_points[below + 1]`. With `.wrap()`, the frontmatter block's height became a function of whatever width the *ambient* `Ui` happened to have, and the bootstrap pass's width differs from the paint pass's. At 1040 px the block was recorded 1103 px taller than it painted, which pushed every later split point past the viewport bottom:
+
+| build | window | `sp[0] end.y` | `below` | `last_ev` | content |
+|---|---|---|---|---|---|
+| with #166 | 1040 | **1336** | 1 | **11** | missing |
+| with #166 | 1080 | 236 | 6 | 63 | complete |
+| #166 reverted | 1040 | **214** | 6 | 63 | complete |
+
+Deterministic: at 1040 the last of 203 frames was byte-identical to the first, so the recorded values never converge.
+
+**The precise irony.** #166 also *deleted* a computation that bounded the value column against the widest key, on the grounds that `.wrap()` alone sufficed. It did suffice visually, at the one width tested. That bound was what made the block's height a function of the passed `max_width` — which `ContentGeometry` (#96) guarantees is identical in both passes — rather than of ambient width. Removing it is what coupled height to the pass.
+
+**General lesson:** in a renderer with a measure pass and a paint pass, *any* widget whose height depends on ambient available width is a latent slice bug, because the two passes do not have the same ambient width by construction. Wrapping is the common way to introduce that dependency. Bind the wrap to a width the two passes provably share, or reserve the height explicitly. Same family as #116 (`parse_row` leaking a structural event into the paint pass only) and #129/#131 — measurement and paint disagreeing, with the cause in neither of them.
+
+**And the diagnostic that settled it in minutes:** `MDV_DIAG_SPLIT=1` dumping the split-point table plus both `partition_point` results. `MDV_DIAG_SLICE=1` reported *zero* off-screen placements in both the working and broken runs — a true negative that correctly excluded the placement hypothesis and pointed at range selection instead. Both probes report every frame, which is why their silence carried information.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`render_frontmatter_table`), `docs/devlog/064-frontmatter-wrap-revert.md`, issues #166 / #167
+
 ### An option-gated render path makes a test measure something else entirely
-**Context:** Regression test for frontmatter values being clipped instead of wrapped (defect in #128, found while taking 0.2.0 README screenshots).
-**Problem:** The test passed identically before and after the fix — worthless as a guard. `CommonMarkOptions::render_frontmatter` defaults to `false` and gates **both** parsing and rendering: `latex_delimiters::parse_events` only enables pulldown-cmark's metadata-block option when it is set. The shared `render_geometry` test helper never enabled it, so a `---` block parsed as an ordinary paragraph. Ordinary paragraphs wrap on their own, so the assertions were satisfied by content that never touched `render_frontmatter_table`.
-**Fix:** a `render_geometry_frontmatter` helper that turns the option on, plus an assertion *inside* the test that the table was actually rendered:
+**Context:** Regression test for the #166 frontmatter clipping fix (since reverted — see the entry above — but this lesson is independent of that outcome).
+**Problem:** The test passed identically before and after the fix, so it was worthless as a guard. `CommonMarkOptions::render_frontmatter` defaults to `false` and gates **both** parsing and rendering: `latex_delimiters::parse_events` only enables pulldown-cmark's metadata-block option when it is set. The shared `render_geometry` test helper never enabled it, so a `---` block parsed as an ordinary paragraph. Ordinary paragraphs wrap on their own, so the assertions were satisfied by content that never reached `render_frontmatter_table`.
+**Fix:** a helper variant that turns the option on, plus an assertion *inside* the test that the table was actually rendered:
 ```rust
 assert!(
     painted.iter().any(|t| t.text.contains("abstract")),
     "frontmatter table was not rendered; the test would prove nothing: {painted:#?}"
 );
 ```
-**Control matrix** (the step that caught it — the test had to be observed red):
-
-| build | result |
-|---|---|
-| `ui.label(value)` (clipping) | FAIL — `value should wrap across rows, got 1` |
-| `Label::new(value).wrap()` | PASS |
-
-**General lesson:** when a feature sits behind a default-off option, a test that does not enable it does not fail — it silently exercises the fallback path and reports success. Shared render helpers are where this hides, because the option is set by the *application*, not the helper. Two defenses: assert a marker that only the intended path can produce, and never trust a test that has not been observed red. Same family as the `#157` fixtures that all landed in the excluded dense regime, and the `#115` control run against a stale `main`: in each case the setup sat outside the region it was meant to probe, and the result still looked like an answer.
-**Files:** `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `docs/devlog/063-frontmatter-wrap.md`
+**General lesson:** when a feature sits behind a default-off option, a test that does not enable it does not fail — it silently exercises the fallback path and reports success. Shared render helpers are where this hides, because the option is set by the *application*, not the helper. Two defenses: assert a marker only the intended path can produce, and never trust a test that has not been observed red. Same family as the #157 fixtures that all landed in the excluded dense regime, and the #115 control run against a stale `main`.
+**A caveat this episode adds:** the corrected test *was* observed red, and the fix it guarded was still wrong. A test proven to detect the bug it targets says nothing about what else the change breaks. Being red-then-green is a floor, not a ceiling.
+**Files:** `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`
 
 ### A scroll-regression fixture only proves anything if the sampling is fine enough to land in the failure window
 **Context:** Issue #121 — scrolling the wrench `asset_reference.md` intermittently painted an empty document pane. Writing `scripts/scroll-regression.sh` to guard the fix.
