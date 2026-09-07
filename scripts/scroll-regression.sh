@@ -39,6 +39,25 @@
 # previous build. A PASS only means something if the same harness still reports
 # FAIL on a build known to be broken.
 #
+#
+# Running it from an agent or CI-like harness: the walk takes 10-40 minutes,
+# and any wrapper that reaps its process group on exit will kill it partway —
+# `&`, `setsid`, and a foreground call with a timeout were all killed at 24,
+# 56, 76 and 98 of 151 frames in one session, each leaving no verdict. Detach
+# it from the caller entirely instead:
+#
+#   systemd-run --user --unit=mdv-scrollguard --collect \
+#     --working-directory="$PWD" --setenv=MDV_DISPLAY=96 \
+#     --property=StandardOutput="file:/tmp/guard.log" \
+#     --property=StandardError="append:/tmp/guard.log" \
+#     /bin/bash ./scripts/scroll-regression.sh
+#
+#   systemctl --user is-active mdv-scrollguard.service   # active until done
+#   systemctl --user show mdv-scrollguard.service -p ExecMainStatus --value
+#
+# Do NOT start an Xvfb on MDV_DISPLAY first — the script starts its own and
+# kills it by PID on exit; a pre-existing server on the same number collides
+# and the run dies with "Killed" and no verdict.
 # Usage:
 #   scripts/scroll-regression.sh [binary] [document.md] [steps] [clicks_per_step]
 #
