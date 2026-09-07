@@ -1102,6 +1102,67 @@ events={events}{}",
     );
 }
 
+/// Diagnostic instrument for issue #140, companion to [`diag_report_slice`].
+///
+/// Inert unless `MDV_DIAG_SPLIT` is set. Where `diag_report_slice` reports
+/// where a slice is *placed*, this reports how its event range was *chosen* —
+/// the split-point table and both `partition_point` results that select it.
+///
+/// #140's candidate path is a stored scroll offset that briefly exceeds the
+/// document's updated extent after an asynchronous layout change, so the two
+/// values that decide that are printed side by side: the viewport the frame
+/// shows, and `page_size.y`, the extent the bootstrap pass measured. When the
+/// former runs past the latter the line is marked `OFFSET>EXTENT`.
+///
+/// It earned its place on #167, where `MDV_DIAG_SLICE` correctly reported no
+/// off-screen placement in either the working or the broken run — a true
+/// negative that excluded the placement hypothesis but could not say what was
+/// wrong. This probe showed it in one frame: `below` had collapsed to 1, so
+/// the range ended at event 11 of 63 and everything below the frontmatter
+/// table went unpainted.
+///
+/// The summary line prints on **every** frame, so its silence means the probe
+/// was not running rather than that nothing happened. The full table is
+/// expensive on a long document, so it is dumped only when the selection looks
+/// degenerate — an empty range, or one that stops at the first split point
+/// while more of the document lies inside the viewport.
+#[allow(clippy::too_many_arguments)]
+fn diag_report_split(
+    split_points: &[(usize, Pos2, Pos2)],
+    above: usize,
+    below: usize,
+    first_event_index: usize,
+    last_event_index: usize,
+    total_events: usize,
+    viewport_min_y: f32,
+    viewport_max_y: f32,
+    extent_y: f32,
+) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("MDV_DIAG_SPLIT").is_some()) {
+        return;
+    }
+    let overshoot = viewport_max_y > extent_y;
+    eprintln!(
+        "DIAG split viewport=[{viewport_min_y:.0},{viewport_max_y:.0}] extent={extent_y:.0} \
+above={above} below={below} events=[{first_event_index},{last_event_index})/{total_events} \
+sp={}{}",
+        split_points.len(),
+        if overshoot { " OFFSET>EXTENT" } else { "" }
+    );
+
+    // A range that selects nothing, or that stops at the very first boundary
+    // while the viewport plainly reaches further, is the shape #167 produced.
+    let degenerate = first_event_index >= last_event_index
+        || (below <= 1 && split_points.len() > 2);
+    if degenerate {
+        for (i, (event_index, start, end)) in split_points.iter().enumerate() {
+            eprintln!("  sp[{i}] ev={event_index} start.y={:.1} end.y={:.1}", start.y, end.y);
+        }
+    }
+}
+
 fn markdown_table_id(source_id: Id, source_start: usize) -> Id {
     source_id.with("_markdown_table").with(source_start)
 }
@@ -1790,6 +1851,18 @@ impl CommonMarkViewerInternal {
                 } else {
                     Vec::new()
                 };
+
+                diag_report_split(
+                    &scroll_cache.split_points,
+                    above,
+                    below,
+                    first_event_index,
+                    last_event_index,
+                    scroll_cache.events.len(),
+                    viewport.min.y,
+                    viewport.max.y,
+                    page_size.y,
+                );
 
                 (first_event_index, first_end_position.y, events_range,
                  viewport.min.y, viewport.max.y)
