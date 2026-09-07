@@ -18,6 +18,25 @@
 # harness is not bypassing the code; the shift appears to need md-viewer's real
 # font stack, which the crate's test build does not load.
 #
+#
+# Running it from an agent or CI-like harness: the walk takes 10-40 minutes,
+# and any wrapper that reaps its process group on exit will kill it partway —
+# `&`, `setsid`, and a foreground call with a timeout were all killed at 24,
+# 56, 76 and 98 of 151 frames in one session, each leaving no verdict. Detach
+# it from the caller entirely instead:
+#
+#   systemd-run --user --unit=mdv-visualguard --collect \
+#     --working-directory="$PWD" --setenv=MDV_DISPLAY=96 \
+#     --property=StandardOutput="file:/tmp/guard.log" \
+#     --property=StandardError="append:/tmp/guard.log" \
+#     /bin/bash ./scripts/visual-regression.sh
+#
+#   systemctl --user is-active mdv-visualguard.service   # active until done
+#   systemctl --user show mdv-visualguard.service -p ExecMainStatus --value
+#
+# Do NOT start an Xvfb on MDV_DISPLAY first — the script starts its own and
+# kills it by PID on exit; a pre-existing server on the same number collides
+# and the run dies with "Killed" and no verdict.
 # Usage:
 #   scripts/visual-regression.sh [path/to/binary] [path/to/document.md]
 #

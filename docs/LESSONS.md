@@ -1278,6 +1278,25 @@ assert!(
 **A caveat this episode adds:** the corrected test *was* observed red, and the fix it guarded was still wrong. A test proven to detect the bug it targets says nothing about what else the change breaks. Being red-then-green is a floor, not a ceiling.
 **Files:** `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`
 
+### The Xvfb guards outlive no wrapper that reaps its process group
+**Context:** running `scripts/scroll-regression.sh` as the pre-tag check for 0.2.0.
+**Problem:** the walk takes 10–40 minutes. Four attempts died partway — at 24, 56, 76 and 98 of 151 frames — each leaving an empty log and no verdict. Backgrounding, `setsid`, and a foreground call with a long timeout all failed the same way: the agent harness reaps the process group when the invoking call ends, and `setsid` did not save it.
+**Two false readings this produced,** both of which had to be caught before they became claims:
+- An exit code of 1 with **no output at all** looks like a FAIL. It was a truncated run. A guard that reports nothing has not reported a failure.
+- One attempt left an orphan still running, so the next attempt started a **second** guard on the same display. Two instances fighting over one X server produce results that are not evidence of anything.
+**Fix:** detach from the caller entirely with a transient unit, which survives the harness:
+```bash
+systemd-run --user --unit=mdv-scrollguard --collect \
+  --working-directory="$PWD" --setenv=MDV_DISPLAY=96 \
+  --property=StandardOutput="file:/tmp/guard.log" \
+  --property=StandardError="append:/tmp/guard.log" \
+  /bin/bash ./scripts/scroll-regression.sh
+```
+Poll `systemctl --user is-active <unit>`; read the verdict from the log and `ExecMainStatus` when it goes inactive. Both guards then completed on the first try — scroll PASS (bottom at frame 68 of 150, the documented value for that fixture, which is itself evidence the walk traversed the document), visual PASS (`left_edge` 230–236, a 6 px spread against the 12 px bound from #165).
+**A second harness trap in the same session:** do **not** pre-start an Xvfb on `MDV_DISPLAY`. The scripts start their own and kill it by PID on exit; a server already sitting on that number collides, and the run dies with `Killed` and no verdict. That cost one of the four attempts and briefly looked like a defect in the guard.
+**General lesson:** a long-running verification must be detached from whatever invoked it, or its result is a function of the caller's lifetime rather than of the code under test. And when a guard produces no output, the correct reading is "did not run", never "passed" and never "failed".
+**Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh` (both now carry this in their usage header)
+
 ### A scroll-regression fixture only proves anything if the sampling is fine enough to land in the failure window
 **Context:** Issue #121 — scrolling the wrench `asset_reference.md` intermittently painted an empty document pane. Writing `scripts/scroll-regression.sh` to guard the fix.
 **What the guard has to catch:** a viewport slice that anchors outside the viewport and paints nothing, so scrolling appears to skip whole sections. `scripts/visual-regression.sh` does not catch it — on the broken build (main @ 7b8f53b) it reports PASS while four of sixty-one captured frames are blank.
