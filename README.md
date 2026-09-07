@@ -29,7 +29,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ![Syntax highlighting and a mermaid sequence diagram](screenshots/syntax-highlighting.png)
 
-*Wide tables, same document and same window width. Before, three of five columns sat outside the pane behind a horizontal scrollbar; now every column fits and long cell text wraps instead of being clipped*
+*Wide tables, same document and same window width. In v0.1.17 the last three columns were cut off at the pane edge and reachable only by scrolling the table sideways; in 0.2.0 every column fits and long cell text wraps instead of being clipped*
 
 | v0.1.17 | 0.2.0 |
 |---|---|
