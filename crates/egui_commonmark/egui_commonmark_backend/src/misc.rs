@@ -659,6 +659,30 @@ impl Link {
 
         let is_hook = cache.link_hooks().contains_key(&destination);
 
+        // Right-click copies the destination (issue #169). Clicking a link
+        // hands it to the desktop's URL handler, which may open a browser
+        // instance without the reader's session — so the address has to be
+        // obtainable without following it.
+        //
+        // Both link kinds get the item, and both copy `destination` exactly as
+        // the document spells it. For an external link that is the URL. For a
+        // link this viewer resolves itself, the source spelling is the honest
+        // answer: the resolved path depends on which document is open, so
+        // copying it would hand out something the author never wrote and that
+        // means nothing pasted elsewhere.
+        //
+        // The label is deliberately the browser wording, since that is where
+        // the gesture is learned.
+        {
+            let destination = destination.clone();
+            response.context_menu(|ui| {
+                if ui.button("Copy Link Address").clicked() {
+                    ui.ctx().copy_text(destination.clone());
+                    ui.close();
+                }
+            });
+        }
+
         if response.clicked() || response.middle_clicked() {
             if is_hook {
                 cache.link_hooks_mut().insert(destination.clone(), true);
