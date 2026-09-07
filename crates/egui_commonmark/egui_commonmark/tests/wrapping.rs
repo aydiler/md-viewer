@@ -51,11 +51,39 @@ fn render_geometry_with_hooks(
     render_geometry_with_body_size(markdown, width, hooks, None)
 }
 
+/// `render_frontmatter` gates both parsing and rendering of a `---` block, so a
+/// frontmatter test that leaves it off silently measures an ordinary paragraph
+/// instead of the key/value table.
+///
+/// `ui_width` and `content_width` are separate on purpose. The renderer's
+/// bootstrap pass and its slice pass do not have the same ambient width, and
+/// they must agree on block heights — so a frontmatter block's geometry has to
+/// be a function of `content_width` alone. Coupling the two, as the other
+/// helpers do, cannot express that and would have missed #167.
+fn render_geometry_frontmatter(
+    markdown: &str,
+    ui_width: f32,
+    content_width: f32,
+) -> (Rect, f32, Vec<PaintedText>) {
+    render_geometry_inner(markdown, ui_width, content_width, &[], None, true)
+}
+
 fn render_geometry_with_body_size(
     markdown: &str,
     width: f32,
     hooks: &[&str],
     body_size: Option<f32>,
+) -> (Rect, f32, Vec<PaintedText>) {
+    render_geometry_inner(markdown, width, width, hooks, body_size, false)
+}
+
+fn render_geometry_inner(
+    markdown: &str,
+    ui_width: f32,
+    content_width: f32,
+    hooks: &[&str],
+    body_size: Option<f32>,
+    frontmatter: bool,
 ) -> (Rect, f32, Vec<PaintedText>) {
     let ctx = Context::default();
     if let Some(size) = body_size {
@@ -76,11 +104,12 @@ fn render_geometry_with_body_size(
     for pass in 0..2 {
         ctx.begin_pass(Default::default());
         egui::CentralPanel::default().show(&ctx, |ui| {
-            ui.set_width(width);
+            ui.set_width(ui_width);
             let response = CommonMarkViewer::new()
-                .default_width(Some(width as usize))
-                .table_max_width(Some(width as usize))
+                .default_width(Some(content_width as usize))
+                .table_max_width(Some(content_width as usize))
                 .line_height(1.5)
+                .render_frontmatter(frontmatter)
                 .show(ui, &mut cache, markdown);
             body_rect = response.response.rect;
         });
@@ -342,6 +371,113 @@ fn html_table_reflows_after_panel_width_changes() {
 
     assert!(heights[1] < heights[0], "table did not widen: {heights:?}");
     assert!(heights[2] > heights[1], "table did not narrow: {heights:?}");
+}
+
+const FRONTMATTER_FIXTURE: &str = "\
+---
+title: Short
+abstract: A deliberately long single value that has to go somewhere when the column is narrower than the text
+---
+
+AFTER_FRONTMATTER";
+
+#[test]
+fn frontmatter_geometry_ignores_ambient_width() {
+    // The invariant #167 broke. The bootstrap pass that records `split_points`
+    // and the slice pass that paints do not share an ambient width, so a
+    // frontmatter block whose height depends on it is recorded at one height
+    // and painted at another — which collapses slice selection and blanks
+    // every block below. Holding `content_width` fixed while varying the
+    // ambient width must therefore produce identical geometry.
+    // 400 px of content column forces the value to wrap. At 700 it very nearly
+    // fits on one line, which would satisfy the height assertion trivially and
+    // test nothing — the `rows > 1` guard below exists to catch exactly that.
+    let wide = render_geometry_frontmatter(FRONTMATTER_FIXTURE, 1400.0, 400.0);
+    let narrow = render_geometry_frontmatter(FRONTMATTER_FIXTURE, 800.0, 400.0);
+
+    // Guard the guard twice over: the table must actually have been rendered,
+    // and the value must actually have been long enough to wrap. Without the
+    // first, a disabled option turns this into a test of ordinary paragraphs;
+    // without the second, a short value satisfies it trivially.
+    for (label, (_, _, painted)) in [("wide", &wide), ("narrow", &narrow)] {
+        assert!(
+            painted.iter().any(|t| t.text.contains("abstract")),
+            "{label}: frontmatter table was not rendered; the test would prove nothing"
+        );
+    }
+
+    let block_bottom = |painted: &[PaintedText]| -> f32 {
+        painted
+            .iter()
+            .filter(|t| t.text.contains("deliberately") || t.text.contains("narrower"))
+            .map(|t| t.rect.bottom())
+            .fold(f32::MIN, f32::max)
+    };
+    let wide_bottom = block_bottom(&wide.2);
+    let narrow_bottom = block_bottom(&narrow.2);
+    assert!(
+        wide_bottom > f32::MIN && narrow_bottom > f32::MIN,
+        "the long value was not painted in one of the two passes"
+    );
+    assert!(
+        (wide_bottom - narrow_bottom).abs() < 1.0,
+        "frontmatter block height depends on ambient width: \
+{wide_bottom} at ui=1400 vs {narrow_bottom} at ui=800 (content_width fixed at 400)"
+    );
+
+    // And the block must still be honest about its own content: wrapped across
+    // rows, inside its clip rect, and complete rather than truncated.
+    let value_rows: Vec<_> = narrow
+        .2
+        .iter()
+        .filter(|t| t.text.contains("deliberately") || t.text.contains("narrower"))
+        .collect();
+    let rows: usize = value_rows.iter().map(|t| t.rows).max().unwrap_or(1);
+    assert!(rows > 1, "value should wrap across rows, got {rows}");
+    for t in &value_rows {
+        assert!(
+            t.rect.right() <= t.clip_rect.right() + 0.5,
+            "value is clipped rather than wrapped: {t:#?}"
+        );
+    }
+    let joined: String = value_rows.iter().map(|t| t.text.as_str()).collect();
+    assert!(
+        joined.contains("narrower than the text"),
+        "value was truncated: {joined:?}"
+    );
+}
+
+#[test]
+fn frontmatter_block_stays_within_the_content_column() {
+    // The second half of #128, and the part the original report missed: an
+    // unbounded value grows the grid column past the frame, which widens the
+    // content column for the *whole document*, so the prose of every later
+    // block is clipped too. The block must not exceed `content_width`.
+    // 400, not 700: at 700 the value nearly fits on one line, so an unbounded
+    // column barely overshoots and the assertion passes on a broken build.
+    const CONTENT: f32 = 400.0;
+    let (_, _, painted) = render_geometry_frontmatter(FRONTMATTER_FIXTURE, 1400.0, CONTENT);
+
+    assert!(
+        painted.iter().any(|t| t.text.contains("abstract")),
+        "frontmatter table was not rendered; the test would prove nothing"
+    );
+    let after = painted
+        .iter()
+        .find(|t| t.text.contains("AFTER_FRONTMATTER"))
+        .expect("the block after the frontmatter was not painted");
+    assert!(
+        after.rect.right() <= CONTENT + 1.0,
+        "content after the frontmatter exceeds the content column: {} > {CONTENT}",
+        after.rect.right()
+    );
+    for t in painted.iter().filter(|t| t.text.contains("deliberately")) {
+        assert!(
+            t.rect.right() <= CONTENT + 1.0,
+            "frontmatter value exceeds the content column: {} > {CONTENT}",
+            t.rect.right()
+        );
+    }
 }
 
 #[test]

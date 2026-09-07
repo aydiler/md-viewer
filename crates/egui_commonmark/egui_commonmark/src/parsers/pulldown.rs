@@ -267,11 +267,46 @@ fn render_frontmatter_table(
     }
 
     let _ = options;
+
+    // Both the key gap and the value column are derived from `max_width`, never
+    // from `ui.available_width()`. That is deliberate: `max_width` comes from
+    // `ContentGeometry` (#96) and is identical in the bootstrap pass that
+    // records `split_points` and in the slice pass that paints. Deriving either
+    // one from the ambient width makes this block's *height* differ between the
+    // two passes, which collapses slice selection and blanks the rest of the
+    // document — that was #167, and it is why #166's bare `Label::wrap()` had
+    // to be reverted.
+    const KEY_GAP: f32 = 12.0;
+    // Frame::group's two inner margins plus its stroke. Deliberately generous:
+    // over-reserving narrows the value column slightly, while under-reserving
+    // lets it overflow the frame and clip.
+    const FRAME_CHROME: f32 = 24.0;
+    const MIN_VALUE_WIDTH: f32 = 80.0;
+
+    let key_width = pairs
+        .iter()
+        .map(|(key, _)| {
+            egui::WidgetText::from(egui::RichText::new(key).strong())
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                )
+                .size()
+                .x
+        })
+        .fold(0.0f32, f32::max);
+
+    let item_spacing = ui.spacing().item_spacing.x;
+    let value_width =
+        (max_width - key_width - KEY_GAP - item_spacing - FRAME_CHROME).max(MIN_VALUE_WIDTH);
+
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_max_width(max_width);
         egui::Grid::new(ui.next_auto_id())
             .num_columns(2)
-            .spacing(egui::vec2(ui.spacing().item_spacing.x, 4.0))
+            .spacing(egui::vec2(item_spacing, 4.0))
             .striped(true)
             .show(ui, |ui| {
                 for (key, value) in pairs {
@@ -280,9 +315,17 @@ fn render_frontmatter_table(
                     // otherwise ends flush against its value ("authorJane Doe").
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(key).strong());
-                        ui.add_space(12.0);
+                        ui.add_space(KEY_GAP);
                     });
-                    ui.label(value);
+                    // Wrap inside a scope bounded by the precomputed width. A
+                    // bare `ui.label` does not wrap, so a long value grew the
+                    // column past the frame, which then clipped both the value
+                    // and — because the oversized block widens the content
+                    // column — the prose of every block after it (#128).
+                    ui.scope(|ui| {
+                        ui.set_max_width(value_width);
+                        ui.add(egui::Label::new(value).wrap());
+                    });
                     ui.end_row();
                 }
             });
