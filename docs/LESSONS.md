@@ -511,6 +511,7 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 **Files:** `.github/workflows/release.yml`
 
 ### A probe that can never pass is worse than no probe
+*Part of the family indexed under "Before trusting a check, ask which way it cannot fail".*
 **Context:** #135 added a crates.io token pre-flight to catch the dead credential that had left the registry four versions behind. #151 moved it into its own job so one bad token would not cost four channels. Both changes were right about the *structure* and wrong about the *check*.
 **The check could never succeed.** It called `GET /api/v1/me` with the token in an `Authorization` header. That endpoint is session-only — crates.io answers **any** API token with:
 ```
@@ -1265,6 +1266,7 @@ later, by the same author — caught only because the control run is now
 mandatory rather than optional.
 
 ### An option-gated render path makes a test measure something else entirely
+*Part of the family indexed under "Before trusting a check, ask which way it cannot fail".*
 **Context:** Regression test for the #166 frontmatter clipping fix (since reverted — see the entry above — but this lesson is independent of that outcome).
 **Problem:** The test passed identically before and after the fix, so it was worthless as a guard. `CommonMarkOptions::render_frontmatter` defaults to `false` and gates **both** parsing and rendering: `latex_delimiters::parse_events` only enables pulldown-cmark's metadata-block option when it is set. The shared `render_geometry` test helper never enabled it, so a `---` block parsed as an ordinary paragraph. Ordinary paragraphs wrap on their own, so the assertions were satisfied by content that never reached `render_frontmatter_table`.
 **Fix:** a helper variant that turns the option on, plus an assertion *inside* the test that the table was actually rendered:
@@ -1370,6 +1372,36 @@ Every burst photographed the same settled state six times. `import -window` take
 **What would work instead:** in-app instrumentation that observes every frame regardless of when a screenshot lands — a debug counter of painted shapes per frame, or a renderer-side assertion that the selected slice intersects the viewport. Both fire on the bad frame itself.
 
 **Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh`, issue #140
+
+### Before trusting a check, ask which way it cannot fail
+
+The single most-violated rule in this repository, by a wide margin. Five separate
+instances in one session (2026-09-07), each in a different disguise, each of
+which nearly became a confident wrong statement. Four entries below describe
+specific shapes of it; this one exists so that grepping any one term finds the
+rest.
+
+| shape | the question that catches it | entry |
+|---|---|---|
+| a test never observed red | does it fail on a build known to be broken? | *An option-gated render path makes a test measure something else entirely* |
+| a guard never observed green on input known to be good | does it pass when it should? | *A probe that can never pass is worse than no probe* |
+| a **null** result | was the instrument reporting at all, in this same run? | *A null result is evidence only if the instrument is proven live in the same run* |
+| a comparison against the **wrong baseline** | is the control current `main`, not the branch's base? | *A FAIL blames the branch only if the control is current main* |
+| a fixture in the **wrong regime** | did the condition under test actually occur? | this entry, below |
+
+**The fifth shape has no entry of its own, so it is recorded here.** A fixture can
+sit outside the region it is meant to probe and still produce a clean-looking
+number. It happened three times in that session: the `#157` optimizer fixtures
+all landed in the dense case the change explicitly excludes; two `#140` shrink
+fixtures never changed the document height, so their zero counts measured
+nothing; and a `#139` cursor sweep counted how many regions it crossed rather
+than whether any was unstable — a metric that stayed at "3" whether the
+suspected cause was present or not, which is what finally exposed it.
+
+The tell is the same in all five: **the result looks like an answer.** A green
+test, a silent probe, a zero, a clean diff. What distinguishes evidence from
+decoration is whether you can say what the *other* outcome would have looked
+like, and have seen it at least once.
 
 ### A null result is evidence only if the instrument is proven live in the same run
 **Context:** This failure mode hit four times in one session, each time in a different disguise, and each time it nearly produced a confident wrong statement.
