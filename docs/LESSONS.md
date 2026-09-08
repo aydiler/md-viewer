@@ -860,6 +860,81 @@ Belt-and-suspenders: keep `cargo publish --allow-dirty` in `scripts/publish-crat
 **Recovery for v0.1.9:** the fork crates DID publish (their working dirs were unaffected by the root Cargo.toml mutation); only md-viewer's publish failed. Manual `cargo publish` from a clean local checkout shipped 0.1.9.
 **Files:** `.github/workflows/release.yml` (build job + publish-crates job — both have the transform), `scripts/publish-crates.sh`
 
+### A missing `required-features` makes the obvious command look like a broken checkout
+
+**Context:** Issue #122 recorded that a plain `cargo test` in the renderer
+workspace fails with `cannot find macro commonmark in this scope`, and named
+that — not the extra typing — as the real cost of the two-workspace split:
+"a mistake in *how* you invoke the tests is hard to distinguish from a genuine
+failure". It cost a wrong "renderer tests run" claim once, and cost this author
+a second detour months later, working around it with the feature list out of
+`ci.yml` instead of noticing what was actually wrong.
+
+**It had nothing to do with the workspace layout.** `commonmark!` and
+`commonmark_str!` exist only under the `macros` feature, and **not one
+`[[example]]` section declared `required-features`**, so Cargo built
+`examples/macros.rs` and `examples/mixing.rs` in every configuration:
+
+```toml
+[[example]]
+name = "macros"
+required-features = ["macros"]
+```
+
+Before: 16 errors, zero tests run. After: **148 tests, all green, with no
+features at all.**
+
+**The doctest half is the non-obvious part.** The same crate had a `commonmark!`
+example in its crate-level docs as a plain fence, while the `commonmark_str!`
+example right below it was already `rust,ignore`. Doctests cannot take
+`required-features` — but **rustdoc compiles a doctest with the crate's own
+cfgs**, so the example can be gated rather than un-tested:
+
+```rust
+//! ```
+//! # #[cfg(feature = "macros")]
+//! # fn main() {
+//! use egui_commonmark_extended::{CommonMarkCache, commonmark};
+//! # }
+//! # #[cfg(not(feature = "macros"))]
+//! # fn main() {}
+//! ```
+```
+
+Marking it `ignore` to match its sibling would have been one character of work
+and would have silently dropped a check that CI currently runs. The gate keeps
+it compiled and executed wherever the macro exists.
+
+**Both directions have to be measured, or the fix is worse than the defect.**
+`required-features` could just as easily stop building the examples in the
+configuration where they *should* build — trading a loud failure for a silent
+skip:
+
+| check | result |
+|---|---|
+| with `macros`: are the example binaries actually produced? | `macros` ✓ `mixing` ✓ |
+| without: skipped cleanly, and the other seven still built? | 0 errors, `hello_world` ✓ |
+| gated doctest, body deliberately broken, **with** the feature | `FAILED. 15 passed; 1 failed` |
+| same broken body, **without** the feature | `ok. 16 passed` |
+
+The last two rows are the ones that prove the gate is a gate and not a mute
+button. Counts alone cannot: 16 doctests pass either way.
+
+**A measurement trap met on the way, worth its own line:** `cargo clippy` emits
+**nothing** on a cached build. A before/after warning count is meaningless
+unless the sources are touched first — an uncritical reading gave "0 warnings"
+for both trees and briefly looked like a clean result. Forced, both are 23.
+
+**General lesson:** when a crate has feature-gated macros, every target that
+uses them needs its gate declared — `required-features` for examples, benches
+and integration tests, a `cfg` for doc examples. Otherwise the default
+invocation fails on a target nobody asked for, in a message that names a
+missing macro rather than a missing flag, and every newcomer reads it as a
+broken repository.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/Cargo.toml`,
+`crates/egui_commonmark/egui_commonmark/src/lib.rs`, PR #185, issue #122
+
 ### `CHANGELOG.md` is hand-curated — do NOT `git-cliff -o CHANGELOG.md`
 **Context:** `.claude/rules/release-workflow.md` suggests running `git-cliff -o CHANGELOG.md` to generate changelog entries before tagging.
 **Problem:** git-cliff parses conventional commits. This repo's commit history doesn't conform (171/N commits skipped on the v0.1.8 attempt), so the generated CHANGELOG is sparse and drops entire versions (e.g. v0.1.4, v0.1.6, v0.1.7 vanished). Running `-o` overwrites the existing rich hand-written prose with the degraded version.
