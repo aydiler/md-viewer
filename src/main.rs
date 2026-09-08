@@ -1047,26 +1047,13 @@ impl Tab {
     }
 
     fn navigate_to_link(&mut self, link: &str) -> io::Result<bool> {
-        if link.starts_with('#') {
-            return Ok(false);
-        }
-
-        let Some(current_dir) = self.path.parent() else {
-            return Ok(false);
-        };
-
-        // Share one resolver with `resolve_link` (the ctrl+click path).
-        // These used to differ: #78 taught percent-decoding and `file://`
-        // handling to `resolve_local_link_path`, but this function still did a
-        // raw `join`, so a link with an encoded space opened in a new tab on
+        // Share resolution and error handling with the ctrl+click path. These
+        // used to differ: #78 taught percent-decoding and `file://` handling
+        // to `resolve_local_link_path`, but this function still did a raw
+        // `join`, so a link with an encoded space opened in a new tab on
         // ctrl+click and silently did nothing on a plain click.
-        let Some(target_path) = resolve_local_link_path(link, current_dir) else {
+        let Some(target_path) = self.resolve_link(link)? else {
             return Ok(false);
-        };
-
-        let target_path = match target_path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => return Ok(false),
         };
 
         if target_path == self.path || !target_path.is_file() {
@@ -1135,14 +1122,43 @@ impl Tab {
         Ok(true)
     }
 
-    fn resolve_link(&self, link: &str) -> Option<PathBuf> {
+    fn resolve_link(&self, link: &str) -> io::Result<Option<PathBuf>> {
         if link.starts_with('#') {
-            return None;
+            return Ok(None);
         }
 
-        let current_dir = self.path.parent()?;
-        let target_path = resolve_local_link_path(link, current_dir)?;
-        target_path.canonicalize().ok()
+        let Some(current_dir) = self.path.parent() else {
+            return Ok(None);
+        };
+        let Some(target_path) = resolve_local_link_path(link, current_dir) else {
+            return Ok(None);
+        };
+        target_path.canonicalize().map(Some)
+    }
+}
+
+/// Handle a renderer link hook without coupling path resolution to the UI.
+///
+/// Plain click navigates the current tab, while Ctrl/Cmd+click returns a path
+/// for the caller to open in a new tab. Both modes surface path-resolution
+/// errors consistently.
+fn handle_local_link_click(
+    tab: &mut Tab,
+    clicked_link: &str,
+    open_in_new_tab: bool,
+) -> (Option<PathBuf>, Option<String>) {
+    let result = if open_in_new_tab {
+        tab.resolve_link(clicked_link)
+    } else {
+        tab.navigate_to_link(clicked_link).map(|_| None)
+    };
+
+    match result {
+        Ok(target_path) => (target_path, None),
+        Err(error) => (
+            None,
+            Some(format!("Unable to open {clicked_link}: {error}")),
+        ),
     }
 }
 
@@ -3525,17 +3541,8 @@ impl MarkdownApp {
 
         // Check for clicked links
         if let Some(clicked_link) = tab.check_link_hooks() {
-            if ctrl_held {
-                // Open in new tab
-                if let Some(target_path) = tab.resolve_link(&clicked_link) {
-                    open_in_new_tab = Some(target_path);
-                }
-            } else {
-                // Navigate in current tab
-                if let Err(error) = tab.navigate_to_link(&clicked_link) {
-                    navigation_error = Some(format!("Unable to open {clicked_link}: {error}"));
-                }
-            }
+            (open_in_new_tab, navigation_error) =
+                handle_local_link_click(tab, &clicked_link, ctrl_held);
         }
 
         if let Some(error) = navigation_error {
@@ -5535,7 +5542,7 @@ mod tests {
 
         // ctrl+click path: decodes, resolves
         assert_eq!(
-            tab.resolve_link(encoded),
+            tab.resolve_link(encoded).unwrap(),
             Some(guide.canonicalize().unwrap()),
             "resolve_link should decode percent escapes"
         );
@@ -5551,7 +5558,7 @@ mod tests {
         // same divergence for file:// destinations
         let uri = format!("file://{}", guide.canonicalize().unwrap().display());
         assert_eq!(
-            tab.resolve_link(&uri),
+            tab.resolve_link(&uri).unwrap(),
             Some(guide.canonicalize().unwrap()),
             "resolve_link should accept file:// URIs"
         );
@@ -5691,6 +5698,48 @@ mod tests {
     fn nonexistent_bare_markdown_path_is_not_registered() {
         let document = std::env::temp_dir().join("md-viewer-auto-link-missing/index.md");
         assert!(parse_local_links("See missing.md for details.", &document).is_empty());
+    }
+
+    #[test]
+    fn missing_explicit_link_surfaces_errors_without_changing_tab_or_history() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-missing-link-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("index.md");
+        fs::write(&document, "[Missing](missing.md)").unwrap();
+
+        assert_eq!(
+            parse_local_links("[Missing](missing.md)", &document),
+            ["missing.md"]
+        );
+
+        let mut tab = Tab::new(document.clone()).unwrap();
+        let original_path = tab.path.clone();
+        let canonicalize_error = root.join("missing.md").canonicalize().unwrap_err();
+        let expected_error = format!("Unable to open missing.md: {canonicalize_error}");
+
+        // Ctrl+click resolves before asking the app to create a new tab. This
+        // is the same helper whose error result is assigned to the error bar.
+        let (new_tab, error_message) = handle_local_link_click(&mut tab, "missing.md", true);
+        assert!(new_tab.is_none());
+        assert_eq!(error_message, Some(expected_error.clone()));
+        assert_eq!(tab.path, original_path);
+        assert!(tab.history_back.is_empty());
+        assert!(tab.history_forward.is_empty());
+
+        // Plain click goes through the same production result handler and
+        // leaves the current tab intact.
+        let (new_tab, error_message) = handle_local_link_click(&mut tab, "missing.md", false);
+        assert!(new_tab.is_none());
+        assert_eq!(error_message, Some(expected_error));
+        assert_eq!(tab.path, original_path);
+        assert!(tab.history_back.is_empty());
+        assert!(tab.history_forward.is_empty());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
