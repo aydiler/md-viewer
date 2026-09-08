@@ -1404,7 +1404,7 @@ Every burst photographed the same settled state six times. `import -window` take
 
 The single most-violated rule in this repository, by a wide margin. Five separate
 instances in one session (2026-09-07), each in a different disguise, each of
-which nearly became a confident wrong statement. Four entries below describe
+which nearly became a confident wrong statement. Five entries below describe
 specific shapes of it; this one exists so that grepping any one term finds the
 rest.
 
@@ -1415,6 +1415,7 @@ rest.
 | a **null** result | was the instrument reporting at all, in this same run? | *A null result is evidence only if the instrument is proven live in the same run* |
 | a comparison against the **wrong baseline** | is the control current `main`, not the branch's base? | *A FAIL blames the branch only if the control is current main* |
 | a fixture in the **wrong regime** | did the condition under test actually occur? | this entry, below |
+| a mutation run that reports **only the first target** | did the run reach the binary holding the test you care about? | *A test runner that stops at the first failing target reports nothing about the targets it never ran* |
 
 **The fifth shape has no entry of its own, so it is recorded here.** A fixture can
 sit outside the region it is meant to probe and still produce a clean-looking
@@ -1429,6 +1430,55 @@ The tell is the same in all five: **the result looks like an answer.** A green
 test, a silent probe, a zero, a clean diff. What distinguishes evidence from
 decoration is whether you can say what the *other* outcome would have looked
 like, and have seen it at least once.
+
+### A test runner that stops at the first failing target reports nothing about the targets it never ran
+
+**Context:** Reviewing PR #182 (Phase 2 dense-table overflow). The contributor had
+been asked to confirm the new guards fail with the cap set to 25 % or with early
+exit enabled, so the review mutated the production code three ways and recorded
+which tests noticed.
+
+**The matrix looked complete and was missing its most important cell.** Each
+mutation run printed exactly one `test result:` line, where the unmutated
+baseline printed four. `cargo test` is fail-fast **at the target level**: once
+the lib binary fails, the remaining test binaries are never built or run. So
+three runs said a great deal about the unit tests in `src/` and *nothing at all*
+about the two fixtures in `tests/wrapping.rs` — which were the ones whose regime
+was actually in question, because a fixture outside the dense case would pass for
+a reason unrelated to the change (the `#157` trap, one entry above).
+
+Running the integration target explicitly is what answered it:
+
+```bash
+cargo test ... -p egui_commonmark_extended --features "$F" --test wrapping
+```
+
+| mutation | lib | `--test wrapping` |
+|---|---|---|
+| cap 0.30 → 0.25 | 3 red | 1 red |
+| early exit at first non-improvement | 3 red | **green** |
+| Phase 2 never engaged | 4 red | **2 red — both `dense_*` fixtures** |
+
+The last row is the evidence that mattered, and no amount of reading the first
+column would have produced it. The middle row is worth noting too: a mutation
+can be caught by the unit tests and be invisible to the integration tests, so
+"green" there is information rather than a gap.
+
+**Rule:** a mutation matrix must name the *target* each cell was measured on. Run
+each test binary separately (`--lib`, then each `--test <name>`), or pass
+`--no-fail-fast`; a single aggregate run reports the first failing binary and
+stops. The same applies to reading a CI log: one red job hides whatever ran
+after it in the same step.
+
+**Second trap, in the failure detector itself.** The first pass classified all
+three mutation runs as `!! BUILD FEHLER — result worthless`, because the detector
+matched `^error` and cargo announces a *test* failure as
+`error: test failed, to rerun pass \`-p … --lib\``. Three correct red runs were
+thrown away and repeated. Match `error[E` or `could not compile` for a real build
+failure; a bare `^error:` cannot tell "the thing I wanted to observe" from "the
+instrument broke", which is the one distinction the detector exists to make.
+
+**Files:** N/A (verification discipline), PR #182
 
 ### A null result is evidence only if the instrument is proven live in the same run
 **Context:** This failure mode hit four times in one session, each time in a different disguise, and each time it nearly produced a confident wrong statement.
