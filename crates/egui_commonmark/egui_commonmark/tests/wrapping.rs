@@ -203,6 +203,41 @@ fn html_table_uses_height_aware_column_widths() {
     );
 }
 
+#[test]
+fn dense_markdown_table_uses_bounded_scrollable_width_for_wrapping() {
+    let markdown = concat!(
+        "| Identifier | Owner | Status | Required | Description |\n",
+        "|---|---|---|---|---|\n",
+        "| A | me | ready | yes | DENSE_MARKDOWN a long explanation that should use bounded horizontal overflow instead of becoming an unnecessarily tall narrow column |",
+    );
+    let (body, _, painted) = render_geometry(markdown, 300.0);
+    let description = painted
+        .iter()
+        .find(|entry| entry.text.contains("DENSE_MARKDOWN"))
+        .unwrap();
+
+    assert!(description.rect.width() > 150.0, "{description:?}");
+    assert!(description.rows <= 6, "{description:?}");
+    assert!(body.height() < 180.0, "{body:?}");
+}
+
+#[test]
+fn dense_html_table_uses_bounded_scrollable_width_for_wrapping() {
+    let markdown = concat!(
+        "<table><tr><th>Identifier</th><th>Owner</th><th>Status</th><th>Required</th><th>Description</th></tr>",
+        "<tr><td>A</td><td>me</td><td>ready</td><td>yes</td><td>DENSE_HTML a long explanation that should use bounded horizontal overflow instead of becoming an unnecessarily tall narrow column</td></tr></table>",
+    );
+    let (body, _, painted) = render_geometry(markdown, 300.0);
+    let description = painted
+        .iter()
+        .find(|entry| entry.text.contains("DENSE_HTML"))
+        .unwrap();
+
+    assert!(description.rect.width() > 110.0, "{description:?}");
+    assert!(description.rows <= 7, "{description:?}");
+    assert!(body.height() < 215.0, "{body:?}");
+}
+
 fn render(markdown: &str, width: f32) -> (Rect, f32) {
     let (body_rect, row_height, _) = render_geometry(markdown, width);
     (body_rect, row_height)
