@@ -47,11 +47,20 @@
 //! ## Example
 //!
 //! ```
+//! # // The macro only exists with the `macros` feature. rustdoc compiles a
+//! # // doctest with the crate's own cfgs, so gating keeps this compiled and run
+//! # // when the feature is on and trivially empty when it is off — rather than
+//! # // failing a plain `cargo test` with `cannot find macro` (issue #122).
+//! # #[cfg(feature = "macros")]
+//! # fn main() {
 //! use egui_commonmark_extended::{CommonMarkCache, commonmark};
 //! # egui::__run_test_ui(|ui| {
 //! let mut cache = CommonMarkCache::default();
 //! let _response = commonmark!(ui, &mut cache, "# ATX Heading Level 1");
 //! # });
+//! # }
+//! # #[cfg(not(feature = "macros"))]
+//! # fn main() {}
 //! ```
 //!
 //! Alternatively you can embed a file

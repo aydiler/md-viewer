@@ -96,3 +96,15 @@ egui_commonmark_macros_extended = { workspace = true } # Tests won't build other
 
 [package.metadata.docs.rs]
 features = ["better_syntax_highlighting", "document-features", "macros"]
+
+# `commonmark!` / `commonmark_str!` only exist with the `macros` feature. Without
+# these declarations Cargo builds both examples unconditionally and a plain
+# `cargo test` fails with 16 `cannot find macro` errors, which reads like a
+# broken checkout rather than a missing feature flag (see issue #122).
+[[example]]
+name = "macros"
+required-features = ["macros"]
+
+[[example]]
+name = "mixing"
+required-features = ["macros"]
