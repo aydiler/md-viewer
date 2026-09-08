@@ -2,6 +2,23 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.2.1] - 2026-09-08
+
+A short follow-up to 0.2.0: one link-handling feature, one silent failure made visible, and the viewport slicer's range selection made permanently observable.
+
+### Features
+
+- **Copy a link's address from its context menu (#169, PR #175).** A link's URL could not be obtained without following it, and following it hands the URL to `open_url` — on the reporter's desktop that opens a browser instance without their login session, which makes the link useless for a site they are authenticated to. Hover showed the URL but offered no way to take it, and the label is `.selectable(false)`, so Ctrl+C had nothing to act on either. Right-click now offers **Copy Link Address** on both link kinds, copying the destination as the document spells it: for an external link that is the URL, and for one this viewer resolves itself the source spelling is the honest answer, because the resolved path depends on which document is open and would mean nothing pasted elsewhere. Ctrl+C is deliberately not included — it needs "the link under the pointer" as tracked state plus a document-level key handler that does not steal Ctrl+C from text selection. Verified end to end on Xvfb by reading the X CLIPBOARD selection before and after; there is no automated test, because the crate's harness inspects painted shapes and drives no input, so an opening context menu is out of its reach.
+
+### Bug Fixes
+
+- **A missing link target is reported instead of ignored (part of #141, PR #181, contributed by [@RichardCao](https://github.com/RichardCao)).** Clicking a Markdown link whose file does not exist did nothing at all: the shared resolver turned the canonicalization failure into a silent no-op. It now returns the error, and plain click and Ctrl/Cmd+click both route through one result handler that feeds the existing error bar — `Unable to open missing.md: No such file or directory (os error 2)`. The current document, tab set and navigation history are left untouched. Bare-filename discovery stays existence-gated, so only an explicit Markdown link can report a broken target.
+
+### Internal
+
+- **The viewport slicer reports how it chose its event range (#140, PR #176).** `MDV_DIAG_SLICE` reports where a slice is *placed*, which on #167 correctly excluded the placement hypothesis and could say nothing about what was actually wrong — the cause was in how the event *range* had been chosen, where the `partition_point` that bounds the range from above had collapsed to 1, so the range ended at event 11 of 63. `MDV_DIAG_SPLIT` now prints both `partition_point` results and the viewport against `page_size.y`, marks an offset past the extent, and dumps the split-point table only when the selection is degenerate. It reports on every frame, so silence from it is evidence rather than an absence of it.
+- **The vendored renderer is at 0.28.1 (PR #180).** 0.28.0 published with the v0.2.0 release, so the fork's workspace version was bumped for the changes that have landed since.
+
 ## [0.2.0] - 2026-09-07
 
 The largest release so far: 74 merged pull requests, 38 of them from [@RichardCao](https://github.com/RichardCao) — just over half of the release — plus the colour customization from [@Pat9496](https://github.com/Pat9496). Viewport-clipped rendering is back on for long documents, tables were rebuilt around content-driven column widths, and font fallback now asks the platform instead of guessing family names.
