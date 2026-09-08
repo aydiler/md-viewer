@@ -5485,6 +5485,124 @@ mod tests {
         assert_eq!(matches[0].byte_end, 11);
     }
 
+    /// Characterization table for issue #141, which asks for exactly this
+    /// before any path handling is consolidated: one place that says what a
+    /// Markdown destination resolves to today.
+    ///
+    /// Both functions are pure, so no fixture on disk is needed and the rows
+    /// stay readable. Rows marked `#141-N` pin behavior that contradicts the
+    /// semantics that issue proposes under its point N — recorded as the
+    /// current baseline, not blessed as correct, so a later decision shows up
+    /// as a failing row here rather than as an invisible change.
+    #[test]
+    #[cfg(unix)]
+    fn local_destination_resolution_is_characterized_for_every_uri_shape() {
+        let dir = Path::new("/base/doc");
+        // (destination, is_local_markdown_link, resolve_local_link_path)
+        let table: &[(&str, bool, Option<&str>)] = &[
+            // 1. relative destinations resolve against the containing document
+            ("guide.md", true, Some("/base/doc/guide.md")),
+            ("sub/guide.md", true, Some("/base/doc/sub/guide.md")),
+            ("../up.md", true, Some("/base/doc/../up.md")),
+            // 2. a fragment selects the document only; the anchor is dropped
+            ("guide.md#section", true, Some("/base/doc/guide.md")),
+            // #141-2: a query string is not part of the contract. The gate
+            // rejects it (the extension reads as `md?v=2`) while the resolver
+            // keeps it in the file name, so the two disagree.
+            ("guide.md?v=2", false, Some("/base/doc/guide.md?v=2")),
+            ("guide.md?v=2#s", false, Some("/base/doc/guide.md?v=2")),
+            // 3. percent escapes are decoded exactly once
+            ("a%20b.md", true, Some("/base/doc/a b.md")),
+            ("100%25.md", true, Some("/base/doc/100%.md")),
+            ("bad%zz.md", true, Some("/base/doc/bad%zz.md")),
+            // #141-5: a destination that decodes to non-UTF-8 is classified as
+            // a local Markdown link but resolves to nothing, so the click is a
+            // silent no-op — the case #181 fixed for missing files.
+            ("bad%FF.md", true, None),
+            // 4. platform paths
+            ("/abs/guide.md", true, Some("/abs/guide.md")),
+            ("file:///tmp/guide.md", true, Some("/tmp/guide.md")),
+            ("file://localhost/tmp/guide.md", true, Some("/tmp/guide.md")),
+            // a non-local authority is not a path this viewer can open
+            ("file://server/share/guide.md", false, None),
+            // 3. an unencoded `#` delimits a fragment, `%23` is a literal
+            // character in the name — and a relative destination and a file://
+            // URI agree on both, which RFC 3986 requires. Checked rather than
+            // assumed: an earlier reading of this code claimed the two
+            // disagreed here, and they do not.
+            ("a%23b.md", true, Some("/base/doc/a#b.md")),
+            ("file:///base/doc/a%23b.md", true, Some("/base/doc/a#b.md")),
+            // #141-2: with an unencoded `#` the gate reads the extension of
+            // the truncated name and rejects it, while the resolver hands back
+            // an extensionless path — a fourth shape where the two disagree.
+            ("a#b.md", false, Some("/base/doc/a")),
+            // a Windows drive letter reads as a URI scheme off Windows, where
+            // the path could not be opened anyway
+            ("C:/tmp/guide.md", false, None),
+            // 8. other schemes stay external and are never reinterpreted
+            ("https://example.com/guide.md", false, None),
+            ("http://example.com/guide.md", false, None),
+            ("data:text/plain,x", false, None),
+            ("mailto:a@b.c", false, None),
+            ("weird+scheme:guide.md", false, None),
+            // #141-8: a protocol-relative URL has no scheme, so it is treated
+            // as an absolute filesystem path and even classified as local.
+            ("//evil.com/guide.md", true, Some("//evil.com/guide.md")),
+            // #141: the resolver answers with the directory itself for a
+            // fragment-only or empty destination. Only `Tab::resolve_link`'s
+            // leading-`#` guard keeps that unreachable in practice.
+            ("#section", false, Some("/base/doc/")),
+            ("", false, Some("/base/doc/")),
+        ];
+
+        for (destination, expect_local, expect_resolved) in table {
+            assert_eq!(
+                is_local_markdown_link(destination),
+                *expect_local,
+                "is_local_markdown_link({destination:?})"
+            );
+            let resolved = resolve_local_link_path(destination, dir);
+            assert_eq!(
+                resolved.as_ref().map(|path| path.display().to_string()),
+                expect_resolved.map(str::to_owned),
+                "resolve_local_link_path({destination:?})"
+            );
+        }
+    }
+
+    /// The gate and the resolver decide the same question, and they disagree
+    /// on four destination shapes. Pinned separately from the table because
+    /// the disagreement — not either value on its own — is what #141 has to
+    /// resolve. `is_local_markdown_link` gates which destinations become
+    /// clickable at all, so a shape it rejects and the resolver accepts can
+    /// only be reached by a caller that skips the gate, and a shape it accepts
+    /// and the resolver rejects renders as internal and does nothing on click.
+    #[test]
+    #[cfg(unix)]
+    fn the_link_gate_and_the_path_resolver_disagree_on_four_shapes() {
+        let dir = Path::new("/base/doc");
+        for (destination, note) in [
+            (
+                "guide.md?v=2",
+                "gate says external, resolver produces a path",
+            ),
+            ("bad%FF.md", "gate says local, resolver produces nothing"),
+            ("", "gate says external, resolver produces the directory"),
+            (
+                "a#b.md",
+                "gate says external, resolver produces an extensionless path",
+            ),
+        ] {
+            let gate = is_local_markdown_link(destination);
+            let resolved = resolve_local_link_path(destination, dir).is_some();
+            assert_ne!(
+                gate, resolved,
+                "{destination:?} no longer disagrees ({note}); \
+                 if #141 fixed this on purpose, drop the row"
+            );
+        }
+    }
+
     #[test]
     fn shared_resolver_keeps_absolute_paths_and_literal_percent_names() {
         let root = std::env::temp_dir().join(format!(
