@@ -791,10 +791,28 @@ fn optimize_fitted_widths(
     row_count: usize,
     mut measure_column: impl FnMut(usize, f32) -> Vec<f32>,
 ) -> Vec<f32> {
+    let mut measurements = HashMap::new();
+    optimize_fitted_widths_with_cache(
+        baseline,
+        desired,
+        minimums,
+        row_count,
+        &mut measurements,
+        &mut measure_column,
+    )
+}
+
+fn optimize_fitted_widths_with_cache(
+    baseline: &[f32],
+    desired: &[f32],
+    minimums: &[f32],
+    row_count: usize,
+    measurements: &mut HashMap<(usize, u32), Vec<f32>>,
+    measure_column: &mut impl FnMut(usize, f32) -> Vec<f32>,
+) -> Vec<f32> {
     const WIDTH_STEP: f32 = 8.0;
     const MAX_PASSES: usize = 8;
     const MAX_PAIR_STEPS: usize = 8;
-    const MAX_MEASURED_CELLS: usize = 4_096;
 
     if baseline.len() < 2
         || baseline.len() != desired.len()
@@ -817,17 +835,19 @@ fn optimize_fitted_widths(
     }
 
     let mut widths = baseline.to_vec();
-    let mut measurements = HashMap::new();
-    let measurement_limit = MAX_MEASURED_CELLS / row_count;
-    if measurement_limit < baseline.len() {
+    let measurement_budget = MAX_TABLE_MEASURED_CELLS / row_count;
+    if measurement_budget < baseline.len() {
         return baseline.to_vec();
     }
+    // Phase 2 reuses measurements shared with earlier width candidates, but
+    // every candidate receives the same bounded allowance for new layouts.
+    let measurement_limit = measurements.len().saturating_add(measurement_budget);
     let mut score = table_height_score(
         &widths,
         row_count,
-        &mut measurements,
+        measurements,
         measurement_limit,
-        &mut measure_column,
+        measure_column,
     )
     .expect("the baseline fits the checked measurement budget");
     let mut best_widths = widths.clone();
@@ -837,7 +857,7 @@ fn optimize_fitted_widths(
         // Widening a column that is below every current row maximum cannot
         // reduce table height. Recompute after each accepted move so a column
         // that becomes the new maximum remains eligible on the next pass.
-        let relevant_receivers = columns_at_row_max(&widths, row_count, &measurements);
+        let relevant_receivers = columns_at_row_max(&widths, row_count, measurements);
         let mut best: Option<(TableHeightScore, usize, usize, f32)> = None;
         for donor in 0..widths.len() {
             let donor_room = widths[donor] - minimums[donor];
@@ -868,9 +888,9 @@ fn optimize_fitted_widths(
                     let Some(candidate) = table_height_score(
                         &candidate_widths,
                         row_count,
-                        &mut measurements,
+                        measurements,
                         measurement_limit,
-                        &mut measure_column,
+                        measure_column,
                     ) else {
                         return best_widths;
                     };
@@ -915,11 +935,122 @@ fn optimize_fitted_widths(
     best_widths
 }
 
+const TABLE_OVERFLOW_STEP: f32 = 32.0;
+const TABLE_OVERFLOW_MAX: f32 = 160.0;
+const TABLE_OVERFLOW_FRACTION: f32 = 0.30;
+const TABLE_OVERFLOW_KNEE: f32 = 0.90;
+const MAX_TABLE_MEASURED_CELLS: usize = 4_096;
+
+fn table_floors_overflow(minimum_total: f32, visible_column_budget: f32) -> bool {
+    minimum_total > visible_column_budget + 0.01
+}
+
+fn overflow_candidates(minimum_total: f32, desired_total: f32) -> Vec<f32> {
+    let cap = TABLE_OVERFLOW_MAX
+        .min(TABLE_OVERFLOW_FRACTION * minimum_total)
+        .min((desired_total - minimum_total).max(0.0));
+    let mut candidates = vec![0.0];
+    let mut added = TABLE_OVERFLOW_STEP;
+    while added < cap - 0.01 {
+        candidates.push(added);
+        added += TABLE_OVERFLOW_STEP;
+    }
+    if cap > 0.01 {
+        candidates.push(cap);
+    }
+    candidates
+}
+
+fn select_overflow_knee(
+    candidates: &[(f32, Vec<f32>, TableHeightScore)],
+) -> Option<&(f32, Vec<f32>, TableHeightScore)> {
+    let baseline = candidates.first()?;
+    let best = candidates.iter().min_by(|left, right| {
+        left.2
+            .row_max_total
+            .total_cmp(&right.2.row_max_total)
+            .then_with(|| left.2.cell_total.total_cmp(&right.2.cell_total))
+            .then_with(|| left.0.total_cmp(&right.0))
+    })?;
+    if !reduces_table_height(best.2, baseline.2) {
+        return Some(baseline);
+    }
+    let target = baseline.2.row_max_total
+        - TABLE_OVERFLOW_KNEE * (baseline.2.row_max_total - best.2.row_max_total);
+    candidates
+        .iter()
+        .find(|candidate| candidate.2.row_max_total <= target + 0.25)
+        .or(Some(best))
+}
+
+/// When header-word floors already overflow the visible column budget, score
+/// a small bounded set of wider layouts and select the first one at the 90%
+/// row-height knee. The viewport itself remains unchanged and scrollable.
+fn optimize_table_widths(
+    baseline: &[f32],
+    desired: &[f32],
+    minimums: &[f32],
+    visible_column_budget: f32,
+    row_count: usize,
+    mut measure_column: impl FnMut(usize, f32) -> Vec<f32>,
+) -> Vec<f32> {
+    let minimum_total = minimums.iter().map(|width| width.max(40.0)).sum::<f32>();
+    let desired_total = desired
+        .iter()
+        .zip(minimums)
+        .map(|(wanted, minimum)| wanted.max(*minimum).max(40.0))
+        .sum::<f32>();
+    if !table_floors_overflow(minimum_total, visible_column_budget) || row_count == 0 {
+        return optimize_fitted_widths(
+            baseline,
+            desired,
+            minimums,
+            row_count,
+            measure_column,
+        );
+    }
+
+    let mut measurements = HashMap::new();
+    let mut scored = Vec::new();
+    for added in overflow_candidates(minimum_total, desired_total) {
+        let fitted = fit_column_widths(desired, minimum_total + added, minimums);
+        let widths = optimize_fitted_widths_with_cache(
+            &fitted,
+            desired,
+            minimums,
+            row_count,
+            &mut measurements,
+            &mut measure_column,
+        );
+        let measurement_limit = measurements
+            .len()
+            .saturating_add(MAX_TABLE_MEASURED_CELLS / row_count);
+        let Some(score) = table_height_score(
+            &widths,
+            row_count,
+            &mut measurements,
+            measurement_limit,
+            &mut measure_column,
+        ) else {
+            // This can only fail when one complete score exceeds the fixed
+            // per-candidate budget, a table-wide condition that is identical
+            // for every candidate. It therefore fails on candidate zero (or
+            // never) and is a fail-closed guard, not a curve-based early exit.
+            break;
+        };
+        scored.push((added, widths, score));
+    }
+
+    select_overflow_knee(&scored)
+        .map(|candidate| candidate.1.clone())
+        .unwrap_or_else(|| baseline.to_vec())
+}
+
 fn table_layout_key(
     ui: &Ui,
     desired: &[f32],
     minimums: &[f32],
-    table_bound: f32,
+    visible_column_budget: f32,
     line_height: f32,
     content_digest: u64,
     layout_revision: u64,
@@ -933,7 +1064,22 @@ fn table_layout_key(
     for width in minimums {
         width.to_bits().hash(&mut hasher);
     }
-    table_bound.round().to_bits().hash(&mut hasher);
+    let minimum_total = minimums.iter().map(|width| width.max(40.0)).sum::<f32>();
+    let dense = table_floors_overflow(minimum_total, visible_column_budget);
+    // Once header floors already overflow the viewport, Phase 2 candidates do
+    // not depend on the exact narrower viewport width. Reuse their expensive
+    // measurements while the divider moves within that dense range. Hash the
+    // branch decision separately so rounding cannot alias the two sides of
+    // the dense/fitting boundary.
+    dense.hash(&mut hasher);
+    (if dense {
+        minimum_total
+    } else {
+        visible_column_budget
+    })
+        .round()
+        .to_bits()
+        .hash(&mut hasher);
     line_height.to_bits().hash(&mut hasher);
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let monospace_font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -955,6 +1101,7 @@ fn cached_height_aware_widths(
     baseline: &[f32],
     desired: &[f32],
     minimums: &[f32],
+    visible_column_budget: f32,
     row_count: usize,
     measure_column: impl FnMut(usize, f32) -> Vec<f32>,
 ) -> (Vec<f32>, bool) {
@@ -967,10 +1114,11 @@ fn cached_height_aware_widths(
     }
     let had_previous_layout = previous.is_some();
 
-    let widths = optimize_fitted_widths(
+    let widths = optimize_table_widths(
         baseline,
         desired,
         minimums,
+        visible_column_budget,
         row_count,
         measure_column,
     );
@@ -996,13 +1144,13 @@ fn framed_table_widths(
     desired: &[f32],
     minimums: &[f32],
     table_bound: f32,
-) -> (egui::Frame, Vec<f32>) {
+) -> (egui::Frame, Vec<f32>, f32) {
     let frame = egui::Frame::group(ui.style());
     let column_space = ui.spacing().item_spacing.x * desired.len().saturating_sub(1) as f32;
     let frame_width = frame.total_margin().sum().x;
     let column_budget = (table_bound - frame_width - column_space).max(0.0);
     let widths = fit_column_widths(desired, column_budget, minimums);
-    (frame, widths)
+    (frame, widths, column_budget)
 }
 
 /// Remember the width contract used to initialize a resizable table.
@@ -2194,13 +2342,13 @@ impl CommonMarkViewerInternal {
                         .fold(40.0, f32::max)
                 })
                 .collect();
-            let (table_frame, baseline_widths) =
+            let (table_frame, baseline_widths, visible_column_budget) =
                 framed_table_widths(ui, &desired_widths, &minimum_widths, table_bound);
             let layout_key = table_layout_key(
                 ui,
                 &desired_widths,
                 &minimum_widths,
-                table_bound,
+                visible_column_budget,
                 line_h,
                 markdown_table_digest(&table_rows),
                 cache.layout_revision(),
@@ -2213,6 +2361,7 @@ impl CommonMarkViewerInternal {
                 &baseline_widths,
                 &desired_widths,
                 &minimum_widths,
+                visible_column_budget,
                 table_rows.len(),
                 |column, width| {
                     table_rows
@@ -3149,13 +3298,13 @@ impl CommonMarkViewerInternal {
                     .fold(40.0, f32::max)
             })
             .collect();
-        let (table_frame, baseline_widths) =
+        let (table_frame, baseline_widths, visible_column_budget) =
             framed_table_widths(ui, &desired_widths, &minimum_widths, table_bound);
         let layout_key = table_layout_key(
             ui,
             &desired_widths,
             &minimum_widths,
-            table_bound,
+            visible_column_budget,
             line_h,
             html_table_digest(&table_rows),
             0,
@@ -3168,6 +3317,7 @@ impl CommonMarkViewerInternal {
             &baseline_widths,
             &desired_widths,
             &minimum_widths,
+            visible_column_budget,
             table_rows.len(),
             |column, width| {
                 table_rows
@@ -3621,7 +3771,7 @@ mod tests {
         egui::__run_test_ui(|ui| {
             let table_bound = 360.0;
             let desired = [400.0, 500.0, 600.0];
-            let (frame, widths) =
+            let (frame, widths, column_budget) =
                 framed_table_widths(ui, &desired, &[40.0; 3], table_bound);
             let column_space =
                 ui.spacing().item_spacing.x * desired.len().saturating_sub(1) as f32;
@@ -3629,6 +3779,7 @@ mod tests {
                 widths.iter().sum::<f32>() + column_space + frame.total_margin().sum().x;
 
             assert!((visible_width - table_bound).abs() < 0.01);
+            assert!((widths.iter().sum::<f32>() - column_budget).abs() < 0.01);
         });
     }
 
@@ -3927,6 +4078,184 @@ mod tests {
     }
 
     #[test]
+    fn dense_table_overflow_candidates_obey_all_caps() {
+        assert_eq!(overflow_candidates(600.0, 1_000.0), [0.0, 32.0, 64.0, 96.0, 128.0, 160.0]);
+        let proportional = overflow_candidates(200.0, 1_000.0);
+        assert_eq!(&proportional[..2], &[0.0, 32.0]);
+        assert!((proportional[2] - 60.0).abs() < 0.01);
+        assert_eq!(overflow_candidates(600.0, 645.0), [0.0, 32.0, 45.0]);
+    }
+
+    #[test]
+    fn dense_table_reproduces_a_bounded_overflow_knee() {
+        let minimums = [46.0; 13];
+        let mut desired = minimums;
+        desired[12] = 400.0;
+        let baseline = minimums;
+        let widths = optimize_table_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            500.0,
+            1,
+            |column, width| {
+                vec![if column == 12 && width >= 205.0 {
+                    20.0
+                } else if column == 12 {
+                    100.0
+                } else {
+                    20.0
+                }]
+            },
+        );
+
+        assert!((widths.iter().sum::<f32>() - (minimums.iter().sum::<f32>() + 160.0)).abs() < 0.1);
+        assert!(widths[12] >= 205.0);
+    }
+
+    #[test]
+    fn dense_table_selects_the_smallest_candidate_at_the_ninety_percent_knee() {
+        let candidate = |added, row_max_total, cell_total| {
+            (
+                added,
+                vec![added],
+                TableHeightScore {
+                    row_max_total,
+                    cell_total,
+                },
+            )
+        };
+        let candidates = [
+            candidate(0.0, 100.0, 200.0),
+            candidate(32.0, 80.0, 180.0),
+            candidate(64.0, 18.0, 160.0),
+            candidate(96.0, 10.0, 140.0),
+        ];
+
+        assert_eq!(select_overflow_knee(&candidates).unwrap().0, 64.0);
+    }
+
+    #[test]
+    fn dense_table_scores_every_candidate_through_a_dip_and_recovery() {
+        // This intentionally adversarial scorer encodes the selector contract,
+        // not a single cell's monotonic wrapping curve. Production totals can
+        // likewise regress when bounded Phase 1 reallocates multiple columns.
+        let minimums = [46.0; 13];
+        let mut desired = minimums;
+        desired[12] = 400.0;
+        let mut measured_receiver_widths = Vec::new();
+        let widths = optimize_table_widths(
+            &minimums,
+            &desired,
+            &minimums,
+            500.0,
+            1,
+            |column, width| {
+                if column != 12 {
+                    return vec![20.0];
+                }
+                measured_receiver_widths.push(width);
+                let added = width - 46.0;
+                let height = if added >= 159.0 {
+                    20.0
+                } else if added >= 127.0 {
+                    60.0
+                } else if added >= 95.0 {
+                    40.0
+                } else if added >= 63.0 {
+                    90.0
+                } else if added >= 31.0 {
+                    80.0
+                } else {
+                    100.0
+                };
+                vec![height]
+            },
+        );
+
+        for expected in [46.0, 78.0, 110.0, 142.0, 174.0, 206.0] {
+            assert!(
+                measured_receiver_widths
+                    .iter()
+                    .any(|width| (*width - expected).abs() < 0.1),
+                "candidate {expected} was not scored: {measured_receiver_widths:?}"
+            );
+        }
+        assert!((widths.iter().sum::<f32>() - (minimums.iter().sum::<f32>() + 160.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn dense_overflow_only_engages_below_the_header_floor_total() {
+        let minimums = [100.0, 100.0];
+        let desired = [100.0, 400.0];
+        let baseline = minimums;
+        let measure = |column: usize, width: f32| {
+            vec![if column == 0 || (column == 1 && width >= 150.0) {
+                20.0
+            } else {
+                100.0
+            }]
+        };
+
+        let fitting = optimize_table_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            200.0,
+            1,
+            measure,
+        );
+        let dense = optimize_table_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            199.0,
+            1,
+            measure,
+        );
+
+        assert_eq!(fitting, baseline);
+        assert!(dense.iter().sum::<f32>() > 200.0);
+    }
+
+    #[test]
+    fn dense_overflow_keeps_floors_when_extra_width_does_not_reduce_rows() {
+        let minimums = [80.0, 120.0];
+        let desired = [300.0, 400.0];
+        let widths = optimize_table_widths(
+            &minimums,
+            &desired,
+            &minimums,
+            180.0,
+            2,
+            |_, _| vec![20.0; 2],
+        );
+
+        assert_eq!(widths, minimums);
+    }
+
+    #[test]
+    fn dense_overflow_fails_closed_when_a_full_score_exceeds_the_budget() {
+        let minimums = [100.0; 5];
+        let desired = [300.0; 5];
+        let measured_cells = std::cell::Cell::new(0);
+        let widths = optimize_table_widths(
+            &minimums,
+            &desired,
+            &minimums,
+            400.0,
+            1_000,
+            |_, _| {
+                measured_cells.set(measured_cells.get() + 1_000);
+                vec![20.0; 1_000]
+            },
+        );
+
+        assert_eq!(widths, minimums);
+        assert!(measured_cells.get() <= 4_096);
+    }
+
+    #[test]
     fn height_aware_columns_keep_baseline_without_a_row_height_reduction() {
         let baseline = [100.0, 100.0];
         let desired = [200.0, 200.0];
@@ -3988,15 +4317,15 @@ mod tests {
             };
 
             let (_, first_changed) = cached_height_aware_widths(
-                ui, id, 1, &baseline, &desired, &minimums, 1, measure,
+                ui, id, 1, &baseline, &desired, &minimums, 200.0, 1, measure,
             );
             let after_first = measurements.get();
             let (_, stable_changed) = cached_height_aware_widths(
-                ui, id, 1, &baseline, &desired, &minimums, 1, measure,
+                ui, id, 1, &baseline, &desired, &minimums, 200.0, 1, measure,
             );
             let after_stable = measurements.get();
             let (_, new_key_changed) = cached_height_aware_widths(
-                ui, id, 2, &baseline, &desired, &minimums, 1, measure,
+                ui, id, 2, &baseline, &desired, &minimums, 200.0, 1, measure,
             );
 
             assert!(!first_changed);
@@ -4009,24 +4338,129 @@ mod tests {
     }
 
     #[test]
+    fn dense_overflow_cache_does_not_remeasure_a_stable_layout() {
+        egui::__run_test_ui(|ui| {
+            let id = egui::Id::new("dense-overflow-cache");
+            let minimums = [100.0, 100.0];
+            let desired = [200.0, 400.0];
+            let measurements = std::cell::Cell::new(0);
+            let measure = |column: usize, width: f32| {
+                measurements.set(measurements.get() + 1);
+                vec![if column == 0 || (column == 1 && width >= 150.0) {
+                    20.0
+                } else {
+                    100.0
+                }]
+            };
+            let narrow_key =
+                table_layout_key(ui, &desired, &minimums, 199.6, 20.0, 7, 0, 1.0);
+            let narrower_key =
+                table_layout_key(ui, &desired, &minimums, 160.0, 20.0, 7, 0, 1.0);
+            let fitting_key =
+                table_layout_key(ui, &desired, &minimums, 200.4, 20.0, 7, 0, 1.0);
+            let fitting_baseline = fit_column_widths(&desired, 200.4, &minimums);
+
+            let (dense_widths, _) = cached_height_aware_widths(
+                ui,
+                id,
+                narrow_key,
+                &minimums,
+                &desired,
+                &minimums,
+                199.6,
+                1,
+                measure,
+            );
+            let after_first = measurements.get();
+            let _ = cached_height_aware_widths(
+                ui,
+                id,
+                narrower_key,
+                &minimums,
+                &desired,
+                &minimums,
+                160.0,
+                1,
+                measure,
+            );
+            let after_dense_resize = measurements.get();
+            let (fitting_widths, _) = cached_height_aware_widths(
+                ui,
+                id,
+                fitting_key,
+                &fitting_baseline,
+                &desired,
+                &minimums,
+                200.4,
+                1,
+                measure,
+            );
+
+            assert!(after_first > 0);
+            assert_eq!(after_dense_resize, after_first);
+            assert!(measurements.get() > after_dense_resize);
+            assert!(dense_widths.iter().sum::<f32>() > 200.4);
+            assert!((fitting_widths.iter().sum::<f32>() - 200.4).abs() < 0.01);
+        });
+    }
+
+    #[test]
     fn table_layout_key_tracks_measurement_inputs() {
         egui::__run_test_ui(|ui| {
             let desired = [100.0, 200.0];
             let minimums = [40.0, 60.0];
-            let key = table_layout_key(ui, &desired, &minimums, 300.0, 20.0, 7, 0, 1.0);
+            let key = table_layout_key(ui, &desired, &minimums, 280.0, 20.0, 7, 0, 1.0);
 
             assert_ne!(
                 key,
-                table_layout_key(ui, &desired, &[40.0, 61.0], 300.0, 20.0, 7, 0, 1.0)
+                table_layout_key(
+                    ui,
+                    &desired,
+                    &[40.0, 61.0],
+                    280.0,
+                    20.0,
+                    7,
+                    0,
+                    1.0,
+                )
             );
             assert_ne!(
                 key,
-                table_layout_key(ui, &desired, &minimums, 300.0, 20.0, 7, 1, 1.0)
+                table_layout_key(ui, &desired, &minimums, 280.0, 20.0, 7, 1, 1.0)
             );
             assert_ne!(
                 key,
-                table_layout_key(ui, &desired, &minimums, 300.0, 20.0, 7, 0, 1.25)
+                table_layout_key(ui, &desired, &minimums, 280.0, 20.0, 7, 0, 1.25)
             );
+            assert_ne!(
+                key,
+                table_layout_key(ui, &desired, &minimums, 279.0, 20.0, 7, 0, 1.0)
+            );
+            let dense_key =
+                table_layout_key(ui, &desired, &minimums, 80.0, 20.0, 7, 0, 1.0);
+            assert_eq!(
+                dense_key,
+                table_layout_key(ui, &desired, &minimums, 90.0, 20.0, 7, 0, 1.0)
+            );
+            assert_ne!(
+                dense_key,
+                table_layout_key(ui, &desired, &minimums, 101.0, 20.0, 7, 0, 1.0)
+            );
+        });
+    }
+
+    #[test]
+    fn table_layout_key_separates_rounded_dense_and_fitting_budgets() {
+        egui::__run_test_ui(|ui| {
+            let desired = [200.0, 400.0];
+            let minimums = [100.0, 100.0];
+
+            let dense_key =
+                table_layout_key(ui, &desired, &minimums, 199.6, 20.0, 7, 0, 1.0);
+            let fitting_key =
+                table_layout_key(ui, &desired, &minimums, 200.4, 20.0, 7, 0, 1.0);
+
+            assert_ne!(dense_key, fitting_key);
         });
     }
 
