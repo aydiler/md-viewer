@@ -73,16 +73,38 @@ Pushing the tag runs `.github/workflows/release.yml`, which publishes to
 
 ## Verification worth doing before tagging
 
-- `cargo test` at the root, and the renderer crates through their own manifest:
+- `cargo test` at the root, and the renderer crates through their own manifest.
+  **Two commands, because they are two workspaces** — the root command has no
+  reason to descend into the renderer, so on its own it leaves the whole
+  renderer untested and says nothing about it:
+
+  ```bash
+  cargo test --locked                                          # the app: 65
+  cargo test --manifest-path crates/egui_commonmark/Cargo.toml  # the renderer: 148
+  ```
+
+  The second command needed a feature list until #185; it no longer does.
+  `commonmark!` lives behind the `macros` feature and the examples that use it
+  now declare `required-features`, so they are skipped instead of failing the
+  build with `cannot find macro`. If you see that error, you are on a checkout
+  from before #185 — it is not a broken tree.
+
+  That plain form runs **default** features. CI additionally runs the renderer
+  in the configuration the application actually uses, which is the one to
+  repeat when touching feature-gated code:
 
   ```bash
   RENDERER_FEATURES=better_syntax_highlighting,svg,svg_text,load-images,fetch,mermaid,math,macros
   cargo test --manifest-path crates/egui_commonmark/Cargo.toml \
-      -p egui_commonmark_extended --features "$RENDERER_FEATURES"
+      -p egui_commonmark_extended --features "$RENDERER_FEATURES"   # 135, 1 ignored
   ```
 
-  The two are separate workspaces — a plain `cargo test` at the root covers
-  only half the code, silently. (Discussed in issue #122.)
+  Compare test **inventories** rather than counts when checking that a branch
+  lost nothing — `cargo test -- --list` piped through `comm`. The counts differ
+  per configuration and per binary, so reading two totals invents regressions
+  that are not there, and hides a test that silently stopped being one.
+  (Measured and discussed in issue #122; the `required-features` cause is
+  #185.)
 
 - `scripts/scroll-regression.sh` and `scripts/visual-regression.sh`. Neither
   runs in CI — they need Xvfb, xdotool and ImageMagick — and between them they
