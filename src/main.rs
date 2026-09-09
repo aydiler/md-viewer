@@ -1130,7 +1130,10 @@ impl Tab {
         let Some(current_dir) = self.path.parent() else {
             return Ok(None);
         };
-        let Some(target_path) = resolve_local_link_path(link, current_dir) else {
+        // `?` rather than a discard: a destination that cannot be decoded is
+        // reported through the same error bar as a missing file (#181), instead
+        // of rendering as an internal link that does nothing when clicked.
+        let Some(target_path) = resolve_local_link_path(link, current_dir)? else {
             return Ok(None);
         };
         target_path.canonicalize().map(Some)
@@ -1249,37 +1252,116 @@ fn register_existing_markdown_path(
     if !is_local_markdown_link(destination) {
         return;
     }
-    if resolve_local_link_path(destination, document_dir).is_some_and(|path| path.is_file()) {
+    // A bare mention stays existence-gated, and an undecodable one is simply not
+    // registered: only an *explicit* Markdown link should be able to report a
+    // broken target, which is the boundary #181 drew.
+    if resolve_local_link_path(destination, document_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|path| path.is_file())
+    {
         links.insert(destination.to_owned());
     }
 }
 
-/// Check if a link destination points to a local markdown file
-fn is_local_markdown_link(destination: &str) -> bool {
-    if destination.starts_with('#') {
-        return false;
-    }
+/// One classification of a destination's shape, used by *both* the gate that
+/// decides which destinations become clickable and the resolver that turns one
+/// into a path.
+///
+/// They used to classify separately and disagreed on four shapes, which #188
+/// pinned: a query string produced a path with `?v=2` in the file name while
+/// the gate rejected it; an unencoded `#` produced an extensionless path; an
+/// empty destination produced the directory itself; and a destination whose
+/// percent escapes are not UTF-8 passed the gate but resolved to nothing, so
+/// the link rendered as internal and a click did nothing at all — no
+/// navigation and no error. Sharing one classification is what makes those
+/// disagreements unrepresentable rather than merely fixed.
+enum DestinationShape<'a> {
+    /// A leading `#`: within the current document, no path involved.
+    Fragment,
+    /// Nothing this viewer opens from the filesystem — a non-`file` scheme, a
+    /// `file://` URI with a non-local authority, a protocol-relative URL, or a
+    /// destination with nothing left to name a file with.
+    External,
+    /// Names a local file. `raw` keeps the source spelling with fragment and
+    /// query removed, because the extension test has to run on what the author
+    /// wrote; `decoded` is `None` when the percent escapes are not UTF-8.
+    Local {
+        raw: &'a str,
+        decoded: Option<std::borrow::Cow<'a, str>>,
+    },
+}
 
-    let path = if let Some(scheme) = explicit_uri_scheme(destination) {
+fn classify_destination(destination: &str) -> DestinationShape<'_> {
+    if destination.starts_with('#') {
+        return DestinationShape::Fragment;
+    }
+    // A protocol-relative URL carries no scheme, so the path branch below would
+    // read `//host/path` as an absolute filesystem path — the reinterpretation
+    // #141 point 8 forbids.
+    if destination.starts_with("//") {
+        return DestinationShape::External;
+    }
+    if let Some(scheme) = explicit_uri_scheme(destination) {
         if !scheme.eq_ignore_ascii_case("file") {
-            return false;
+            return DestinationShape::External;
         }
-        let Ok(url) = url::Url::parse(destination) else {
-            return false;
+        // `to_file_path` decodes the path and rejects a non-local authority.
+        let Some(path) = url::Url::parse(destination)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+        else {
+            return DestinationShape::External;
         };
-        let Ok(path) = url.to_file_path() else {
-            return false;
+        return match path.into_os_string().into_string() {
+            Ok(decoded) => DestinationShape::Local {
+                raw: destination,
+                decoded: Some(std::borrow::Cow::Owned(decoded)),
+            },
+            Err(_) => DestinationShape::Local {
+                raw: destination,
+                decoded: None,
+            },
         };
-        path
-    } else {
-        PathBuf::from(destination.split('#').next().unwrap_or(destination))
-    };
+    }
+    // Fragment first, then query: `guide.md?v=2#s` names `guide.md`. Stripping
+    // the query is what stops `?v=2` becoming part of the file name.
+    let without_fragment = destination.split('#').next().unwrap_or(destination);
+    let raw = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    if raw.is_empty() {
+        // Nothing left to name a file with. The resolver used to answer with the
+        // containing directory here, which only stayed unreachable because
+        // `Tab::resolve_link` guarded a leading `#` separately.
+        return DestinationShape::External;
+    }
+    DestinationShape::Local {
+        raw,
+        decoded: percent_encoding::percent_decode_str(raw).decode_utf8().ok(),
+    }
+}
+
+fn has_markdown_extension(path: &Path) -> bool {
     path.extension()
         .map(|ext| {
             let ext = ext.to_string_lossy().to_lowercase();
             ext == "md" || ext == "markdown" || ext == "txt"
         })
         .unwrap_or(false)
+}
+
+/// Check if a link destination points to a local markdown file.
+///
+/// The extension test runs on the source spelling, not the decoded path: an
+/// author writing `bad%FF.md` plainly means a Markdown file, and it has to pass
+/// this gate for a click to be able to *report* that it cannot be opened.
+fn is_local_markdown_link(destination: &str) -> bool {
+    match classify_destination(destination) {
+        DestinationShape::Local { raw, .. } => has_markdown_extension(Path::new(raw)),
+        DestinationShape::Fragment | DestinationShape::External => false,
+    }
 }
 
 /// Return an RFC 3986 URI scheme when the destination explicitly contains one.
@@ -1307,24 +1389,32 @@ fn explicit_uri_scheme(destination: &str) -> Option<&str> {
 
 /// Resolve a relative/absolute filesystem path or a `file:` URI against the
 /// directory containing the Markdown document.
-fn resolve_local_link_path(destination: &str, document_dir: &Path) -> Option<PathBuf> {
-    if let Some(scheme) = explicit_uri_scheme(destination) {
-        if !scheme.eq_ignore_ascii_case("file") {
-            return None;
+/// Turn a destination into a path to try.
+///
+/// `Ok(None)` means there is nothing to open — a fragment, or a destination
+/// this viewer treats as external. `Err` means the destination names a local
+/// file that cannot be turned into a path at all, which callers must surface
+/// rather than swallow: before #141 that case returned `None` like the others,
+/// so an internal-looking link did nothing whatsoever when clicked.
+fn resolve_local_link_path(destination: &str, document_dir: &Path) -> io::Result<Option<PathBuf>> {
+    match classify_destination(destination) {
+        DestinationShape::Fragment | DestinationShape::External => Ok(None),
+        DestinationShape::Local { raw, decoded: None } => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{raw} is not valid UTF-8 after percent-decoding"),
+        )),
+        DestinationShape::Local {
+            decoded: Some(decoded),
+            ..
+        } => {
+            let path = Path::new(decoded.as_ref());
+            Ok(Some(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                document_dir.join(path)
+            }))
         }
-        return url::Url::parse(destination).ok()?.to_file_path().ok();
     }
-
-    let encoded_path = destination.split('#').next().unwrap_or(destination);
-    let decoded_path = percent_encoding::percent_decode_str(encoded_path)
-        .decode_utf8()
-        .ok()?;
-    let path = Path::new(decoded_path.as_ref());
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        document_dir.join(path)
-    })
 }
 
 /// Parse headings with the same CommonMark rules used by the renderer.
@@ -5485,74 +5575,80 @@ mod tests {
         assert_eq!(matches[0].byte_end, 11);
     }
 
-    /// Characterization table for issue #141, which asks for exactly this
-    /// before any path handling is consolidated: one place that says what a
-    /// Markdown destination resolves to today.
+    /// Characterization table for issue #141: one place that says what a
+    /// Markdown destination resolves to.
     ///
-    /// Both functions are pure, so no fixture on disk is needed and the rows
-    /// stay readable. Rows marked `#141-N` pin behavior that contradicts the
-    /// semantics that issue proposes under its point N — recorded as the
-    /// current baseline, not blessed as correct, so a later decision shows up
-    /// as a failing row here rather than as an invisible change.
+    /// #188 landed this as a *baseline*, with rows marked `#141-N` recording
+    /// behavior that contradicted the semantics the issue proposes. Those rows
+    /// are the ones this change flips, and the markers now name what was
+    /// decided rather than what was merely observed.
     #[test]
     #[cfg(unix)]
     fn local_destination_resolution_is_characterized_for_every_uri_shape() {
         let dir = Path::new("/base/doc");
         // (destination, is_local_markdown_link, resolve_local_link_path)
-        let table: &[(&str, bool, Option<&str>)] = &[
+        // Err(()) = reports rather than resolving; Ok(None) = nothing to open.
+        // One row: the destination, whether the gate accepts it, and what the
+        // resolver answers.
+        type Row<'a> = (&'a str, bool, Result<Option<&'a str>, ()>);
+        let table: &[Row<'_>] = &[
             // 1. relative destinations resolve against the containing document
-            ("guide.md", true, Some("/base/doc/guide.md")),
-            ("sub/guide.md", true, Some("/base/doc/sub/guide.md")),
-            ("../up.md", true, Some("/base/doc/../up.md")),
-            // 2. a fragment selects the document only; the anchor is dropped
-            ("guide.md#section", true, Some("/base/doc/guide.md")),
-            // #141-2: a query string is not part of the contract. The gate
-            // rejects it (the extension reads as `md?v=2`) while the resolver
-            // keeps it in the file name, so the two disagree.
-            ("guide.md?v=2", false, Some("/base/doc/guide.md?v=2")),
-            ("guide.md?v=2#s", false, Some("/base/doc/guide.md?v=2")),
+            ("guide.md", true, Ok(Some("/base/doc/guide.md"))),
+            ("sub/guide.md", true, Ok(Some("/base/doc/sub/guide.md"))),
+            ("../up.md", true, Ok(Some("/base/doc/../up.md"))),
+            // 2. a fragment selects the document; the anchor is dropped
+            ("guide.md#section", true, Ok(Some("/base/doc/guide.md"))),
+            // #141-2 DECIDED: a query string is stripped like a fragment, and
+            // the gate agrees because it tests the extension of the stripped
+            // spelling. Before, the gate rejected `md?v=2` while the resolver
+            // put `?v=2` into the file name.
+            ("guide.md?v=2", true, Ok(Some("/base/doc/guide.md"))),
+            ("guide.md?v=2#s", true, Ok(Some("/base/doc/guide.md"))),
             // 3. percent escapes are decoded exactly once
-            ("a%20b.md", true, Some("/base/doc/a b.md")),
-            ("100%25.md", true, Some("/base/doc/100%.md")),
-            ("bad%zz.md", true, Some("/base/doc/bad%zz.md")),
-            // #141-5: a destination that decodes to non-UTF-8 is classified as
-            // a local Markdown link but resolves to nothing, so the click is a
-            // silent no-op — the case #181 fixed for missing files.
-            ("bad%FF.md", true, None),
+            ("a%20b.md", true, Ok(Some("/base/doc/a b.md"))),
+            ("100%25.md", true, Ok(Some("/base/doc/100%.md"))),
+            ("bad%zz.md", true, Ok(Some("/base/doc/bad%zz.md"))),
+            // an unencoded `#` delimits a fragment, `%23` is a literal
+            // character — a relative destination and a file:// URI agree on
+            // both, which RFC 3986 requires
+            ("a%23b.md", true, Ok(Some("/base/doc/a#b.md"))),
+            (
+                "file:///base/doc/a%23b.md",
+                true,
+                Ok(Some("/base/doc/a#b.md")),
+            ),
+            // `a#b.md` names the file `a` with fragment `b.md`, so it is
+            // correctly not a Markdown link and correctly resolves to `a`
+            ("a#b.md", false, Ok(Some("/base/doc/a"))),
+            // #141-5 DECIDED: a destination that does not decode to UTF-8 is
+            // reported instead of resolving to nothing. It still passes the
+            // gate, because passing is what makes the error reachable.
+            ("bad%FF.md", true, Err(())),
             // 4. platform paths
-            ("/abs/guide.md", true, Some("/abs/guide.md")),
-            ("file:///tmp/guide.md", true, Some("/tmp/guide.md")),
-            ("file://localhost/tmp/guide.md", true, Some("/tmp/guide.md")),
-            // a non-local authority is not a path this viewer can open
-            ("file://server/share/guide.md", false, None),
-            // 3. an unencoded `#` delimits a fragment, `%23` is a literal
-            // character in the name — and a relative destination and a file://
-            // URI agree on both, which RFC 3986 requires. Checked rather than
-            // assumed: an earlier reading of this code claimed the two
-            // disagreed here, and they do not.
-            ("a%23b.md", true, Some("/base/doc/a#b.md")),
-            ("file:///base/doc/a%23b.md", true, Some("/base/doc/a#b.md")),
-            // #141-2: with an unencoded `#` the gate reads the extension of
-            // the truncated name and rejects it, while the resolver hands back
-            // an extensionless path — a fourth shape where the two disagree.
-            ("a#b.md", false, Some("/base/doc/a")),
-            // a Windows drive letter reads as a URI scheme off Windows, where
-            // the path could not be opened anyway
-            ("C:/tmp/guide.md", false, None),
+            ("/abs/guide.md", true, Ok(Some("/abs/guide.md"))),
+            ("file:///tmp/guide.md", true, Ok(Some("/tmp/guide.md"))),
+            (
+                "file://localhost/tmp/guide.md",
+                true,
+                Ok(Some("/tmp/guide.md")),
+            ),
+            ("file://server/share/guide.md", false, Ok(None)),
+            ("C:/tmp/guide.md", false, Ok(None)),
             // 8. other schemes stay external and are never reinterpreted
-            ("https://example.com/guide.md", false, None),
-            ("http://example.com/guide.md", false, None),
-            ("data:text/plain,x", false, None),
-            ("mailto:a@b.c", false, None),
-            ("weird+scheme:guide.md", false, None),
-            // #141-8: a protocol-relative URL has no scheme, so it is treated
-            // as an absolute filesystem path and even classified as local.
-            ("//evil.com/guide.md", true, Some("//evil.com/guide.md")),
-            // #141: the resolver answers with the directory itself for a
-            // fragment-only or empty destination. Only `Tab::resolve_link`'s
-            // leading-`#` guard keeps that unreachable in practice.
-            ("#section", false, Some("/base/doc/")),
-            ("", false, Some("/base/doc/")),
+            ("https://example.com/guide.md", false, Ok(None)),
+            ("http://example.com/guide.md", false, Ok(None)),
+            ("data:text/plain,x", false, Ok(None)),
+            ("mailto:a@b.c", false, Ok(None)),
+            ("weird+scheme:guide.md", false, Ok(None)),
+            // #141-8 DECIDED: a protocol-relative URL is external. It carries
+            // no scheme, so it used to be read as an absolute filesystem path
+            // and was even classified as a local Markdown link.
+            ("//evil.com/guide.md", false, Ok(None)),
+            // #141 DECIDED: nothing left to name a file with is external,
+            // rather than resolving to the containing directory.
+            ("#section", false, Ok(None)),
+            ("", false, Ok(None)),
+            ("?v=2", false, Ok(None)),
         ];
 
         for (destination, expect_local, expect_resolved) in table {
@@ -5561,45 +5657,57 @@ mod tests {
                 *expect_local,
                 "is_local_markdown_link({destination:?})"
             );
-            let resolved = resolve_local_link_path(destination, dir);
+            let resolved = resolve_local_link_path(destination, dir)
+                .map(|path| path.map(|p| p.display().to_string()))
+                .map_err(|_| ());
             assert_eq!(
-                resolved.as_ref().map(|path| path.display().to_string()),
-                expect_resolved.map(str::to_owned),
+                resolved,
+                expect_resolved.map(|p| p.map(str::to_owned)),
                 "resolve_local_link_path({destination:?})"
             );
         }
     }
 
-    /// The gate and the resolver decide the same question, and they disagree
-    /// on four destination shapes. Pinned separately from the table because
-    /// the disagreement — not either value on its own — is what #141 has to
-    /// resolve. `is_local_markdown_link` gates which destinations become
-    /// clickable at all, so a shape it rejects and the resolver accepts can
-    /// only be reached by a caller that skips the gate, and a shape it accepts
-    /// and the resolver rejects renders as internal and does nothing on click.
+    /// The invariant that closes the dead-click class: whatever the gate lets
+    /// through must be something the resolver either turns into a path or
+    /// complains about. It must never answer "nothing to open", because such a
+    /// destination renders as an internal link and then does nothing at all
+    /// when clicked — the state #188 pinned for `bad%FF.md`.
+    ///
+    /// This replaces #188's `…disagree_on_four_shapes`, which asserted the two
+    /// functions *did* disagree and told its reader to drop the row once #141
+    /// decided. They now share one `classify_destination`, so the disagreement
+    /// is unrepresentable rather than merely fixed.
     #[test]
     #[cfg(unix)]
-    fn the_link_gate_and_the_path_resolver_disagree_on_four_shapes() {
+    fn nothing_the_gate_accepts_can_resolve_to_silence() {
         let dir = Path::new("/base/doc");
-        for (destination, note) in [
-            (
-                "guide.md?v=2",
-                "gate says external, resolver produces a path",
-            ),
-            ("bad%FF.md", "gate says local, resolver produces nothing"),
-            ("", "gate says external, resolver produces the directory"),
-            (
-                "a#b.md",
-                "gate says external, resolver produces an extensionless path",
-            ),
+        for destination in [
+            "guide.md",
+            "guide.md?v=2",
+            "guide.md#section",
+            "a%20b.md",
+            "100%25.md",
+            "bad%zz.md",
+            "bad%FF.md",
+            "/abs/guide.md",
+            "file:///tmp/guide.md",
+            "file://localhost/tmp/guide.md",
+            "a%23b.md",
+            "",
+            "#section",
+            "//evil.com/guide.md",
         ] {
-            let gate = is_local_markdown_link(destination);
-            let resolved = resolve_local_link_path(destination, dir).is_some();
-            assert_ne!(
-                gate, resolved,
-                "{destination:?} no longer disagrees ({note}); \
-                 if #141 fixed this on purpose, drop the row"
-            );
+            if !is_local_markdown_link(destination) {
+                continue;
+            }
+            match resolve_local_link_path(destination, dir) {
+                Ok(Some(_)) | Err(_) => {}
+                Ok(None) => panic!(
+                    "{destination:?} passes the gate but resolves to nothing: it \
+                     would render as an internal link and do nothing on click"
+                ),
+            }
         }
     }
 
@@ -5894,7 +6002,7 @@ mod tests {
         ] {
             assert!(!is_local_markdown_link(destination), "{destination}");
             assert_eq!(
-                resolve_local_link_path(destination, document_dir),
+                resolve_local_link_path(destination, document_dir).unwrap(),
                 None,
                 "{destination}"
             );
@@ -5903,7 +6011,7 @@ mod tests {
         assert!(is_local_markdown_link("guide.md"));
         assert!(is_local_markdown_link("docs%20with%20spaces/guide.md"));
         assert_eq!(
-            resolve_local_link_path("100%done.md", document_dir),
+            resolve_local_link_path("100%done.md", document_dir).unwrap(),
             Some(document_dir.join("100%done.md"))
         );
 
@@ -5911,7 +6019,7 @@ mod tests {
         let file_uri = url::Url::from_file_path(&file_path).unwrap().to_string();
         assert!(is_local_markdown_link(&file_uri));
         assert_eq!(
-            resolve_local_link_path(&file_uri, document_dir),
+            resolve_local_link_path(&file_uri, document_dir).unwrap(),
             Some(file_path)
         );
     }
@@ -5981,6 +6089,7 @@ mod tests {
         );
         assert!(
             resolve_local_link_path("docs%20with%20spaces/guide(1).md", &root)
+                .unwrap()
                 .is_some_and(|path| path.is_file())
         );
 
