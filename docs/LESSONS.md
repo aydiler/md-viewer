@@ -1479,7 +1479,7 @@ Every burst photographed the same settled state six times. `import -window` take
 
 The single most-violated rule in this repository, by a wide margin. Five separate
 instances in one session (2026-09-07), each in a different disguise, each of
-which nearly became a confident wrong statement. Five entries below describe
+which nearly became a confident wrong statement. Six entries below describe
 specific shapes of it; this one exists so that grepping any one term finds the
 rest.
 
@@ -1491,6 +1491,7 @@ rest.
 | a comparison against the **wrong baseline** | is the control current `main`, not the branch's base? | *A FAIL blames the branch only if the control is current main* |
 | a fixture in the **wrong regime** | did the condition under test actually occur? | this entry, below |
 | a mutation run that reports **only the first target** | did the run reach the binary holding the test you care about? | *A test runner that stops at the first failing target reports nothing about the targets it never ran* |
+| a step that **destroys or waits** | was its precondition checked, and can that check fail? | *A destructive or blocking step needs its precondition checked, not assumed* |
 
 **The fifth shape has no entry of its own, so it is recorded here.** A fixture can
 sit outside the region it is meant to probe and still produce a clean-looking
@@ -1554,6 +1555,48 @@ failure; a bare `^error:` cannot tell "the thing I wanted to observe" from "the
 instrument broke", which is the one distinction the detector exists to make.
 
 **Files:** N/A (verification discipline), PR #182
+
+### A destructive or blocking step needs its precondition checked, not assumed
+
+**Context:** One session (2026-09-09) produced four instances of the same shape,
+two of them the *identical* mistake twenty minutes apart, and one of them made
+me report progress on work that was not running.
+
+| what ran | the unchecked precondition | what it cost |
+|---|---|---|
+| `git checkout -- src/main.rs` to remove a temporary probe | that the surrounding work was **committed** | deleted a complete implementation, twice — the second time after I had already written up the first |
+| `until … && ! pgrep -f 'cargo build'; do sleep; done` | that the pattern cannot match the **loop's own** command line | the loop never exited, the `systemd-run` after it never fired, and two replies claimed a scan was running that had never started |
+| `bash script.sh \| tail; echo "exit=$?"` | that `$?` after a pipeline is the **last stage's** status | a contract check that failed with `sed: can't read …` was reported as `exit=0` |
+| `cargo clippy \| grep -c warning` twice in a row | that clippy **re-emits** on a cached build | it does not; "0 warnings on both trees" looked like a clean before/after and measured nothing |
+
+**They are one rule, not four tips.** Each is a step whose *effect* is
+irreversible or whose *result* is load-bearing, run after a condition that was
+assumed rather than tested. The existing entries in this family ask whether a
+check can fail; this one asks whether the step should run at all.
+
+Concretely, before each:
+
+- **Commit before probing.** A probe is added to be thrown away, and the
+  cheapest way to throw it away is `git checkout` — which cannot distinguish
+  the probe from everything else uncommitted. A one-line WIP commit makes the
+  discard safe. `git status --porcelain` before the checkout is the check.
+- **A `pgrep -f` / `pkill -f` pattern must describe a foreign command line.**
+  Already recorded one entry below for `pkill`; the *waiting* form is worse,
+  because it fails silently and forever rather than killing something. Bracket
+  a character (`'[c]argo build'`) or query the thing directly
+  (`systemctl --user is-active <unit>`).
+- **Never read `$?` through a pipe.** Capture into a variable first
+  (`out=$(cmd 2>&1); rc=$?`) or use `PIPESTATUS`. A pipeline into `tail`,
+  `head` or `grep` reports success for a failed producer.
+- **A cached build measures nothing.** `touch` the sources, or `cargo clean -p`,
+  before any before/after lint or warning count.
+
+**The tell, in all four:** the step produced *no visible complaint*. A silent
+success and a silent no-op are indistinguishable without the precondition, and
+the reflex to check it only fires if you have paid for it before. I had, in the
+same session, and it fired too late twice.
+
+**Files:** N/A (verification discipline)
 
 ### A null result is evidence only if the instrument is proven live in the same run
 **Context:** This failure mode hit four times in one session, each time in a different disguise, and each time it nearly produced a confident wrong statement.
