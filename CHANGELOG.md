@@ -2,7 +2,7 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
-## [0.2.1] - 2026-09-08
+## [0.2.1] - 2026-09-10
 
 A short follow-up to 0.2.0: one link-handling feature, one silent failure made visible, and the viewport slicer's range selection made permanently observable.
 
