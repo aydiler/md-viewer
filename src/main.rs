@@ -1970,6 +1970,23 @@ impl MarkdownApp {
 
         // Set constant styles once at init (never changes at runtime)
         cc.egui_ctx.style_mut(|style| {
+            // Constant floating-scrollbar geometry (#139).
+            //
+            // egui's floating bar animates its width between `floating_width`
+            // (2) and `bar_width` (10) on hover. A dormant floating bar is
+            // hidden by `dormant_*_opacity: 0.0`, not by being thin, so that
+            // width governs the bar's *interact* rect and nothing visible.
+            // Beside a panel divider the growing and shrinking rect claims and
+            // releases the pointer on alternating frames, and at the one pixel
+            // just outside the resize handle the two never settle.
+            //
+            // Measured on Xvfb with the pointer held still: on `main` exactly
+            // one x out of 36 cycles through four states, in both the painted
+            // pixels and the cursor shape; with the width pinned, zero — and
+            // both builds produce an identical state map across x, so this
+            // removes the oscillation rather than moving it out of view.
+            // `scripts/hover-stability.sh` is that measurement.
+            style.spacing.scroll.floating_width = style.spacing.scroll.bar_width;
             style.url_in_tooltip = true;
             use egui::{FontId, TextStyle};
             style
