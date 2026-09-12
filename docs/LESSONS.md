@@ -1688,3 +1688,14 @@ An empty first list is the assertion worth making. It also explains rises in the
 - `misc.rs` already documented the `text_style_height` vs font-size distinction for inline math ("formulas ~1 px low"); the marker path is the second instance. When a renderer constant reads like a fudge factor, grep the lessons before tuning it again.
 
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/elements.rs` (`reserve_list_marker`, `paint_list_marker`, `first_line_baseline`), `crates/egui_commonmark/egui_commonmark/src/lib.rs` (`List::start_item`, `flush_pending_markers`), `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`emit_text` flush, `TagEnd::Item` fallback), `crates/egui_commonmark/egui_commonmark/tests/list_marker_alignment.rs`
+
+### What a screenshot guard cannot see, an in-process frame drive can
+**Context:** #140 — an intermittent one-frame blank document pane. Four fixtures failed to reproduce it, the runtime probes (`MDV_DIAG_SLICE`, `MDV_DIAG_SPLIT`) saw thousands of frames without the watched condition, and the screenshot burst experiment proved `import -window` capture is slower than the app's settle: six captures inside a settle window were byte-identical in all 61 steps. A one-frame artifact was unreachable by construction — the guard samples ~1 frame in 27, and md-viewer repaints on demand.
+
+**What worked:** a renderer test that drives `ctx.run` one frame at a time and inspects every painted shape. The precondition the field could not produce was injected directly — `scroll_area::State` with an oversized offset stored under the ScrollArea's own `Id` (read from `ScrollAreaOutput.id` the frame before) — and the next frame was asserted to paint visible text inside the scroll clip. Red on `main`, green with the fix, deterministic, sub-second.
+
+**Two egui 0.33 gotchas the test surfaced:**
+1. `ScrollArea::show_viewport` computes its window as `ZERO + state.offset` in `begin`, **unclamped** — the content height is not even known yet. Any position decided before `begin` runs from a stale stored offset selects and paints against a viewport past the content. A clamp that runs after `show_viewport` returns is one frame late by construction.
+2. `ScrollArea::id_salt(id_salt: impl Hash)` wraps its argument in `Id::new` — pass an already-hashed `Id` and it is hashed *again*. Computing the persistent id as `ui.make_persistent_id(scroll_id)` therefore does not match the state egui stores under `.id_salt(scroll_id)`; mirror the re-hash: `ui.make_persistent_id(Id::new(scroll_id))`.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/tests/scroll_offset_beyond_extent.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show_scrollable` pre-selection clamp)
