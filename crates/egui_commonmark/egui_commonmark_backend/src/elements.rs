@@ -53,60 +53,173 @@ pub fn newline(ui: &mut Ui) {
     ui.label("\n");
 }
 
-pub fn bullet_point(ui: &mut Ui, row_height: f32) {
-    // The list row is `Align::BOTTOM` and as tall as the item text, which carries
-    // the 1.5× accessibility line-height. Size the marker box to that same
-    // row_height so it bottom-aligns identically to the text; keep the dot radius
-    // tied to the raw glyph height so the marker size is unchanged. Without this,
-    // the marker box was only the raw font height and its centre sat above the
-    // text's optical centre (marker high, text low).
+/// One reserved list-marker slot. `List::start_item` reserves these before any
+/// item text exists; the slot is painted later, once the item's first line is
+/// about to be laid out (see [`paint_list_marker`]).
+#[derive(Debug, Clone)]
+pub struct ListMarkerSlot {
+    /// Horizontal centre for a bullet dot.
+    pub centre_x: f32,
+    /// Right edge an ordered marker's text aligns to.
+    pub right_x: f32,
+    /// The body style's natural painted height; the dot radius is `raw / 6`.
+    pub raw: f32,
+    /// The height the marker's box reserved. Doubles as the line-height hint
+    /// when a marker is painted without a text format.
+    pub box_height: f32,
+}
+
+/// Which glyph or shape paints into a reserved [`ListMarkerSlot`].
+#[derive(Debug, Clone)]
+pub enum ListMarkerKind {
+    Bullet,
+    BulletHollow,
+    Number(String),
+}
+
+/// Reserve the horizontal slot for a list marker without painting anything.
+///
+/// The reserved box is as tall as the item text's line box so the row grows to
+/// the same height either way; the vertical position is decided at paint time.
+pub fn reserve_list_marker(ui: &mut Ui, row_height: f32) -> ListMarkerSlot {
     let raw = height_body(ui);
+    let height = row_height.max(raw);
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, row_height.max(raw)),
+        egui::vec2(width_body_space(ui) * 4.0, height),
         Sense::hover(),
     );
-    ui.painter().circle_filled(
-        marker_center(rect, raw),
-        raw / 6.0,
-        ui.visuals().strong_text_color(),
-    );
+    ListMarkerSlot {
+        centre_x: rect.center().x,
+        right_x: rect.right(),
+        raw,
+        box_height: height,
+    }
+}
+
+/// Paint a reserved marker so it lands on the item text's first line.
+///
+/// `format` is the text format the item text will be laid out with — taken from
+/// the label's job immediately before `ui.label` runs. `None` falls back to the
+/// body style with the marker's own reserved line box.
+///
+/// The marker's centre is the text's lowercase optical centre: the baseline of
+/// a reference `x` glyph (laid out under the same conditions egui will lay out
+/// the item text) minus half the glyph's x-height. That derivation has to live
+/// at paint time: egui anchors a wrapping label's galley at the cursor's top
+/// edge and gives the first row the cursor's current height as a minimum
+/// (`Label::layout_in_ui`), so every widget sharing the marker's line — task
+/// checkboxes, inline images — moves the text, and the marker must move with it.
+pub fn paint_list_marker(
+    ui: &Ui,
+    slot: &ListMarkerSlot,
+    kind: &ListMarkerKind,
+    format: Option<&egui::TextFormat>,
+) {
+    let (baseline_y, x_height) = first_line_baseline(ui, slot, format);
+    let optical_centre_y = baseline_y - x_height / 2.0;
+    let color = ui.visuals().strong_text_color();
+    match kind {
+        ListMarkerKind::Bullet => {
+            ui.painter().circle_filled(
+                egui::pos2(slot.centre_x, optical_centre_y),
+                slot.raw / 6.0,
+                color,
+            );
+        }
+        ListMarkerKind::BulletHollow => {
+            ui.painter().circle(
+                egui::pos2(slot.centre_x, optical_centre_y),
+                slot.raw / 6.0,
+                egui::Color32::TRANSPARENT,
+                egui::Stroke::new(0.6_f32, color),
+            );
+        }
+        ListMarkerKind::Number(number) => {
+            // Ordered markers are glyphs, so they read as aligned when their
+            // baseline matches the item text's baseline; anchoring their box
+            // centre on the lowercase optical centre would sink them below it.
+            let numbered = format!("{number}.");
+            let font = format
+                .map(|f| f.font_id.clone())
+                .unwrap_or_else(|| TextStyle::Body.resolve(ui.style()));
+            let galley = ui.painter().layout_no_wrap(numbered, font, color);
+            let Some(row) = galley.rows.first() else {
+                return;
+            };
+            let Some(glyph) = row.glyphs.first() else {
+                return;
+            };
+            let baseline_offset = row.pos.y + glyph.pos.y;
+            let pos = egui::pos2(slot.right_x - galley.size().x, baseline_y - baseline_offset);
+            ui.painter().add(epaint::TextShape::new(pos, galley, color));
+        }
+    }
+}
+
+/// Where the item text's first line will paint its baseline, and how tall a
+/// lowercase `x` is under that format, both in ui coordinates.
+///
+/// The reference galley reproduces what `Label::layout_in_ui` does to the job
+/// it lays out on a wrapping horizontal row: `first_row_min_height` from the
+/// cursor's current height, `valign` from the layout, and the format's own
+/// line height. The row box that drives glyph placement is
+/// `max(cursor height, line height)` — so this must run after every widget
+/// sharing the marker's line has been allocated, right before the text's own
+/// label.
+fn first_line_baseline(
+    ui: &Ui,
+    slot: &ListMarkerSlot,
+    format: Option<&egui::TextFormat>,
+) -> (f32, f32) {
+    let cursor_top = ui.cursor().top();
+    let mut format = format.cloned().unwrap_or_else(|| egui::TextFormat {
+        font_id: TextStyle::Body.resolve(ui.style()),
+        line_height: Some(slot.box_height),
+        ..egui::TextFormat::default()
+    });
+    format.valign = ui.text_valign();
+    let job = egui::text::LayoutJob {
+        text: "x".to_owned(),
+        sections: vec![egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: 0..1,
+            format,
+        }],
+        first_row_min_height: ui.cursor().height(),
+        halign: egui::Align::LEFT,
+        justify: false,
+        wrap: egui::text::TextWrapping::default(),
+        ..egui::text::LayoutJob::default()
+    };
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let row = galley.rows.first().expect("galleys are never empty");
+    let glyph = row
+        .glyphs
+        .first()
+        .expect("a one-character job lays out one glyph");
+    let baseline_offset = row.pos.y + glyph.pos.y;
+    (cursor_top + baseline_offset, glyph.uv_rect.size.y)
+}
+
+/// Reserve and immediately paint a bullet marker.
+///
+/// The code generated by `egui_commonmark_macros` has no render state to defer
+/// a paint with, so it cannot wait for the item text's layout. Positioning from
+/// the live cursor is still exact whenever the item text directly follows the
+/// marker on the same line.
+pub fn bullet_point(ui: &mut Ui, row_height: f32) {
+    let slot = reserve_list_marker(ui, row_height);
+    paint_list_marker(ui, &slot, &ListMarkerKind::Bullet, None);
 }
 
 pub fn bullet_point_hollow(ui: &mut Ui, row_height: f32) {
-    let raw = height_body(ui);
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, row_height.max(raw)),
-        Sense::hover(),
-    );
-    ui.painter().circle(
-        marker_center(rect, raw),
-        raw / 6.0,
-        egui::Color32::TRANSPARENT,
-        egui::Stroke::new(0.6_f32, ui.visuals().strong_text_color()),
-    );
+    let slot = reserve_list_marker(ui, row_height);
+    paint_list_marker(ui, &slot, &ListMarkerKind::BulletHollow, None);
 }
 
 pub fn number_point(ui: &mut Ui, number: &str, row_height: f32) {
-    let raw = height_body(ui);
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width_body_space(ui) * 4.0, row_height.max(raw)),
-        Sense::hover(),
-    );
-    ui.painter().text(
-        egui::pos2(rect.right(), marker_center(rect, raw).y),
-        egui::Align2::RIGHT_CENTER,
-        format!("{number}."),
-        TextStyle::Body.resolve(ui.style()),
-        ui.visuals().strong_text_color(),
-    );
-}
-
-/// Vertical centre for a list marker inside a `row_height`-tall, bottom-aligned box.
-/// egui lays a `line_height`-boosted galley with the glyph near the bottom of the
-/// line box (extra leading above), so the text's optical centre is one raw
-/// half-height up from the row bottom — match the marker to that, not the box centre.
-fn marker_center(rect: egui::Rect, raw: f32) -> egui::Pos2 {
-    egui::pos2(rect.center().x, rect.bottom() - raw / 2.0)
+    let slot = reserve_list_marker(ui, row_height);
+    paint_list_marker(ui, &slot, &ListMarkerKind::Number(number.to_owned()), None);
 }
 
 #[inline]

@@ -615,7 +615,7 @@ fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32)
     line_height * galley.rows.len().max(1) as f32
 }
 
-fn body_line_height(ui: &Ui, options: &CommonMarkOptions) -> f32 {
+pub(crate) fn body_line_height(ui: &Ui, options: &CommonMarkOptions) -> f32 {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let natural = ui
         .text_style_height(&egui::TextStyle::Body)
@@ -2763,6 +2763,19 @@ impl CommonMarkViewerInternal {
         } else if self.is_table {
             ui.add(egui::Label::new(rich_text).wrap());
         } else {
+            // The item's first text decides where its deferred marker paints:
+            // mirror exactly the job `ui.label` is about to build (same format,
+            // same valign) so the marker's reference galley matches the real
+            // layout, and flush with no widget in between.
+            let mut job = egui::text::LayoutJob::default();
+            rich_text.clone().append_to(
+                &mut job,
+                ui.style(),
+                egui::FontSelection::Default,
+                ui.text_valign(),
+            );
+            let format = job.sections.first().map(|section| section.format.clone());
+            self.list.flush_pending_markers(ui, format);
             ui.label(rich_text);
         }
     }
@@ -3155,7 +3168,13 @@ impl CommonMarkViewerInternal {
                     self.list = List::default();
                 }
             }
-            pulldown_cmark::TagEnd::Item => {}
+            pulldown_cmark::TagEnd::Item => {
+                // The item is over without ever painting text — a code block,
+                // nested list or math block came first, say — so align its
+                // deferred marker with whatever line the content produced
+                // rather than leaving the reserved slot empty.
+                self.list.flush_pending_markers(ui, None);
+            }
             pulldown_cmark::TagEnd::FootnoteDefinition => {
                 self.line.should_start_newline = true;
                 self.line.should_end_newline = true;

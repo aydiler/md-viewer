@@ -82,6 +82,9 @@
 #![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
 
 use egui::{self, Id};
+use egui_commonmark_backend_extended::elements::{
+    paint_list_marker, reserve_list_marker, ListMarkerKind, ListMarkerSlot,
+};
 
 #[cfg(feature = "svg")]
 mod mime_svg_loader;
@@ -597,6 +600,9 @@ pub(crate) struct ListLevel {
 pub(crate) struct List {
     items: Vec<ListLevel>,
     has_list_begun: bool,
+    /// Marker slots reserved by `start_item` but not painted yet, waiting for
+    /// the item's first line to be laid out.
+    pending_markers: Vec<(ListMarkerSlot, ListMarkerKind)>,
 }
 
 impl List {
@@ -621,6 +627,10 @@ impl List {
     }
 
     pub fn start_item(&mut self, ui: &mut egui::Ui, options: &CommonMarkOptions) {
+        // A nested list starts a new item before the outer item has painted any
+        // text; flush the outer marker here so it stays on its own row.
+        self.flush_pending_markers(ui, None);
+
         // To ensure that newlines are only inserted within the list and not before it
         if self.has_list_begun {
             newline(ui);
@@ -632,27 +642,53 @@ impl List {
         if let Some(item) = self.items.last_mut() {
             ui.label(" ".repeat((len - 1) * options.indentation_spaces));
 
-            // Match the marker box to the item text's line-height so the marker
-            // bottom-aligns with (and vertically centres on) the text.
-            let body_h = ui.text_style_height(&egui::TextStyle::Body);
-            let row_height = options
-                .typography
-                .resolve_line_height(body_h)
-                .unwrap_or(body_h);
+            // The marker's box must match the item text's line box, and the
+            // text's line height is resolved against the font size. Resolving
+            // against `text_style_height` (the font's natural ≈1.2× height)
+            // makes the box 27.6 px where the text's line box is 24 px at a
+            // 16 px body with a 1.5× line height — that mismatch is what pushed
+            // this line's glyphs down (issue #196).
+            let row_height = crate::parsers::pulldown::body_line_height(ui, options);
 
-            if let Some(number) = &mut item.current_number {
-                number_point(ui, &number.to_string(), row_height);
+            let slot = reserve_list_marker(ui, row_height);
+            let kind = if let Some(number) = &mut item.current_number {
+                let kind = ListMarkerKind::Number(number.to_string());
                 *number += 1;
+                kind
             } else if len > 1 {
-                bullet_point_hollow(ui, row_height);
+                ListMarkerKind::BulletHollow
             } else {
-                bullet_point(ui, row_height);
-            }
+                ListMarkerKind::Bullet
+            };
+
+            // The marker cannot be painted yet. egui anchors a wrapping label's
+            // galley at the cursor's top edge and sizes its first row from the
+            // cursor's height at label time, so anything that still joins this
+            // line — the task checkbox, inline images, the text itself — moves
+            // the text relative to this slot. Paint once the item's first text
+            // is about to be laid out (`flush_pending_markers`); items whose
+            // first content is not text are covered by the fallbacks.
+            self.pending_markers.push((slot, kind));
         } else {
             unreachable!();
         }
 
         ui.add_space(4.0);
+    }
+
+    /// Paint every reserved list marker that is still outstanding.
+    ///
+    /// `format` is the text format of the label the markers are being aligned
+    /// with; `None` falls back to the body style. Must be called right before
+    /// that label is laid out, with no widget in between, so the cursor egui
+    /// reads here is the cursor the label will read.
+    pub fn flush_pending_markers(&mut self, ui: &mut egui::Ui, format: Option<egui::TextFormat>) {
+        if self.pending_markers.is_empty() {
+            return;
+        }
+        for (slot, kind) in self.pending_markers.drain(..) {
+            paint_list_marker(ui, &slot, &kind, format.as_ref());
+        }
     }
 
     pub fn end_level(&mut self, ui: &mut egui::Ui, insert_newline: bool) {

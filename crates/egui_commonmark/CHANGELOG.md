@@ -1,5 +1,10 @@
 # egui_commonmark changelog
 
+## Unreleased
+
+### Fixed
+- List markers sit on the item text's lowercase optical centre. The dot was ~1.7 px high at a 16 px body with a 1.5× line height, and the ordered marker's alignment was a coincidence of two compensating errors: the marker box resolved its line-height multiplier against `text_style_height` (the font's natural ≈1.2× height, so 27.6 px where the text's line box is 24 px), and the marker centred itself at its own box's `bottom − raw/2` — a tuned compensation for a box offset, not a derivation from text metrics. egui anchors a wrapping label's galley at the cursor's top edge and sizes its first row from the cursor's height at label time, so no marker position computed before the item text exists can be exact. `start_item` now reserves the marker's slot and paints it right before the item's first text is laid out, deriving the baseline from a reference galley laid out exactly as the label will be; the dot centres on `baseline − x-height/2` from the `x` glyph's own metrics, and the ordered number stays baseline-aligned via its own glyph metrics. Items whose first content is not text (task checkboxes, code blocks, nested lists) are covered by flush points at item start, item end and nested-item start. The immediate `bullet_point`/`bullet_point_hollow`/`number_point` entries keep their signatures for the proc-macro path, which has no render state to defer with.
+
 ## 0.28.0
 
 ### Added

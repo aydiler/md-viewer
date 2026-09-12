@@ -2,6 +2,12 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **List markers sit on the optical centre of their item text (#196).** Text after a bullet or a number hung a little low: measured in the renderer harness, the dot's centre sat 6.18 px above the text baseline where the lowercase optical centre is 4.50 px up — about 1.7 px high. The cause was not the one the code assumed. The marker box resolved its line-height multiplier against `text_style_height` (the font's natural ≈1.2× height, so a 27.6 px box where the text's line box is 24 px), and the marker centred itself at `box bottom − raw/2`, a compensation tuned for a box offset rather than derived from text metrics — the boxes were 6 px apart at every edge, so nothing bottom-aligned. The direct fix made both markers worse, because shortening the box destroys the compensation while leaving the offset in place. egui anchors a wrapping label's galley at the cursor's top edge and sizes its first row from the cursor's height at label time, so a marker position computed before the item text exists is wrong by construction. The renderer now reserves the marker's slot in `start_item` and paints it immediately before the item's first text is laid out, reading the baseline from a reference galley laid out exactly as the label will be: the dot centres on `baseline − x-height/2` from the `x` glyph's own metrics, the ordered number keeps its baseline alignment through its own glyph metrics, and task checkboxes, inline images and wrapped first lines are handled because the position is computed after everything sharing the line has been allocated. Items whose first content is not text fall back to flushes at item start and item end. The vendored renderer moves to 0.28.2 with the same fix, and a painted-geometry test pins the marker to within a pixel of the optical centre across body sizes, pixel and multiplier line heights, checkboxes and wrapped items.
+
 ## [0.2.1] - 2026-09-10
 
 A short follow-up to 0.2.0: one link-handling feature, one silent failure made visible, and the viewport slicer's range selection made permanently observable.

@@ -1671,3 +1671,20 @@ comm -13 /tmp/main.txt /tmp/a.txt   # added by the branch
 An empty first list is the assertion worth making. It also explains rises in the *ignored* count without alarm — #119's two new `system_fonts` tests are skipped for want of installed fonts, exactly like the existing CJK one.
 
 **Files:** N/A (verification discipline)
+
+### On a wrapping row, nothing about a label's position is knowable before the label runs
+**Context:** #196 — list markers sat ~1.7 px above the item text's lowercase optical centre. The marker code centred itself on its own allocated box (`bottom − raw/2`), which the comment described as bottom-alignment compensation. Measurement showed the marker box and the text galley shared neither top nor bottom edge — they were 6.00 px apart at *every* edge, so the compensation was compensating for a box offset, not aligning anything.
+
+**Root cause, in egui's layout:** on `Layout::left_to_right(Align::BOTTOM).with_main_wrap(true)`, `ui.label` does not use the row's bottom alignment at all. `Label::layout_in_ui` has a special path for wrapping horizontal layouts: it lays the text as a full-width galley anchored at `pos2(max_rect.left, cursor.top)`, and sets `first_row_min_height = cursor.height()` **at label time**. Inside the galley, glyphs are then pushed to the bottom of the row box (`valign` factor × the row height minus the format's line height). Two consequences:
+
+1. Every widget allocated earlier on the line — the marker's own box, a task checkbox, an inline image — inflates `cursor.height()` and pushes the text down. The marker's oversized box (line height resolved against `text_style_height` ≈1.2× size instead of the font size: 27.6 px vs 24 px) was itself what moved the text.
+2. A marker position computed at slot-reservation time is wrong by construction. `Rect::bottom()` of an allocation says nothing about where a later label will paint.
+
+**Fix:** reserve the slot in `start_item`, paint later. The renderer flushes deferred markers immediately before the item's first `ui.label`, and the position comes from a *reference galley*: a one-character `"x"` job laid out with the label's own `TextFormat` (taken from the job `append_to` builds, `valign` overridden to `ui.text_valign()`) and the same `first_row_min_height` the label will see. egui performs its own arithmetic on the reference; the code only reads back `glyph.pos.y` (baseline) and `glyph.uv_rect.size.y` (x-height) and centres the dot on `baseline − x_height/2`. Delegating the math beats re-deriving it: the formula (`font_impl_ascent + valign × (row_height − glyph.line_height) + ½(font_height − font_impl_height)`, plus pixel rounding) has inputs that are not all public.
+
+**Corollaries:**
+- Compensations can cancel to near-zero and read as "aligned": the ordered marker landed 0.18 px from the text baseline through *two* stacked errors (oversized box + `RIGHT_CENTER` re-centring). A coincidence at today's metrics is not a derivation; the acceptance test has to pin the mechanism's quantity (dot centre vs x-glyph optical centre), not today's residuals.
+- Flush points for deferred paints need every path the renderer can take between slot and first text: nested `start_item`, non-text-first content (code block, math, buffered link/image text via `TagEnd::Item`), and the text path itself. The reference-galley fallback with `None` keeps those markers painted, if with a stale cursor.
+- `misc.rs` already documented the `text_style_height` vs font-size distinction for inline math ("formulas ~1 px low"); the marker path is the second instance. When a renderer constant reads like a fudge factor, grep the lessons before tuning it again.
+
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/elements.rs` (`reserve_list_marker`, `paint_list_marker`, `first_line_baseline`), `crates/egui_commonmark/egui_commonmark/src/lib.rs` (`List::start_item`, `flush_pending_markers`), `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`emit_text` flush, `TagEnd::Item` fallback), `crates/egui_commonmark/egui_commonmark/tests/list_marker_alignment.rs`
