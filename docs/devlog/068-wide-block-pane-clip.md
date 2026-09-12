@@ -101,3 +101,35 @@ paints; the resize interaction stays egui's.
 
 **Verification:** Xvfb screenshots — hover brightens the boundary line,
 mid-drag keeps it at the moving boundary while the sidebar resizes.
+
+## Follow-up 2 (user E2E): the reset survived the rescale — widths are now fully sticky
+
+User E2E: both symptoms persisted. Root cause of the survival: `height_layout_changed`
+also fires when `table_layout_key` changes, and the key hashed the
+pane-width-derived `visible_column_budget` — so *every* sidebar resize flipped
+it and reset the widths no matter what the shrink policy decided. The
+proportional rescale was dead code on this path.
+
+**Final policy — column widths are fully sticky across pane-width changes:**
+
+- `visible_column_budget` (and the dense/fitting branch it fed) removed from
+  `table_layout_key`. The key now covers only inputs that genuinely change
+  measured heights: desired/minimum widths, line height, body/mono fonts,
+  content digest, layout revision, math scale.
+- No rescale, no bound tracking: last frame's widths (shadowed via
+  `store_table_column_widths`) are re-measured for reserved heights and
+  rendered as-is; the outer horizontal scroller absorbs any overflow
+  (existing #64/#110 mechanism). `reset()` happens only on genuine layout
+  changes (font, zoom, content, math scale).
+- `SIDEBAR_RESIZE_GRAB_RADIUS` 8 → 3: the invisible strip no longer reaches
+  table separators near the pane edge; the hover/drag affordance line
+  (previous commit) keeps resizing discoverable.
+
+**Xvfb verification:** press 5px inside the pane at a table row + drag →
+nothing moves (previously: sidebar narrowed to a sliver); sidebar resize →
+table pixel-identical across the drag (previously: widths reset/reflowed).
+
+Sticky-width fallout handled: `markdown/html_table_reflows_after_panel_width_changes`
+now assert *identical* heights across widths; `dense_overflow_cache_*` and
+`table_layout_key_*` updated for the budget-free key (the dense/fitting key
+separation test was deleted with the mechanism).

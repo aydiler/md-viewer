@@ -1050,7 +1050,6 @@ fn table_layout_key(
     ui: &Ui,
     desired: &[f32],
     minimums: &[f32],
-    visible_column_budget: f32,
     line_height: f32,
     content_digest: u64,
     layout_revision: u64,
@@ -1064,22 +1063,12 @@ fn table_layout_key(
     for width in minimums {
         width.to_bits().hash(&mut hasher);
     }
-    let minimum_total = minimums.iter().map(|width| width.max(40.0)).sum::<f32>();
-    let dense = table_floors_overflow(minimum_total, visible_column_budget);
-    // Once header floors already overflow the viewport, Phase 2 candidates do
-    // not depend on the exact narrower viewport width. Reuse their expensive
-    // measurements while the divider moves within that dense range. Hash the
-    // branch decision separately so rounding cannot alias the two sides of
-    // the dense/fitting boundary.
-    dense.hash(&mut hasher);
-    (if dense {
-        minimum_total
-    } else {
-        visible_column_budget
-    })
-        .round()
-        .to_bits()
-        .hash(&mut hasher);
+    // The visible column budget is deliberately NOT part of this key: it is
+    // derived from the pane width, and hashing it made every sidebar resize
+    // count as a layout change — re-deriving (and resetting) column widths
+    // the user had arranged. Column widths persist across pane-width changes
+    // and the outer horizontal scroller absorbs any overflow; this key only
+    // guards inputs that genuinely change measured heights.
     line_height.to_bits().hash(&mut hasher);
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let monospace_font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -1153,84 +1142,8 @@ fn framed_table_widths(
     (frame, widths, column_budget)
 }
 
-/// Keep `TableBuilder` column widths meaningful across pane shrinks, and
-/// report the widths to hand to `Column::initial` this frame plus whether
-/// the persisted `TableBuilder` state must be reset so they take effect.
-///
-/// `egui_extras::TableBuilder` deliberately keeps user-resized column widths —
-/// later `Column::initial` values are ignored — and those widths never
-/// re-shrink when the table's available width narrows, so rightmost columns
-/// would clip instead. The first cut of this policy reset them on *any* bound
-/// change, which threw the user's layout away on every sidebar nudge; tables
-/// whose columns fill the pane (the common case) overflow on *any* shrink,
-/// so they reset every single time.
-///
-/// This policy instead:
-///
-/// * growth / unchanged bound → keep as-is (`auto_shrink` closes any gap a
-///   wider bound leaves after the last column);
-/// * shrink the widths still fit → keep as-is;
-/// * shrink they can't fit → **rescale** the persisted widths to the new
-///   bound, preserving the user's proportions, floored at each column's
-///   minimum (a floored total may still overflow; that then scrolls
-///   horizontally, as minimum-width tables always have), and report `true`
-///   so the caller `reset()`s `TableBuilder` and the scaled
-///   `Column::initial` values take effect.
-///
-/// The bound history distinguishes a genuine shrink from a user-dragged
-/// column: a drag can overflow the bound by choice, and that overflow is
-/// never punished with a reset.
-///
-/// `usable_bound` is the width actually available to the columns (table
-/// bound minus frame chrome), so the fit test compares like with like.
-fn table_shrink_rescale_widths(
-    ui: &Ui,
-    table_id: Id,
-    usable_bound: f32,
-    initial_widths: &[f32],
-    minimum_widths: &[f32],
-) -> (Vec<f32>, bool) {
-    let bound_id = table_id.with("_layout_bound");
-    let widths_id = table_id.with("_column_widths");
-    let current = usable_bound.max(0.0);
-    let persisted = ui.data_mut(|data| {
-        let previous = data.get_temp::<f32>(bound_id);
-        data.insert_temp(bound_id, current);
-        previous.zip(data.get_temp::<Vec<f32>>(widths_id))
-    });
-    let Some((previous, widths)) = persisted else {
-        // First frame: nothing persisted, TableBuilder initializes itself.
-        return (initial_widths.to_vec(), false);
-    };
-    if current >= previous {
-        // Grew or unchanged: nothing to invalidate. A drag-widened column
-        // may overflow the bound by choice; that overflow must never be
-        // punished with a reset.
-        return (initial_widths.to_vec(), false);
-    }
-    let gaps = ui.spacing().item_spacing.x * widths.len().saturating_sub(1) as f32;
-    let total = widths.iter().sum::<f32>() + gaps;
-    if total <= current + 1.0 {
-        // Shrank, but the user's widths still fit: keep them untouched, with
-        // a 1px tolerance so float noise on an exact fit doesn't flip-flop.
-        return (initial_widths.to_vec(), false);
-    }
-    // Shrank past the recorded total: rescale proportionally, floored at
-    // each column's minimum.
-    let scale = ((current - gaps) / (total - gaps)).max(0.0);
-    let scaled = widths
-        .iter()
-        .enumerate()
-        .map(|(column, width)| {
-            let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
-            (width * scale).max(minimum)
-        })
-        .collect();
-    (scaled, true)
-}
-
 /// Shadow the column widths `TableBuilder` resolved this frame so
-/// [`table_shrink_rescale_widths`] can judge them on the next one.
+/// so layout decisions (height measurement, resets) use what rendered.
 fn store_table_column_widths(ui: &Ui, table_id: Id, widths: &[f32]) {
     ui.data_mut(|data| {
         data.insert_temp(table_id.with("_column_widths"), widths.to_vec());
@@ -2465,7 +2378,6 @@ impl CommonMarkViewerInternal {
                 ui,
                 &desired_widths,
                 &minimum_widths,
-                visible_column_budget,
                 line_h,
                 markdown_table_digest(&table_rows),
                 cache.layout_revision(),
@@ -2498,21 +2410,16 @@ impl CommonMarkViewerInternal {
             // the full pane while prose keeps the reading width. Anchor at
             // the current cursor, not max_rect, or the table would repaint on
             // top of everything above it.
-            // Sidebar shrink handling: proportionally rescale persisted
-            // column widths when they can no longer fit (growth and
-            // shrink-that-fits keep the user's layout — see the function's
-            // notes).
-            let usable_bound_now = (table_bound
-                - table_frame.total_margin().sum().x
-                - table_frame.stroke.width * 2.0)
-                .max(0.0);
-            let (initial_widths, shrink_rescaled) = table_shrink_rescale_widths(
-                ui,
-                id,
-                usable_bound_now,
-                &initial_widths,
-                &minimum_widths,
-            );
+            // Column widths persist across pane-width changes: a sidebar drag
+            // must not disturb the user's layout. TableBuilder keeps its own
+            // state and the outer horizontal scroller absorbs any overflow,
+            // so measure reserved heights with the widths that will actually
+            // render — last frame's — and fall back to the fresh proposal on
+            // first render (or after a genuine layout change, which resets
+            // below).
+            let initial_widths = ui
+                .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")))
+                .unwrap_or(initial_widths);
             let mut table_scope_rect = ui.cursor();
             // Carve out a viewport wider than the prose column (#64), but
             // never wider than what is visible. The bound must be
@@ -2572,8 +2479,7 @@ impl CommonMarkViewerInternal {
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 table_frame.show(ui, |ui| {
-                                    let reset_column_widths =
-                                        shrink_rescaled || height_layout_changed;
+                                    let reset_column_widths = height_layout_changed;
                                     let mut builder = egui_extras::TableBuilder::new(ui)
                                         .id_salt(id.with("_wrapped"))
                                         .striped(true)
@@ -3466,7 +3372,6 @@ impl CommonMarkViewerInternal {
             ui,
             &desired_widths,
             &minimum_widths,
-            visible_column_budget,
             line_h,
             html_table_digest(&table_rows),
             0,
@@ -3492,13 +3397,11 @@ impl CommonMarkViewerInternal {
                     .collect()
             },
         );
-        // Sidebar shrink handling, same policy as markdown tables above.
-        let usable_bound_now = (table_bound
-            - table_frame.total_margin().sum().x
-            - table_frame.stroke.width * 2.0)
-            .max(0.0);
-        let (initial_widths, shrink_rescaled) =
-            table_shrink_rescale_widths(ui, id, usable_bound_now, &initial_widths, &minimum_widths);
+        // Column widths persist across pane-width changes (see the markdown
+        // table notes).
+        let initial_widths = ui
+            .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")))
+            .unwrap_or(initial_widths);
         // Same reading-column escape as markdown tables (#64): carve out a
         // scope wider than the prose allocation, anchored at the cursor — but
         // never wider than what is visible (see the markdown-table carve-out
@@ -3517,8 +3420,7 @@ impl CommonMarkViewerInternal {
                     .show(ui, |ui| {
                 ui.vertical(|ui| {
                     table_frame.show(ui, |ui| {
-                        let reset_column_widths =
-                            shrink_rescaled || height_layout_changed;
+                        let reset_column_widths = height_layout_changed;
                         let mut builder = egui_extras::TableBuilder::new(ui)
                             .id_salt(id.with("_wrapped"))
                             .striped(true)
@@ -3974,21 +3876,15 @@ mod tests {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.set_width(table_bound);
             ui.set_max_width(table_bound);
-            let minimums = vec![40.0; initial_widths.len()];
-            let (columns, reset_column_widths) =
-                table_shrink_rescale_widths(ui, table_id, table_bound, initial_widths, &minimums);
             let mut builder = egui_extras::TableBuilder::new(ui)
                 .id_salt(table_id.with("_wrapped"))
                 .resizable(true);
-            for width in &columns {
+            for width in initial_widths {
                 builder = builder.column(
                     egui_extras::Column::initial(*width)
                         .resizable(true)
                         .at_least(40.0),
                 );
-            }
-            if reset_column_widths {
-                builder.reset();
             }
             builder.body(|body| rendered_widths = body.widths().to_vec());
             store_table_column_widths(ui, table_id, &rendered_widths);
@@ -3998,36 +3894,21 @@ mod tests {
     }
 
     #[test]
-    fn resizable_table_state_reflows_when_its_bound_changes() {
+    fn resizable_table_widths_stick_across_bound_changes() {
         let ctx = egui::Context::default();
         let table_id = Id::new("responsive-table");
         let initial = render_resizable_table_widths(&ctx, table_id, 180.0, &[60.0, 80.0]);
         let same_bound = render_resizable_table_widths(&ctx, table_id, 180.0, &[90.0, 110.0]);
         assert_eq!(same_bound, initial, "stable bounds must retain cached widths");
 
-        // Widening keeps the manual layout: the gap a wider bound leaves
-        // after the last column is closed by `auto_shrink`, so there is
-        // nothing to invalidate (the old reset-on-any-change threw the
-        // user's widths away on every sidebar nudge).
+        // Pane-width changes must never disturb the columns: widening leaves
+        // the layout alone (`auto_shrink` closes any gap), and shrinking lets
+        // the outer horizontal scroller absorb the overflow. A sidebar drag
+        // reflows the pane, not the table.
         let wider = render_resizable_table_widths(&ctx, table_id, 360.0, &[120.0, 160.0]);
-        assert_eq!(wider, initial, "growing the bound must retain cached widths");
-
-        // A shrink the cached widths still fit inside keeps them too.
-        let still_fits = render_resizable_table_widths(&ctx, table_id, 165.0, &[120.0, 160.0]);
-        assert_eq!(
-            still_fits, initial,
-            "a shrink the widths fit must retain cached widths"
-        );
-
-        // A shrink the cached widths cannot fit rescales them proportionally
-        // to the new bound (instead of resetting the layout), so the columns
-        // reflow without discarding the user's proportions.
+        assert_eq!(wider, initial, "growing the bound must retain widths");
         let narrower = render_resizable_table_widths(&ctx, table_id, 120.0, &[40.0, 60.0]);
-        assert!(narrower[0] < still_fits[0] && narrower[1] < still_fits[1]);
-        assert!(
-            (narrower[0] / narrower[1] - still_fits[0] / still_fits[1]).abs() < 0.01,
-            "an overflowing shrink must preserve column proportions: {narrower:?} vs {still_fits:?}"
-        );
+        assert_eq!(narrower, initial, "shrinking the bound must retain widths");
     }
 
     #[test]
@@ -4547,18 +4428,16 @@ mod tests {
                     100.0
                 }]
             };
-            let narrow_key =
-                table_layout_key(ui, &desired, &minimums, 199.6, 20.0, 7, 0, 1.0);
-            let narrower_key =
-                table_layout_key(ui, &desired, &minimums, 160.0, 20.0, 7, 0, 1.0);
-            let fitting_key =
-                table_layout_key(ui, &desired, &minimums, 200.4, 20.0, 7, 0, 1.0);
-            let fitting_baseline = fit_column_widths(&desired, 200.4, &minimums);
+            // The pane-width-derived budget is deliberately not part of the
+            // layout key (sidebar drags must not re-derive widths), so the
+            // same inputs at a different budget must hit the cache and keep
+            // the first contract instead of remeasuring.
+            let key = table_layout_key(ui, &desired, &minimums, 20.0, 7, 0, 1.0);
 
             let (dense_widths, _) = cached_height_aware_widths(
                 ui,
                 id,
-                narrow_key,
+                key,
                 &minimums,
                 &desired,
                 &minimums,
@@ -4567,10 +4446,10 @@ mod tests {
                 measure,
             );
             let after_first = measurements.get();
-            let _ = cached_height_aware_widths(
+            let (again_widths, changed) = cached_height_aware_widths(
                 ui,
                 id,
-                narrower_key,
+                key,
                 &minimums,
                 &desired,
                 &minimums,
@@ -4578,71 +4457,11 @@ mod tests {
                 1,
                 measure,
             );
-            let after_dense_resize = measurements.get();
-            let (fitting_widths, _) = cached_height_aware_widths(
-                ui,
-                id,
-                fitting_key,
-                &fitting_baseline,
-                &desired,
-                &minimums,
-                200.4,
-                1,
-                measure,
-            );
 
             assert!(after_first > 0);
-            assert_eq!(after_dense_resize, after_first);
-            assert!(measurements.get() > after_dense_resize);
-            assert!(dense_widths.iter().sum::<f32>() > 200.4);
-            assert!((fitting_widths.iter().sum::<f32>() - 200.4).abs() < 0.01);
-        });
-    }
-
-    #[test]
-    fn table_widths_rescale_proportionally_when_a_shrink_overflows_them() {
-        egui::__run_test_ui(|ui| {
-            let id = egui::Id::new("shrink_rescale_test");
-            let initial = [100.0, 100.0];
-            let minimums = [40.0, 40.0];
-
-            // First frame: nothing persisted, TableBuilder initializes itself.
-            let (widths, reset) = table_shrink_rescale_widths(ui, id, 400.0, &initial, &minimums);
-            assert_eq!((widths, reset), (initial.to_vec(), false));
-            // Growing the pane never discards the manual layout.
-            let (widths, reset) = table_shrink_rescale_widths(ui, id, 500.0, &initial, &minimums);
-            assert_eq!((widths, reset), (initial.to_vec(), false));
-
-            // Widths as shadowed by the previous frame's body pass: 350px of
-            // columns plus one column gap.
-            store_table_column_widths(ui, id, &[200.0, 150.0]);
-            let gaps = ui.spacing().item_spacing.x;
-            let total = 350.0 + gaps;
-
-            // Sidebar nudged in, but the columns still fit: keep them.
-            let (widths, reset) =
-                table_shrink_rescale_widths(ui, id, total + 15.0, &initial, &minimums);
-            assert_eq!((widths, reset), (initial.to_vec(), false));
-
-            // Sidebar nudged in past the recorded total: rescale the
-            // persisted widths proportionally instead of resetting them to
-            // the fresh contract.
-            let target = total - 15.0;
-            let (widths, reset) = table_shrink_rescale_widths(ui, id, target, &initial, &minimums);
-            assert!(reset, "an overflowing shrink must reset so the scaled widths apply");
-            let expected_scale = (target - gaps) / 350.0;
-            assert!((widths[0] - 200.0 * expected_scale).abs() < 0.01);
-            assert!((widths[1] - 150.0 * expected_scale).abs() < 0.01);
-            assert!(
-                (widths[0] / widths[1] - 200.0 / 150.0).abs() < 0.01,
-                "proportions must survive the rescale"
-            );
-
-            // A drag-widened column may overflow the bound by choice; with
-            // the bound unchanged, that overflow must not reset anything.
-            store_table_column_widths(ui, id, &[450.0, 150.0]);
-            let (widths, reset) = table_shrink_rescale_widths(ui, id, 500.0, &initial, &minimums);
-            assert_eq!((widths, reset), (initial.to_vec(), false));
+            assert_eq!(measurements.get(), after_first, "cache hit remeasured");
+            assert!(!changed, "stable layout reported a layout change");
+            assert_eq!(dense_widths, again_widths);
         });
     }
 
@@ -4651,7 +4470,7 @@ mod tests {
         egui::__run_test_ui(|ui| {
             let desired = [100.0, 200.0];
             let minimums = [40.0, 60.0];
-            let key = table_layout_key(ui, &desired, &minimums, 280.0, 20.0, 7, 0, 1.0);
+            let key = table_layout_key(ui, &desired, &minimums, 20.0, 7, 0, 1.0);
 
             assert_ne!(
                 key,
@@ -4659,7 +4478,6 @@ mod tests {
                     ui,
                     &desired,
                     &[40.0, 61.0],
-                    280.0,
                     20.0,
                     7,
                     0,
@@ -4668,41 +4486,12 @@ mod tests {
             );
             assert_ne!(
                 key,
-                table_layout_key(ui, &desired, &minimums, 280.0, 20.0, 7, 1, 1.0)
+                table_layout_key(ui, &desired, &minimums, 20.0, 7, 1, 1.0)
             );
             assert_ne!(
                 key,
-                table_layout_key(ui, &desired, &minimums, 280.0, 20.0, 7, 0, 1.25)
+                table_layout_key(ui, &desired, &minimums, 20.0, 7, 0, 1.25)
             );
-            assert_ne!(
-                key,
-                table_layout_key(ui, &desired, &minimums, 279.0, 20.0, 7, 0, 1.0)
-            );
-            let dense_key =
-                table_layout_key(ui, &desired, &minimums, 80.0, 20.0, 7, 0, 1.0);
-            assert_eq!(
-                dense_key,
-                table_layout_key(ui, &desired, &minimums, 90.0, 20.0, 7, 0, 1.0)
-            );
-            assert_ne!(
-                dense_key,
-                table_layout_key(ui, &desired, &minimums, 101.0, 20.0, 7, 0, 1.0)
-            );
-        });
-    }
-
-    #[test]
-    fn table_layout_key_separates_rounded_dense_and_fitting_budgets() {
-        egui::__run_test_ui(|ui| {
-            let desired = [200.0, 400.0];
-            let minimums = [100.0, 100.0];
-
-            let dense_key =
-                table_layout_key(ui, &desired, &minimums, 199.6, 20.0, 7, 0, 1.0);
-            let fitting_key =
-                table_layout_key(ui, &desired, &minimums, 200.4, 20.0, 7, 0, 1.0);
-
-            assert_ne!(dense_key, fitting_key);
         });
     }
 
