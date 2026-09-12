@@ -1153,56 +1153,84 @@ fn framed_table_widths(
     (frame, widths, column_budget)
 }
 
-/// Decide whether persisted `TableBuilder` column widths must be discarded.
+/// Keep `TableBuilder` column widths meaningful across pane shrinks, and
+/// report the widths to hand to `Column::initial` this frame plus whether
+/// the persisted `TableBuilder` state must be reset so they take effect.
 ///
 /// `egui_extras::TableBuilder` deliberately keeps user-resized column widths —
 /// later `Column::initial` values are ignored — and those widths never
 /// re-shrink when the table's available width narrows, so rightmost columns
-/// would clip instead. Discarding on *any* bound change was too coarse: it
-/// threw away the user's manual layout whenever the sidebar moved a pixel.
+/// would clip instead. The first cut of this policy reset them on *any* bound
+/// change, which threw the user's layout away on every sidebar nudge; tables
+/// whose columns fill the pane (the common case) overflow on *any* shrink,
+/// so they reset every single time.
 ///
-/// Discard only when it matters: the bound **shrank** and the persisted
-/// widths no longer fit inside it. Growing the pane, or nudging the sidebar
-/// while the widths still fit, keeps the manual layout intact. The widths are
-/// shadowed every frame by [`store_table_column_widths`].
+/// This policy instead:
 ///
-/// The bound history is what distinguishes a genuine shrink from a
-/// user-dragged column: a drag can overflow the bound by choice, and that
-/// overflow must never be punished with a reset.
+/// * growth / unchanged bound → keep as-is (`auto_shrink` closes any gap a
+///   wider bound leaves after the last column);
+/// * shrink the widths still fit → keep as-is;
+/// * shrink they can't fit → **rescale** the persisted widths to the new
+///   bound, preserving the user's proportions, floored at each column's
+///   minimum (a floored total may still overflow; that then scrolls
+///   horizontally, as minimum-width tables always have), and report `true`
+///   so the caller `reset()`s `TableBuilder` and the scaled
+///   `Column::initial` values take effect.
 ///
-/// `usable_bound` is the width actually available to the columns (table bound
-/// minus frame chrome), so the fit test compares like with like.
-fn table_bound_shrink_discards_widths(ui: &Ui, table_id: Id, usable_bound: f32) -> bool {
+/// The bound history distinguishes a genuine shrink from a user-dragged
+/// column: a drag can overflow the bound by choice, and that overflow is
+/// never punished with a reset.
+///
+/// `usable_bound` is the width actually available to the columns (table
+/// bound minus frame chrome), so the fit test compares like with like.
+fn table_shrink_rescale_widths(
+    ui: &Ui,
+    table_id: Id,
+    usable_bound: f32,
+    initial_widths: &[f32],
+    minimum_widths: &[f32],
+) -> (Vec<f32>, bool) {
     let bound_id = table_id.with("_layout_bound");
     let widths_id = table_id.with("_column_widths");
     let current = usable_bound.max(0.0);
-    ui.data_mut(|data| {
+    let persisted = ui.data_mut(|data| {
         let previous = data.get_temp::<f32>(bound_id);
         data.insert_temp(bound_id, current);
-        let Some(previous) = previous else {
-            // First frame: nothing persisted, TableBuilder initializes itself.
-            return false;
-        };
-        if current >= previous {
-            // Grew or unchanged: stale widths may leave a gap after the last
-            // column, which `auto_shrink` closes — never a reason to reset.
-            return false;
-        }
-        // Shrank: keep the user's widths only if they still fit, with a 1px
-        // tolerance so float noise on an exact fit doesn't flip-flop.
-        data.get_temp::<Vec<f32>>(widths_id)
-            .map(|widths: Vec<f32>| {
-                let spacing = ui.spacing().item_spacing.x;
-                let total = widths.iter().sum::<f32>()
-                    + spacing * widths.len().saturating_sub(1) as f32;
-                total > current + 1.0
-            })
-            .unwrap_or(false)
-    })
+        previous.zip(data.get_temp::<Vec<f32>>(widths_id))
+    });
+    let Some((previous, widths)) = persisted else {
+        // First frame: nothing persisted, TableBuilder initializes itself.
+        return (initial_widths.to_vec(), false);
+    };
+    if current >= previous {
+        // Grew or unchanged: nothing to invalidate. A drag-widened column
+        // may overflow the bound by choice; that overflow must never be
+        // punished with a reset.
+        return (initial_widths.to_vec(), false);
+    }
+    let gaps = ui.spacing().item_spacing.x * widths.len().saturating_sub(1) as f32;
+    let total = widths.iter().sum::<f32>() + gaps;
+    if total <= current + 1.0 {
+        // Shrank, but the user's widths still fit: keep them untouched, with
+        // a 1px tolerance so float noise on an exact fit doesn't flip-flop.
+        return (initial_widths.to_vec(), false);
+    }
+    // Shrank past the recorded total: rescale proportionally, floored at
+    // each column's minimum.
+    let scale = ((current - gaps) / (total - gaps)).max(0.0);
+    let scaled = widths
+        .iter()
+        .enumerate()
+        .map(|(column, width)| {
+            let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
+            (width * scale).max(minimum)
+        })
+        .collect();
+    (scaled, true)
 }
 
 /// Shadow the column widths `TableBuilder` resolved this frame so
-/// [`table_bound_shrink_discards_widths`] can judge them on the next one.
+/// [`table_shrink_rescale_widths`] can judge them on the next one.
 fn store_table_column_widths(ui: &Ui, table_id: Id, widths: &[f32]) {
     ui.data_mut(|data| {
         data.insert_temp(table_id.with("_column_widths"), widths.to_vec());
@@ -1732,12 +1760,14 @@ impl CommonMarkViewerInternal {
         // left edge is recorded relative to this so a viewport slice can be
         // placed at the same column (see `ContentGeometry`).
         let scroll_area_left = ui.max_rect().left();
-        // Nothing may lay out past what is actually visible: the CentralPanel
-        // clips its content to the whole window (egui clips only side panels
-        // to their own rect), so a column carved wider than the scroll
-        // viewport would paint straight over the right sidebar. Cap the
-        // document column at the viewport's right edge.
-        let max_width = max_width.min((ui.clip_rect().right() - scroll_area_left).max(0.0));
+        // Nothing may lay out past what is actually visible. `ui.clip_rect()`
+        // cannot be the bound here: the CentralPanel clips its content to the
+        // whole window (only side panels clip to their own rect), and the
+        // vertical ScrollArea passes that X extent straight through to its
+        // content (only the *scrolled* dimension gets tightened in
+        // `ScrollArea::begin`). `max_rect` *is* the viewport, so cap the
+        // document column at its right edge.
+        let max_width = max_width.min((ui.max_rect().right() - scroll_area_left).max(0.0));
         let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let height = ui.text_style_height(&TextStyle::Body);
@@ -2048,11 +2078,12 @@ impl CommonMarkViewerInternal {
                 .unwrap_or_else(|| options.max_width(ui));
             let content_left =
                 ui.max_rect().left() + recorded_geometry.map_or(0.0, |g| g.left_offset);
-            // Same visible-edge cap as the bootstrap pass: the recorded width
-            // is relative to the content column, and re-anchoring it at
+            // Same visible-edge cap as the bootstrap pass (see there for why
+            // this is `max_rect`, not `clip_rect`): the recorded width is
+            // relative to the content column, and re-anchoring it at
             // `content_left` (which carries the content margin / indentation)
             // used to extend the slice past the pane and over the sidebar.
-            let max_width = max_width.min((ui.clip_rect().right() - content_left).max(0.0));
+            let max_width = max_width.min((ui.max_rect().right() - content_left).max(0.0));
 
             let (first_event_index, first_end_y, events_range,
                  diag_viewport_min_y, diag_viewport_max_y) = {
@@ -2467,16 +2498,33 @@ impl CommonMarkViewerInternal {
             // the full pane while prose keeps the reading width. Anchor at
             // the current cursor, not max_rect, or the table would repaint on
             // top of everything above it.
+            // Sidebar shrink handling: proportionally rescale persisted
+            // column widths when they can no longer fit (growth and
+            // shrink-that-fits keep the user's layout — see the function's
+            // notes).
+            let usable_bound_now = (table_bound
+                - table_frame.total_margin().sum().x
+                - table_frame.stroke.width * 2.0)
+                .max(0.0);
+            let (initial_widths, shrink_rescaled) = table_shrink_rescale_widths(
+                ui,
+                id,
+                usable_bound_now,
+                &initial_widths,
+                &minimum_widths,
+            );
             let mut table_scope_rect = ui.cursor();
             // Carve out a viewport wider than the prose column (#64), but
-            // never wider than what is visible: the inherited clip spans the
-            // whole window (the CentralPanel is not clipped to its own rect),
-            // so an unclamped carve-out dragged table columns over the right
-            // sidebar. Floor at `min.x` keeps the rect non-inverted in
-            // degenerately narrow panes; the horizontal ScrollArea still pans
-            // the columns within whatever width remains.
+            // never wider than what is visible. The bound must be
+            // `max_rect`, not `clip_rect`: the inherited clip is window-wide
+            // (the CentralPanel is not clipped to its own rect, and the
+            // document ScrollArea passes that X extent through), so a
+            // clip-based cap never bites. Floor at `min.x` keeps the rect
+            // non-inverted in degenerately narrow panes; the horizontal
+            // ScrollArea still pans the columns within whatever width
+            // remains.
             table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
-                .min(ui.clip_rect().right())
+                .min(ui.max_rect().right())
                 .max(table_scope_rect.min.x);
             // Reserve the table's own height rather than "everything below the
             // cursor".
@@ -2524,16 +2572,8 @@ impl CommonMarkViewerInternal {
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 table_frame.show(ui, |ui| {
-                                    // Columns live inside the frame, so the
-                                    // bound they must fit is the frame's
-                                    // inner width, not the outer scroll cap.
-                                    let usable_bound = (table_bound
-                                        - table_frame.total_margin().sum().x
-                                        - table_frame.stroke.width * 2.0)
-                                        .max(0.0);
                                     let reset_column_widths =
-                                        table_bound_shrink_discards_widths(ui, id, usable_bound)
-                                            || height_layout_changed;
+                                        shrink_rescaled || height_layout_changed;
                                     let mut builder = egui_extras::TableBuilder::new(ui)
                                         .id_salt(id.with("_wrapped"))
                                         .striped(true)
@@ -3452,13 +3492,20 @@ impl CommonMarkViewerInternal {
                     .collect()
             },
         );
+        // Sidebar shrink handling, same policy as markdown tables above.
+        let usable_bound_now = (table_bound
+            - table_frame.total_margin().sum().x
+            - table_frame.stroke.width * 2.0)
+            .max(0.0);
+        let (initial_widths, shrink_rescaled) =
+            table_shrink_rescale_widths(ui, id, usable_bound_now, &initial_widths, &minimum_widths);
         // Same reading-column escape as markdown tables (#64): carve out a
         // scope wider than the prose allocation, anchored at the cursor — but
-        // never wider than what is visible (see the markdown-table carve-out:
-        // the CentralPanel's clip spans the whole window).
+        // never wider than what is visible (see the markdown-table carve-out
+        // for why the bound is `max_rect`, not `clip_rect`).
         let mut table_scope_rect = ui.cursor();
         table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
-            .min(ui.clip_rect().right())
+            .min(ui.max_rect().right())
             .max(table_scope_rect.min.x);
         table_scope_rect.max.y = ui.max_rect().bottom();
         let _ = ui
@@ -3470,16 +3517,8 @@ impl CommonMarkViewerInternal {
                     .show(ui, |ui| {
                 ui.vertical(|ui| {
                     table_frame.show(ui, |ui| {
-                        // Columns live inside the frame, so the bound they
-                        // must fit is the frame's inner width, not the outer
-                        // scroll cap.
-                        let usable_bound = (table_bound
-                            - table_frame.total_margin().sum().x
-                            - table_frame.stroke.width * 2.0)
-                            .max(0.0);
                         let reset_column_widths =
-                            table_bound_shrink_discards_widths(ui, id, usable_bound)
-                                || height_layout_changed;
+                            shrink_rescaled || height_layout_changed;
                         let mut builder = egui_extras::TableBuilder::new(ui)
                             .id_salt(id.with("_wrapped"))
                             .striped(true)
@@ -3935,12 +3974,13 @@ mod tests {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.set_width(table_bound);
             ui.set_max_width(table_bound);
-            let reset_column_widths =
-                table_bound_shrink_discards_widths(ui, table_id, table_bound);
+            let minimums = vec![40.0; initial_widths.len()];
+            let (columns, reset_column_widths) =
+                table_shrink_rescale_widths(ui, table_id, table_bound, initial_widths, &minimums);
             let mut builder = egui_extras::TableBuilder::new(ui)
                 .id_salt(table_id.with("_wrapped"))
                 .resizable(true);
-            for width in initial_widths {
+            for width in &columns {
                 builder = builder.column(
                     egui_extras::Column::initial(*width)
                         .resizable(true)
@@ -3979,14 +4019,14 @@ mod tests {
             "a shrink the widths fit must retain cached widths"
         );
 
-        // A shrink the cached widths cannot fit resets to the fresh
-        // `Column::initial` widths so the columns reflow instead of clipping.
+        // A shrink the cached widths cannot fit rescales them proportionally
+        // to the new bound (instead of resetting the layout), so the columns
+        // reflow without discarding the user's proportions.
         let narrower = render_resizable_table_widths(&ctx, table_id, 120.0, &[40.0, 60.0]);
         assert!(narrower[0] < still_fits[0] && narrower[1] < still_fits[1]);
-        assert_eq!(
-            narrower,
-            vec![40.0, 60.0],
-            "an overflowing shrink must re-derive from the new contract"
+        assert!(
+            (narrower[0] / narrower[1] - still_fits[0] / still_fits[1]).abs() < 0.01,
+            "an overflowing shrink must preserve column proportions: {narrower:?} vs {still_fits:?}"
         );
     }
 
@@ -4560,28 +4600,49 @@ mod tests {
     }
 
     #[test]
-    fn table_widths_reset_only_when_a_shrink_overflows_them() {
+    fn table_widths_rescale_proportionally_when_a_shrink_overflows_them() {
         egui::__run_test_ui(|ui| {
-            let id = egui::Id::new("shrink_reset_test");
+            let id = egui::Id::new("shrink_rescale_test");
+            let initial = [100.0, 100.0];
+            let minimums = [40.0, 40.0];
 
             // First frame: nothing persisted, TableBuilder initializes itself.
-            assert!(!table_bound_shrink_discards_widths(ui, id, 400.0));
+            let (widths, reset) = table_shrink_rescale_widths(ui, id, 400.0, &initial, &minimums);
+            assert_eq!((widths, reset), (initial.to_vec(), false));
             // Growing the pane never discards the manual layout.
-            assert!(!table_bound_shrink_discards_widths(ui, id, 500.0));
+            let (widths, reset) = table_shrink_rescale_widths(ui, id, 500.0, &initial, &minimums);
+            assert_eq!((widths, reset), (initial.to_vec(), false));
 
             // Widths as shadowed by the previous frame's body pass: 350px of
             // columns plus one column gap.
             store_table_column_widths(ui, id, &[200.0, 150.0]);
-            let total = 350.0 + ui.spacing().item_spacing.x;
+            let gaps = ui.spacing().item_spacing.x;
+            let total = 350.0 + gaps;
 
             // Sidebar nudged in, but the columns still fit: keep them.
-            assert!(!table_bound_shrink_discards_widths(ui, id, total + 15.0));
-            // Sidebar nudged in past the recorded total: reset.
-            assert!(table_bound_shrink_discards_widths(ui, id, total - 15.0));
+            let (widths, reset) =
+                table_shrink_rescale_widths(ui, id, total + 15.0, &initial, &minimums);
+            assert_eq!((widths, reset), (initial.to_vec(), false));
+
+            // Sidebar nudged in past the recorded total: rescale the
+            // persisted widths proportionally instead of resetting them to
+            // the fresh contract.
+            let target = total - 15.0;
+            let (widths, reset) = table_shrink_rescale_widths(ui, id, target, &initial, &minimums);
+            assert!(reset, "an overflowing shrink must reset so the scaled widths apply");
+            let expected_scale = (target - gaps) / 350.0;
+            assert!((widths[0] - 200.0 * expected_scale).abs() < 0.01);
+            assert!((widths[1] - 150.0 * expected_scale).abs() < 0.01);
+            assert!(
+                (widths[0] / widths[1] - 200.0 / 150.0).abs() < 0.01,
+                "proportions must survive the rescale"
+            );
+
             // A drag-widened column may overflow the bound by choice; with
             // the bound unchanged, that overflow must not reset anything.
             store_table_column_widths(ui, id, &[450.0, 150.0]);
-            assert!(!table_bound_shrink_discards_widths(ui, id, 500.0));
+            let (widths, reset) = table_shrink_rescale_widths(ui, id, 500.0, &initial, &minimums);
+            assert_eq!((widths, reset), (initial.to_vec(), false));
         });
     }
 
