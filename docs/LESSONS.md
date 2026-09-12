@@ -948,6 +948,12 @@ broken repository.
 **Fix:** Use direct visitor callbacks. Plain/raw slices borrow parser input, recognized emoji borrow static `Emoji::as_str()` values, and highlight splitting emits borrowed slices directly. Capture active-match Y during emission, then mutate cache only after immutable search-range borrows end. Tests collect owned snapshots only at the test boundary and use pointer identity to prove no-colon and unknown-only paths borrow original input.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`
 
+### makepkg LTO poisons cc-compiled C deps — `options=('!lto')` in the AUR PKGBUILD
+**Context:** AUR comment on `md-viewer-git` (djboris): linking failed with undefined symbols on a fresh Arch system unless `options=('!lto')` was set. Our PKGBUILD didn't set it.
+**Root cause:** Arch's default `makepkg.conf` enables LTO and appends `-flto=auto` to `CFLAGS`/`LDFLAGS`. Cargo ignores those, but the `cc` crate does not — so `libmimalloc-sys` (the only C dependency, via `mimalloc`) compiles to GCC LTO objects. The final link is driven by rustc: with `lto = true` in `[profile.release]` it runs its own LLVM LTO and never passes `-flto` to the linking driver, so the GCC LTO object's symbols are invisible → `undefined symbol: mi_*`. Reproduced in isolation: `gcc -c -flto=auto` + `rustc -C lto=yes -C link-arg=foo.o` → `ld.lld: error: undefined symbol`; the same object built without `-flto` links and runs.
+**Fix:** `options=('!lto')` in `aur/PKGBUILD` (+ pkgrel bump). `!lto` only neutralizes makepkg's injected flags; cargo's own `lto = true` still fat-LTOs all Rust code, so binary size/performance are unchanged. This is the standard pattern in Arch Rust PKGBUILDs. `md-viewer-bin` is unaffected (prebuilt binary, no build step). Any future PKGBUILD for a Rust crate that compiles C through the `cc` crate needs the same line.
+**Files:** `aur/PKGBUILD`
+
 ---
 
 ## Virtualization
