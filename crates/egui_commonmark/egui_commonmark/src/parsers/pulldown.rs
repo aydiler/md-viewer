@@ -1912,7 +1912,7 @@ impl CommonMarkViewerInternal {
         }
 
         // Helper: build the renderer-owned ScrollArea with caller config.
-        let make_scroll_area = || {
+        let make_scroll_area = |pending_scroll_offset: Option<f32>| {
             let mut sa = egui::ScrollArea::vertical()
                 .id_salt(scroll_id)
                 .auto_shrink([false, true]);
@@ -1929,7 +1929,7 @@ impl CommonMarkViewerInternal {
         // top-level block boundaries and content-relative positions. Normal
         // frames then paint only the viewport slice between clean boundaries.
         if scroll_cache(cache, &source_id).page_size.is_none() {
-            let out = make_scroll_area().show(ui, |ui| {
+            let out = make_scroll_area(pending_scroll_offset).show(ui, |ui| {
                 cache.set_scroll_offset(pending_scroll_offset.unwrap_or(0.0));
                 self.show(ui, cache, options, text, Some(source_id));
             });
@@ -1948,9 +1948,44 @@ impl CommonMarkViewerInternal {
             unreachable!()
         };
 
+        // Clamp a persisted or requested offset that starts its window beyond
+        // the measured content end BEFORE the viewport is computed from it.
+        // egui's `show_viewport` loads the stored offset in `begin` and hands
+        // the closure `ZERO + state.offset` unclamped, so a document that
+        // shrank since the offset was written (async image decode, font
+        // fallback) selected a slice for a window past the last block and
+        // painted nothing for exactly one frame — the post-render clamp below
+        // only corrected the following frame (#140).
+        //
+        // The guard fires only when the offset outruns the content outright.
+        // Near-bottom offsets stay untouched: clamping against an estimated
+        // scrollable maximum here would fight the scrollbar allowance egui
+        // animates, and the window of an offset within the content still
+        // shows the document tail. For a deep overshoot, snapping to the
+        // deepest position is the behaviour the shrink asks for — the reader
+        // was at a tail that no longer exists.
+        // `ScrollArea::id_salt` wraps its argument in `Id::new`, so the state
+        // id is `ui.id` combined with the *re-hashed* salt — mirror that
+        // exactly or `State::load` finds nothing.
+        let scroll_state_id = ui.make_persistent_id(Id::new(scroll_id));
+        let deepest_scroll = (page_size.y - ui.available_height()).max(0.0);
+        if let Some(mut state) = egui::scroll_area::State::load(ui.ctx(), scroll_state_id) {
+            if state.offset.y > page_size.y {
+                state.offset.y = deepest_scroll;
+                state.store(ui.ctx(), scroll_state_id);
+            }
+        }
+        let pending_scroll_offset = pending_scroll_offset.map(|offset| {
+            if offset > page_size.y {
+                deepest_scroll
+            } else {
+                offset
+            }
+        });
+
         let num_rows = scroll_cache(cache, &source_id).events.len();
 
-        let out = make_scroll_area().show_viewport(ui, |ui, viewport| {
+        let out = make_scroll_area(pending_scroll_offset).show_viewport(ui, |ui, viewport| {
             ui.set_height(page_size.y);
             // The cursor inside show_viewport is viewport-relative; adding
             // this offset recovers content-relative heading/search positions.
