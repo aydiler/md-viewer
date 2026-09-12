@@ -79,3 +79,25 @@ Three user-visible reports around wide tables/code blocks and the right
       the gutter shrinks.
 - [ ] HTML tables share the markdown-table scope/rescale code path shape but
       are separate functions — unifying them would halve this surface.
+
+## Follow-up (user E2E): "dragging the table from the almost-right spot drags it behind the sidebar"
+
+Xvfb reproduction pinned the real interaction: pressing within
+`SIDEBAR_RESIZE_GRAB_RADIUS` (8px) of the sidebar border — where users reach
+for a table's rightmost column separator or scrollbar — grabs egui's
+**invisible** `SidePanel` resize strip (`SidePanel` paints no affordance; the
+only hint is a cursor change). The sidebar then narrows/widens over the table
+and the reflow reads as "the table slid behind the sidebar". The squeeze
+survived into the persisted width: the outline collapsed to a ~90px sliver
+with its heading truncated.
+
+**Fix:** `paint_sidebar_resize_affordance` — a 2px line at the panel border
+that appears (hovered stroke) when the pointer is on the grab strip and stays
+bright (active stroke) while resizing, for both the outline (right) and
+explorer (left) sidebars. It reads the panel's `__resize` response the same
+way `SidePanel::show` does (one frame of latency, matching egui), and paints
+in the Foreground layer over the gutter. No input is stolen: the affordance
+paints; the resize interaction stays egui's.
+
+**Verification:** Xvfb screenshots — hover brightens the boundary line,
+mid-drag keeps it at the moving boundary while the sidebar resizes.
