@@ -1715,6 +1715,7 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Gotchas:** Don't scale `TextStyle::Small` — it sizes chrome controls. State/checkmark UI updating is not evidence fonts changed: assert against `fonts(|f| f.definitions().clone())` or rendered metrics in tests.
 **Files:** `src/system_fonts.rs`, `src/main.rs`
 
+<<<<<<< HEAD
 ### CentralPanel's clip is window-wide — but ScrollArea inner rects already bound wide blocks; clip from max_rect and you erase widgets
 **Context:** "I can drag tables over the right sidebar, code blocks go above it, and resizing the sidebar resets table widths." Three reports, one egui asymmetry, one width policy — and two wrong fixes before the right one.
 
@@ -1734,3 +1735,9 @@ An empty first list is the assertion worth making. It also explains rises in the
 3. **Drive `show_scrollable`, not `.show()`.** The renderer-owned ScrollArea creates the pane-bounded geometry; the plain entry cannot express any of it.
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (bootstrap + slice width caps, both table carve-outs, `table_shrink_rescale_widths`, `store_table_column_widths`), `crates/egui_commonmark/egui_commonmark/tests/pane_clip.rs`, `docs/devlog/068-wide-block-pane-clip.md`
+
+### Fontique `family_names()` is an alias dump, not a picker list
+**Context:** The font picker offered ~742 names on a stock Arch system but "most fonts don't even change the font": ~481 names (script-specific families like "Noto Sans Devanagari", emoji/symbol faces) have no basic-Latin coverage, so the installer's `"Aa"` gate silently fell back to the auto-detected default; another ~425 names (localized names, weight-instance names like "Noto Sans Black") are aliases resolving to the base family's id, so they picked the very same regular face. Only 317 distinct families existed behind the 742 names.
+**Fix:** `scan_pickable_font_families()` keeps a name only if it is the family's canonical name (`collection.family_name(family_id(name)) == name` collapses each alias group to one entry) AND `select_from_families` finds a normal-style face covering `"Aa"` — the identical gate `install_regular_fonts` applies, so anything listed is guaranteed to take effect. The probe costs ~0.5 s (one face load per rejected candidate), so it runs on a background thread and the dialog shows "System Default" + a scanning note until it lands.
+**Gotchas:** `family_names()` order is HashMap-arbitrary — sort case-insensitively yourself. `family_name(id)` returns the first-seen name for the id, which is the canonical one. Listing a family whose selection would fail re-creates the silent-fallback bug; always mirror the installer's gate.
+**Files:** `src/system_fonts.rs` (`scan_pickable_font_families`, `pickable_family_names`), `src/main.rs` (`pending_font_family_scan` poll), `docs/devlog/068-fonts-one-menu.md`

@@ -22,7 +22,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 mod system_fonts;
-use system_fonts::{setup_fonts, FontPreset, TextSizeClass};
+use system_fonts::{scan_pickable_font_families, setup_fonts, FontPreset, TextSizeClass};
 
 #[cfg(feature = "mcp")]
 use egui_mcp_bridge::{McpBridge, McpUiExt};
@@ -2099,13 +2099,18 @@ struct MarkdownApp {
     show_color_settings_dialog: bool,
     // Document body/heading font. `None` = auto-detected system sans-serif.
     selected_font_family: Option<String>,
-    // All installed system font family names, scanned once at startup.
+    // Body-font families the picker offers, scanned in a background thread:
+    // one canonical name per family, only families that can actually serve
+    // as the body font. Empty until the scan lands (the dialog shows a
+    // scanning note; "System Default" always works).
     available_font_families: Vec<String>,
     // Lowercased copy of `available_font_families`, precomputed once so the
     // font-picker search filter doesn't re-lowercase every name on every
     // frame it's open (see docs/EGUI_WORKFLOW.md: never allocate in the
     // render loop what can be cached).
     available_font_families_lower: Vec<String>,
+    // In-flight background scan producing `available_font_families`.
+    pending_font_family_scan: Option<Receiver<Vec<String>>>,
     // Mirrors the font setup inputs (picked family, preset, size class): only
     // reload fonts when this tuple changes.
     last_applied_font_config: Option<(Option<String>, FontPreset, TextSizeClass)>,
@@ -2187,16 +2192,25 @@ impl MarkdownApp {
         // Setup fonts with system font fallbacks for Unicode support, led by
         // the user's picked family (font picker) or the preset's emulated
         // stack; the text-size class is shared by every preset.
-        let available_font_families = setup_fonts(
+        setup_fonts(
             &cc.egui_ctx,
             selected_font_family.as_deref(),
             font_preset,
             text_size_class,
         );
-        let available_font_families_lower: Vec<String> = available_font_families
-            .iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect();
+
+        // Scan the picker's family list off the UI thread: probing every
+        // family's Latin coverage takes ~0.5s on a stock Arch system (see
+        // `scan_pickable_font_families`). Until the result lands, the font
+        // dialog shows "System Default" plus a scanning note.
+        let (font_family_tx, font_family_rx) = mpsc::channel();
+        let scan_spawned = std::thread::Builder::new()
+            .name("font-family-scan".to_owned())
+            .spawn(move || {
+                let _ = font_family_tx.send(scan_pickable_font_families());
+            })
+            .is_ok();
+        let pending_font_family_scan = scan_spawned.then_some(font_family_rx);
 
         // Clear stale egui widget data loaded from disk (scroll offsets, panel sizes, etc.)
         // We don't persist egui memory (see persist_egui_memory), but eframe always
@@ -2371,8 +2385,9 @@ impl MarkdownApp {
                 text_size_class,
             )),
             selected_font_family,
-            available_font_families,
-            available_font_families_lower,
+            available_font_families: Vec::new(),
+            available_font_families_lower: Vec::new(),
+            pending_font_family_scan,
             show_font_dialog: false,
             font_filter: String::new(),
             smooth_text_rendering,
@@ -4401,16 +4416,73 @@ impl MarkdownApp {
 
         let mut open = true;
         // Set inside the window closure, applied after `.show()` returns —
-        // keeps the closure from needing a second mutable borrow of `self`
-        // beyond the local `open` flag used by `.open(&mut open)`.
+        // the list rows borrow `available_font_families` while the closure
+        // runs, so a picked name can't mutate `self` in place.
         let mut new_selection: Option<Option<String>> = None;
 
-        egui::Window::new("Document Font")
+        // Single font dialog: preset, text size, and family picker in one
+        // place. Handlers only mutate state — the `last_applied_font_config`
+        // diff gate in update() rebuilds the font chains once per change.
+        egui::Window::new("Fonts")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(320.0)
+            .default_width(360.0)
             .show(ctx, |ui| {
+                // Markdown font presets. Missing preset faces degrade to the
+                // app's own fallback chain.
+                ui.label("Preset");
+                ui.horizontal_wrapped(|ui| {
+                    for preset in FontPreset::ALL {
+                        let active = self.font_preset == preset;
+                        let preset_btn = ui
+                            .selectable_label(active, preset.label())
+                            .on_hover_text(preset.description());
+                        #[cfg(feature = "mcp")]
+                        self.mcp_bridge.register_widget(
+                            &format!("Font Dialog: Preset: {}", preset.label()),
+                            "button",
+                            &preset_btn,
+                            Some(if active { "selected" } else { "" }),
+                        );
+                        if preset_btn.clicked() && !active {
+                            self.font_preset = preset;
+                        }
+                    }
+                });
+                if self.selected_font_family.is_some() {
+                    ui.small(
+                        "A picked family leads the body chain; presets still \
+                         set the code font and line heights.",
+                    );
+                }
+
+                // Shared text-size classes: one scale for every preset.
+                ui.add_space(2.0);
+                ui.label("Text Size");
+                ui.horizontal_wrapped(|ui| {
+                    for size in TextSizeClass::ALL {
+                        let active = self.text_size_class == size;
+                        let size_btn = ui
+                            .selectable_label(active, size.label())
+                            .on_hover_text("Base text size; headings and code scale with it");
+                        #[cfg(feature = "mcp")]
+                        self.mcp_bridge.register_widget(
+                            &format!("Font Dialog: Size: {}", size.label()),
+                            "button",
+                            &size_btn,
+                            Some(if active { "selected" } else { "" }),
+                        );
+                        if size_btn.clicked() && !active {
+                            self.text_size_class = size;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.label("Family");
+
                 ui.horizontal(|ui| {
                     ui.label("Search:");
                     let filter_edit = ui.text_edit_singleline(&mut self.font_filter);
@@ -4424,7 +4496,17 @@ impl MarkdownApp {
                     #[cfg(not(feature = "mcp"))]
                     let _ = filter_edit;
                 });
-                ui.separator();
+
+                // One canonical name per body-capable family, scanned once in
+                // the background at startup. While the scan is running, only
+                // "System Default" is offered.
+                if self.available_font_families.is_empty() && self.pending_font_family_scan.is_some()
+                {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Scanning installed fonts…");
+                    });
+                }
 
                 // Only the empty-filter (common) case avoids allocating: it
                 // reuses `available_font_families` directly. A non-empty
@@ -4448,7 +4530,7 @@ impl MarkdownApp {
                     .map_or(self.available_font_families.len(), Vec::len);
 
                 let row_height = ui.spacing().interact_size.y;
-                egui::ScrollArea::vertical().max_height(360.0).show_rows(
+                egui::ScrollArea::vertical().max_height(300.0).show_rows(
                     ui,
                     row_height,
                     match_count + 1, // + 1 for the pinned "System Default" row
@@ -4844,6 +4926,35 @@ impl eframe::App for MarkdownApp {
                 visuals.hyperlink_color = color;
             }
             ctx.set_visuals(visuals);
+        }
+
+        // Collect the background font-family scan (async phase: poll the
+        // channel, never block the UI thread). Fills the picker's family
+        // list once, then drops the channel.
+        if self.pending_font_family_scan.is_some() {
+            let received = self
+                .pending_font_family_scan
+                .as_ref()
+                .map(Receiver::try_recv);
+            match received {
+                Some(Ok(names)) => {
+                    self.available_font_families_lower = names
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect();
+                    self.available_font_families = names;
+                    self.pending_font_family_scan = None;
+                    // The list may have landed while the font dialog was
+                    // already open; repaint so it appears without input.
+                    self.egui_ctx.request_repaint();
+                }
+                Some(Err(TryRecvError::Empty)) | None => {}
+                Some(Err(TryRecvError::Disconnected)) => {
+                    // Sender dropped without sending (thread spawn raced or
+                    // panicked) — stop polling, keep whatever list we have.
+                    self.pending_font_family_scan = None;
+                }
+            }
         }
 
         // Reload fonts only when the selected family, preset, or size class
@@ -5353,21 +5464,17 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
-                    let font_label = format!(
-                        "Font: {}…",
-                        self.selected_font_family
-                            .as_deref()
-                            .unwrap_or("System Default")
-                    );
-                    let font_btn = ui.add(egui::Button::new(font_label));
+                    // Single font entry point: opens the Fonts dialog, which
+                    // holds the preset, the text size, and the family picker.
+                    let fonts_btn = ui.add(egui::Button::new("Fonts…"));
                     #[cfg(feature = "mcp")]
                     self.mcp_bridge.register_widget(
-                        "Menu: View → Font",
+                        "Menu: View → Fonts",
                         "button",
-                        &font_btn,
+                        &fonts_btn,
                         self.selected_font_family.as_deref(),
                     );
-                    if font_btn.clicked() {
+                    if fonts_btn.clicked() {
                         self.show_font_dialog = true;
                         ui.close();
                     }
@@ -5393,106 +5500,6 @@ impl eframe::App for MarkdownApp {
                         self.smooth_text_rendering = !self.smooth_text_rendering;
                         ui.close();
                     }
-
-                    ui.separator();
-
-                    // Markdown font presets live in an expandable submenu so
-                    // they don't stretch the View menu; the collapsed entry
-                    // shows the active choice. Missing preset faces degrade
-                    // to the app's own fallback chain.
-                    let fonts_menu =
-                        ui.menu_button(format!("Fonts: {}", self.font_preset.label()), |ui| {
-                            for preset in FontPreset::ALL {
-                                let active = self.font_preset == preset;
-                                let text = if active {
-                                    format!("✓ {}", preset.label())
-                                } else {
-                                    preset.label().to_owned()
-                                };
-                                let preset_btn = ui
-                                    .add(egui::Button::new(text))
-                                    .on_hover_text(preset.description());
-                                #[cfg(feature = "mcp")]
-                                self.mcp_bridge.register_widget(
-                                    &format!("Menu: View → Fonts → {}", preset.label()),
-                                    "button",
-                                    &preset_btn,
-                                    Some(if active { "on" } else { "off" }),
-                                );
-                                if preset_btn.clicked() {
-                                    if self.font_preset != preset {
-                                        self.font_preset = preset;
-                                        // Rebuild the font chains so the preset's
-                                        // faces lead them; set_fonts re-tessellates.
-                                        // Text size is shared, so switching presets
-                                        // never rescales the document. A family
-                                        // picked in the Font dialog outranks the
-                                        // preset's body stack, so it is carried
-                                        // through unchanged.
-                                        setup_fonts(
-                                            &self.egui_ctx,
-                                            self.selected_font_family.as_deref(),
-                                            preset,
-                                            self.text_size_class,
-                                        );
-                                        self.last_applied_font_config = Some((
-                                            self.selected_font_family.clone(),
-                                            preset,
-                                            self.text_size_class,
-                                        ));
-                                    }
-                                    ui.close();
-                                }
-                            }
-
-                            ui.separator();
-
-                            // Shared text-size classes: one scale for every
-                            // preset. Stays open so sizes can be compared by
-                            // clicking through them.
-                            for size in TextSizeClass::ALL {
-                                let size_active = self.text_size_class == size;
-                                let text = if size_active {
-                                    format!("✓ {}", size.label())
-                                } else {
-                                    size.label().to_owned()
-                                };
-                                let size_btn = ui
-                                    .add(egui::Button::new(text))
-                                    .on_hover_text("Base text size, shared by all font presets");
-                                #[cfg(feature = "mcp")]
-                                let size_id =
-                                    format!("Menu: View → Fonts → Size: {}", size.label());
-                                #[cfg(feature = "mcp")]
-                                self.mcp_bridge.register_widget(
-                                    &size_id,
-                                    "button",
-                                    &size_btn,
-                                    Some(if size_active { "on" } else { "off" }),
-                                );
-                                if size_btn.clicked() && self.text_size_class != size {
-                                    self.text_size_class = size;
-                                    setup_fonts(
-                                        &self.egui_ctx,
-                                        self.selected_font_family.as_deref(),
-                                        self.font_preset,
-                                        size,
-                                    );
-                                    self.last_applied_font_config = Some((
-                                        self.selected_font_family.clone(),
-                                        self.font_preset,
-                                        size,
-                                    ));
-                                }
-                            }
-                        });
-                    #[cfg(feature = "mcp")]
-                    self.mcp_bridge.register_widget(
-                        "Menu: View → Fonts",
-                        "button",
-                        &fonts_menu.response,
-                        Some(self.font_preset.label()),
-                    );
 
                     ui.separator();
 
@@ -5827,9 +5834,11 @@ mod tests {
     #[test]
     fn font_preset_survives_a_persistence_roundtrip() {
         let mut storage = MemoryStorage(HashMap::new());
-        let mut app_state = PersistedState::default();
-        app_state.font_preset = Some(FontPreset::Vscode);
-        app_state.text_size_class = Some(TextSizeClass::Large);
+        let app_state = PersistedState {
+            font_preset: Some(FontPreset::Vscode),
+            text_size_class: Some(TextSizeClass::Large),
+            ..PersistedState::default()
+        };
         eframe::set_value(&mut storage, APP_KEY, &app_state);
 
         let restored: PersistedState = eframe::get_value(&storage, APP_KEY).expect("state decodes");
