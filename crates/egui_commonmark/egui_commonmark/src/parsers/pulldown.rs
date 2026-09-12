@@ -2410,6 +2410,10 @@ impl CommonMarkViewerInternal {
             // the full pane while prose keeps the reading width. Anchor at
             // the current cursor, not max_rect, or the table would repaint on
             // top of everything above it.
+            let usable_bound_now = (table_bound
+                - table_frame.total_margin().sum().x
+                - table_frame.stroke.width * 2.0)
+                .max(0.0);
             // Column widths persist across pane-width changes: a sidebar drag
             // must not disturb the user's layout. TableBuilder keeps its own
             // state and the outer horizontal scroller absorbs any overflow,
@@ -2417,9 +2421,25 @@ impl CommonMarkViewerInternal {
             // render — last frame's — and fall back to the fresh proposal on
             // first render (or after a genuine layout change, which resets
             // below).
-            let initial_widths = ui
-                .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")))
-                .unwrap_or(initial_widths);
+            let last_widths = ui
+                .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")));
+            let initial_widths = last_widths.clone().unwrap_or(initial_widths);
+            // Cap separator drags at the pane edge: egui_extras grows the
+            // dragged column without shrinking its neighbours, so an
+            // unbounded drag pushed the columns to its right under the
+            // sidebar. A column may grow only into space the others are not
+            // using (floored at its own minimum); with no last frame there
+            // is no cap — fresh tables fit their budget anyway.
+            let column_caps = last_widths.map(|widths| {
+                let total: f32 = widths.iter().sum();
+                (0..initial_widths.len())
+                    .map(|column| {
+                        let others = total - widths.get(column).copied().unwrap_or(0.0);
+                        let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
+                        (usable_bound_now - others).max(minimum)
+                    })
+                    .collect::<Vec<f32>>()
+            });
             let mut table_scope_rect = ui.cursor();
             // Carve out a viewport wider than the prose column (#64), but
             // never wider than what is visible. The bound must be
@@ -2495,12 +2515,16 @@ impl CommonMarkViewerInternal {
                                         .min_scrolled_height(0.0)
                                         .cell_layout(egui::Layout::left_to_right(egui::Align::Min));
                                     for (column, width) in initial_widths.into_iter().enumerate() {
-                                        builder = builder.column(
-                                            egui_extras::Column::initial(width)
-                                                .resizable(true)
-                                                .clip(true)
-                                                .at_least(minimum_widths[column]),
-                                        );
+                                        let mut column_width = egui_extras::Column::initial(width)
+                                            .resizable(true)
+                                            .clip(true)
+                                            .at_least(minimum_widths[column]);
+                                        if let Some(max) =
+                                            column_caps.as_ref().and_then(|caps| caps.get(column))
+                                        {
+                                            column_width = column_width.at_most(*max);
+                                        }
+                                        builder = builder.column(column_width);
                                     }
                                     if reset_column_widths {
                                         builder.reset();
@@ -3398,10 +3422,29 @@ impl CommonMarkViewerInternal {
             },
         );
         // Column widths persist across pane-width changes (see the markdown
-        // table notes).
-        let initial_widths = ui
-            .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")))
-            .unwrap_or(initial_widths);
+        // table notes), with the same separator-drag caps.
+        let usable_bound_now = (table_bound
+            - table_frame.total_margin().sum().x
+            - table_frame.stroke.width * 2.0)
+            .max(0.0);
+        let last_widths = ui
+            .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")));
+        let initial_widths = last_widths.clone().unwrap_or(initial_widths);
+        let column_caps = last_widths.map(|widths| {
+            let total: f32 = widths.iter().sum();
+            (0..initial_widths.len())
+                .map(|column| {
+                    let others = total - widths.get(column).copied().unwrap_or(0.0);
+                    let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
+                    // The cap limits growth only: on a shrink the column
+                    // keeps its last width (stickiness wins, the overflow
+                    // scrolls), so `at_most` must not shrink it back.
+                    (usable_bound_now - others)
+                        .max(widths.get(column).copied().unwrap_or(0.0))
+                        .max(minimum)
+                })
+                .collect::<Vec<f32>>()
+        });
         // Same reading-column escape as markdown tables (#64): carve out a
         // scope wider than the prose allocation, anchored at the cursor — but
         // never wider than what is visible (see the markdown-table carve-out
@@ -3432,12 +3475,16 @@ impl CommonMarkViewerInternal {
                             .min_scrolled_height(0.0)
                             .cell_layout(egui::Layout::left_to_right(egui::Align::Min));
                         for (column, width) in initial_widths.into_iter().enumerate() {
-                            builder = builder.column(
-                                egui_extras::Column::initial(width)
-                                    .resizable(true)
-                                    .clip(true)
-                                    .at_least(minimum_widths[column]),
-                            );
+                            let mut column_width = egui_extras::Column::initial(width)
+                                .resizable(true)
+                                .clip(true)
+                                .at_least(minimum_widths[column]);
+                            if let Some(max) =
+                                column_caps.as_ref().and_then(|caps| caps.get(column))
+                            {
+                                column_width = column_width.at_most(*max);
+                            }
+                            builder = builder.column(column_width);
                         }
 
                         if reset_column_widths {
