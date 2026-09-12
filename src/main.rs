@@ -22,7 +22,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 mod system_fonts;
-use system_fonts::setup_fonts;
+use system_fonts::{setup_fonts, FontPreset, TextSizeClass};
 
 #[cfg(feature = "mcp")]
 use egui_mcp_bridge::{McpBridge, McpUiExt};
@@ -319,6 +319,23 @@ fn pick_folder(initial_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
     }
 }
 
+/// Display-zoom bounds and step, shared by keyboard, menu, and Ctrl+wheel
+/// zooming. Steps are multiplicative so the perceived change stays uniform
+/// across the whole range (like browsers and the lightbox already do).
+const ZOOM_MIN: f32 = 0.5;
+const ZOOM_MAX: f32 = 3.0;
+const ZOOM_STEP: f32 = 1.25;
+
+/// One multiplicative zoom step applied to `current`, clamped to the app's
+/// zoom bounds. Neutral, non-finite, or non-positive factors are no-ops —
+/// egui reports `zoom_delta() == 1.0` on frames without a zoom gesture.
+fn zoomed(current: f32, factor: f32) -> f32 {
+    if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 1e-3 {
+        return current.clamp(ZOOM_MIN, ZOOM_MAX);
+    }
+    (current * factor).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
 /// A recently opened file, for the welcome page's "Recent" list.
 #[derive(Serialize, Deserialize, Clone)]
 struct RecentEntry {
@@ -391,6 +408,10 @@ struct PersistedState {
     /// today's behavior; `Some(true)` trades a touch of sharpness for glyphs
     /// that no longer look unevenly spaced at fractional zoom levels.
     smooth_text_rendering: Option<bool>,
+    /// Which markdown viewer's font choices lead the font chains.
+    font_preset: Option<FontPreset>,
+    /// Shared text-size class; `None` keeps the Normal default.
+    text_size_class: Option<TextSizeClass>,
     open_tabs: Option<Vec<PathBuf>>,
     active_tab: Option<usize>,
     // File explorer state
@@ -2040,8 +2061,9 @@ struct MarkdownApp {
     // frame it's open (see docs/EGUI_WORKFLOW.md: never allocate in the
     // render loop what can be cached).
     available_font_families_lower: Vec<String>,
-    // Mirrors `last_applied_dark_mode`: only reload fonts when this changes.
-    last_applied_font_family: Option<String>,
+    // Mirrors the font setup inputs (picked family, preset, size class): only
+    // reload fonts when this tuple changes.
+    last_applied_font_config: Option<(Option<String>, FontPreset, TextSizeClass)>,
     show_font_dialog: bool,
     // Transient UI-only search text for the font picker (not persisted).
     font_filter: String,
@@ -2049,6 +2071,10 @@ struct MarkdownApp {
     // every frame (see ctx.set_zoom_factor below) since it's a single write
     // into egui's own memory, not worth a last-applied change-gate.
     smooth_text_rendering: bool,
+    // Which markdown viewer's font choices lead the font chains.
+    font_preset: FontPreset,
+    // Shared text-size class across all presets.
+    text_size_class: TextSizeClass,
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
@@ -2078,6 +2104,8 @@ struct MarkdownApp {
     egui_ctx: egui::Context,
     // Track state to avoid unconditional repaints
     last_applied_dark_mode: Option<bool>,
+    // Last zoom level handed to set_zoom_factor; skips redundant writes
+    last_applied_zoom_level: Option<f32>,
     last_window_title: String,
     title_dirty: bool,
     /// Cached set of open tab paths for file explorer highlighting (avoids per-frame syscalls)
@@ -2102,15 +2130,24 @@ struct MarkdownApp {
 impl MarkdownApp {
     fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>, watch: bool) -> Self {
         // Load persisted state (needed before font setup, which reads the
-        // persisted font preference)
+        // persisted font family, preset, and text-size class).
         let persisted: PersistedState = cc
             .storage
             .and_then(|s| eframe::get_value(s, APP_KEY))
             .unwrap_or_default();
         let selected_font_family = persisted.selected_font_family;
+        let font_preset = persisted.font_preset.unwrap_or_default();
+        let text_size_class = persisted.text_size_class.unwrap_or_default();
 
-        // Setup fonts with system font fallbacks for Unicode support
-        let available_font_families = setup_fonts(&cc.egui_ctx, selected_font_family.as_deref());
+        // Setup fonts with system font fallbacks for Unicode support, led by
+        // the user's picked family (font picker) or the preset's emulated
+        // stack; the text-size class is shared by every preset.
+        let available_font_families = setup_fonts(
+            &cc.egui_ctx,
+            selected_font_family.as_deref(),
+            font_preset,
+            text_size_class,
+        );
         let available_font_families_lower: Vec<String> = available_font_families
             .iter()
             .map(|name| name.to_ascii_lowercase())
@@ -2283,13 +2320,19 @@ impl MarkdownApp {
             show_color_settings_dialog: false,
             // Already applied above via setup_fonts(); last_applied starts in
             // sync so update() doesn't redundantly reload fonts on frame 1.
-            last_applied_font_family: selected_font_family.clone(),
+            last_applied_font_config: Some((
+                selected_font_family.clone(),
+                font_preset,
+                text_size_class,
+            )),
             selected_font_family,
             available_font_families,
             available_font_families_lower,
             show_font_dialog: false,
             font_filter: String::new(),
             smooth_text_rendering,
+            font_preset,
+            text_size_class,
             watch_enabled: watch,
             error_message: startup_error,
             is_dragging: false,
@@ -2307,6 +2350,7 @@ impl MarkdownApp {
             is_virtual_display,
             egui_ctx: cc.egui_ctx.clone(),
             last_applied_dark_mode: None,
+            last_applied_zoom_level: None,
             last_window_title: String::new(),
             title_dirty: true,
             open_tab_paths: HashSet::new(),
@@ -3712,6 +3756,9 @@ impl MarkdownApp {
                 let default_width = content_default_width(self.full_width_content);
                 let content_width =
                     content_width_limit(self.full_width_content, content_rect.width());
+                // Line heights follow the emulated viewer (GitHub 1.5/1.45,
+                // VS Code preview 1.6/1.36); the font preset owns the metrics.
+                let (preset_line_height, preset_code_line_height) = self.font_preset.line_heights();
                 let mut scroll_output = CommonMarkViewer::new()
                     .default_implicit_uri_scheme(&tab.base_uri)
                     .max_image_width(Some(800))
@@ -3731,8 +3778,8 @@ impl MarkdownApp {
                     .show_alt_text_on_hover(true)
                     .syntax_theme_dark("base16-ocean.dark")
                     .syntax_theme_light("base16-ocean.light")
-                    .line_height(1.5)
-                    .code_line_height(1.3)
+                    .line_height(preset_line_height)
+                    .code_line_height(preset_code_line_height)
                     .paragraph_spacing(2.0)
                     .heading_spacing_above(2.0)
                     .heading_spacing_below(0.75)
@@ -4649,6 +4696,8 @@ impl eframe::App for MarkdownApp {
             link_color: self.link_color.map(|c| [c.r(), c.g(), c.b(), c.a()]),
             selected_font_family: self.selected_font_family.clone(),
             smooth_text_rendering: Some(self.smooth_text_rendering),
+            font_preset: Some(self.font_preset),
+            text_size_class: Some(self.text_size_class),
             open_tabs: Some(self.get_open_tab_paths()),
             active_tab: Some(self.active_tab),
             show_explorer: Some(self.show_explorer),
@@ -4738,15 +4787,32 @@ impl eframe::App for MarkdownApp {
             ctx.set_visuals(visuals);
         }
 
-        // Reload fonts only when the selected family actually changes —
-        // rescanning the system font collection on every frame would be
-        // expensive and is unnecessary (see docs/EGUI_WORKFLOW.md).
-        if self.last_applied_font_family != self.selected_font_family {
-            self.last_applied_font_family = self.selected_font_family.clone();
-            setup_fonts(ctx, self.selected_font_family.as_deref());
+        // Reload fonts only when the selected family, preset, or size class
+        // actually changes — rescanning the system font collection on every
+        // frame would be expensive and is unnecessary (see
+        // docs/EGUI_WORKFLOW.md).
+        let font_config = (
+            self.selected_font_family.clone(),
+            self.font_preset,
+            self.text_size_class,
+        );
+        if self.last_applied_font_config.as_ref() != Some(&font_config) {
+            self.last_applied_font_config = Some(font_config.clone());
+            setup_fonts(
+                ctx,
+                self.selected_font_family.as_deref(),
+                self.font_preset,
+                self.text_size_class,
+            );
         }
 
-        ctx.set_zoom_factor(self.zoom_level);
+        // Apply display zoom only when it actually changed: set_zoom_factor
+        // is not free (it can invalidate glyph caches), and the value only
+        // moves on user input or state restore.
+        if self.last_applied_zoom_level != Some(self.zoom_level) {
+            ctx.set_zoom_factor(self.zoom_level);
+            self.last_applied_zoom_level = Some(self.zoom_level);
+        }
 
         // Disabling pixel-snapping lets glyphs render at their exact
         // sub-pixel position instead of each being individually rounded to
@@ -4775,7 +4841,8 @@ impl eframe::App for MarkdownApp {
         let mut toggle_outline = false;
         let mut toggle_explorer = false;
         let mut quit_app = false;
-        let mut zoom_delta: f32 = 0.0;
+        let mut zoom_factor_request: Option<f32> = None;
+        let mut zoom_reset = false;
         let mut go_back = false;
         let mut go_forward = false;
         let mut close_tab = false;
@@ -4789,37 +4856,37 @@ impl eframe::App for MarkdownApp {
         let mut close_search_kb = false;
         let mut keyboard_scroll_action: Option<KeyboardScrollAction> = None;
 
-        // Ctrl+/- zoom: applies to lightbox when open, document otherwise
+        // Ctrl+/- zoom: applies to lightbox when open, document otherwise.
+        // Steps are multiplicative (×1.25) like browsers and the lightbox.
         ctx.input(|i| {
             if i.modifiers.ctrl
                 && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
             {
-                zoom_delta = 0.1;
+                zoom_factor_request = Some(ZOOM_STEP);
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
-                zoom_delta = -0.1;
+                zoom_factor_request = Some(1.0 / ZOOM_STEP);
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Num0) {
-                if self.lightbox.is_some() {
-                    // Reset lightbox zoom
-                    zoom_delta = 0.0;
-                    if let Some(lb) = &mut self.lightbox {
-                        lb.zoom = 1.0;
-                    }
+                if let Some(lightbox) = &mut self.lightbox {
+                    // Reset lightbox zoom only; the document has its own reset.
+                    lightbox.zoom = 1.0;
                 } else {
-                    zoom_delta = 1.0 - self.zoom_level;
+                    zoom_reset = true;
                 }
             }
         });
 
         // Apply zoom to lightbox or document
-        if zoom_delta != 0.0 {
-            if let Some(lb) = &mut self.lightbox {
-                let factor = if zoom_delta > 0.0 { 1.25 } else { 1.0 / 1.25 };
-                lb.zoom = (lb.zoom * factor).clamp(0.1, 10.0);
+        if let Some(factor) = zoom_factor_request {
+            if let Some(lightbox) = &mut self.lightbox {
+                lightbox.zoom = (lightbox.zoom * factor).clamp(0.1, 10.0);
             } else {
-                self.zoom_level = (self.zoom_level + zoom_delta).clamp(0.5, 3.0);
+                self.zoom_level = zoomed(self.zoom_level, factor);
             }
+        }
+        if zoom_reset && self.lightbox.is_none() {
+            self.zoom_level = 1.0;
         }
 
         if self.lightbox.is_none() {
@@ -4887,15 +4954,12 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
                     quit_app = true;
                 }
-                // Ctrl + scroll wheel for zoom
-                if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
-                    self.zoom_level = (self.zoom_level
-                        + if i.raw_scroll_delta.y > 0.0 {
-                            0.1
-                        } else {
-                            -0.1
-                        })
-                    .clamp(0.5, 3.0);
+                // Ctrl + scroll wheel / pinch to zoom (multiplicative, like
+                // browsers). The lightbox captures wheel input itself in
+                // raw_input_hook, so this only runs for the document.
+                let wheel_zoom_factor = i.zoom_delta();
+                if wheel_zoom_factor != 1.0 {
+                    self.zoom_level = zoomed(self.zoom_level, wheel_zoom_factor);
                 }
                 // F5: Toggle file watching
                 if i.key_pressed(egui::Key::F5) {
@@ -5273,6 +5337,106 @@ impl eframe::App for MarkdownApp {
 
                     ui.separator();
 
+                    // Markdown font presets live in an expandable submenu so
+                    // they don't stretch the View menu; the collapsed entry
+                    // shows the active choice. Missing preset faces degrade
+                    // to the app's own fallback chain.
+                    let fonts_menu =
+                        ui.menu_button(format!("Fonts: {}", self.font_preset.label()), |ui| {
+                            for preset in FontPreset::ALL {
+                                let active = self.font_preset == preset;
+                                let text = if active {
+                                    format!("✓ {}", preset.label())
+                                } else {
+                                    preset.label().to_owned()
+                                };
+                                let preset_btn = ui
+                                    .add(egui::Button::new(text))
+                                    .on_hover_text(preset.description());
+                                #[cfg(feature = "mcp")]
+                                self.mcp_bridge.register_widget(
+                                    &format!("Menu: View → Fonts → {}", preset.label()),
+                                    "button",
+                                    &preset_btn,
+                                    Some(if active { "on" } else { "off" }),
+                                );
+                                if preset_btn.clicked() {
+                                    if self.font_preset != preset {
+                                        self.font_preset = preset;
+                                        // Rebuild the font chains so the preset's
+                                        // faces lead them; set_fonts re-tessellates.
+                                        // Text size is shared, so switching presets
+                                        // never rescales the document. A family
+                                        // picked in the Font dialog outranks the
+                                        // preset's body stack, so it is carried
+                                        // through unchanged.
+                                        setup_fonts(
+                                            &self.egui_ctx,
+                                            self.selected_font_family.as_deref(),
+                                            preset,
+                                            self.text_size_class,
+                                        );
+                                        self.last_applied_font_config = Some((
+                                            self.selected_font_family.clone(),
+                                            preset,
+                                            self.text_size_class,
+                                        ));
+                                    }
+                                    ui.close();
+                                }
+                            }
+
+                            ui.separator();
+
+                            // Shared text-size classes: one scale for every
+                            // preset. Stays open so sizes can be compared by
+                            // clicking through them.
+                            for size in TextSizeClass::ALL {
+                                let size_active = self.text_size_class == size;
+                                let text = if size_active {
+                                    format!("✓ {}", size.label())
+                                } else {
+                                    size.label().to_owned()
+                                };
+                                let size_btn = ui
+                                    .add(egui::Button::new(text))
+                                    .on_hover_text("Base text size, shared by all font presets");
+                                #[cfg(feature = "mcp")]
+                                let size_id =
+                                    format!("Menu: View → Fonts → Size: {}", size.label());
+                                #[cfg(feature = "mcp")]
+                                self.mcp_bridge.register_widget(
+                                    &size_id,
+                                    "button",
+                                    &size_btn,
+                                    Some(if size_active { "on" } else { "off" }),
+                                );
+                                if size_btn.clicked() && self.text_size_class != size {
+                                    self.text_size_class = size;
+                                    setup_fonts(
+                                        &self.egui_ctx,
+                                        self.selected_font_family.as_deref(),
+                                        self.font_preset,
+                                        size,
+                                    );
+                                    self.last_applied_font_config = Some((
+                                        self.selected_font_family.clone(),
+                                        self.font_preset,
+                                        size,
+                                    ));
+                                }
+                            }
+                        });
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Fonts",
+                        "button",
+                        &fonts_menu.response,
+                        Some(self.font_preset.label()),
+                    );
+
+                    ui.separator();
+
                     let zoom_in_btn = ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"));
                     #[cfg(feature = "mcp")]
                     self.mcp_bridge.register_widget(
@@ -5282,7 +5446,7 @@ impl eframe::App for MarkdownApp {
                         None,
                     );
                     if zoom_in_btn.clicked() {
-                        self.zoom_level = (self.zoom_level + 0.1).min(3.0);
+                        self.zoom_level = zoomed(self.zoom_level, ZOOM_STEP);
                         ui.close();
                     }
                     let zoom_out_btn =
@@ -5295,7 +5459,7 @@ impl eframe::App for MarkdownApp {
                         None,
                     );
                     if zoom_out_btn.clicked() {
-                        self.zoom_level = (self.zoom_level - 0.1).max(0.5);
+                        self.zoom_level = zoomed(self.zoom_level, 1.0 / ZOOM_STEP);
                         ui.close();
                     }
                     let reset_zoom_btn =
@@ -5586,6 +5750,74 @@ impl eframe::App for MarkdownApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In-memory stand-in for eframe's key/value storage so persistence
+    /// roundtrips run through the same RON encode/decode path as the app.
+    struct MemoryStorage(HashMap<String, String>);
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn font_preset_survives_a_persistence_roundtrip() {
+        let mut storage = MemoryStorage(HashMap::new());
+        let mut app_state = PersistedState::default();
+        app_state.font_preset = Some(FontPreset::Vscode);
+        app_state.text_size_class = Some(TextSizeClass::Large);
+        eframe::set_value(&mut storage, APP_KEY, &app_state);
+
+        let restored: PersistedState = eframe::get_value(&storage, APP_KEY).expect("state decodes");
+
+        assert_eq!(restored.font_preset, Some(FontPreset::Vscode));
+        assert_eq!(restored.text_size_class, Some(TextSizeClass::Large));
+
+        // Absent field (older state files) falls back to the default preset.
+        let legacy: PersistedState = eframe::get_value(
+            &MemoryStorage(HashMap::from([(
+                APP_KEY.to_owned(),
+                "(dark_mode: Some(true))".to_owned(),
+            )])),
+            APP_KEY,
+        )
+        .expect("legacy state decodes");
+        assert_eq!(legacy.font_preset, None);
+        assert_eq!(legacy.font_preset.unwrap_or_default(), FontPreset::Current);
+        assert_eq!(legacy.text_size_class, None);
+        assert_eq!(
+            legacy.text_size_class.unwrap_or_default(),
+            TextSizeClass::Normal
+        );
+    }
+
+    #[test]
+    fn document_zoom_steps_are_multiplicative_and_clamped() {
+        assert_eq!(zoomed(1.0, ZOOM_STEP), 1.25);
+        assert!((zoomed(1.25, 1.0 / ZOOM_STEP) - 1.0).abs() < 1e-6);
+
+        // Same bounds the additive path clamped to before.
+        assert_eq!(zoomed(2.9, ZOOM_STEP), ZOOM_MAX);
+        assert_eq!(zoomed(0.6, 1.0 / ZOOM_STEP), ZOOM_MIN);
+
+        // Neutral and degenerate factors are no-ops (egui reports 1.0 on
+        // frames without a zoom gesture; guards against divide-by-style bugs).
+        assert_eq!(zoomed(1.7, 1.0), 1.7);
+        assert_eq!(zoomed(1.7, 0.0), 1.7);
+        assert_eq!(zoomed(1.7, -2.0), 1.7);
+    }
+
+    #[test]
+    fn zoom_bounds_match_the_persisted_value_clamp() {
+        // PersistedState load clamps with the same constants.
+        let persisted_level = 7.5_f32.clamp(ZOOM_MIN, ZOOM_MAX);
+        assert_eq!(persisted_level, ZOOM_MAX);
+    }
 
     #[test]
     fn push_recent_dedupes_and_moves_to_front() {

@@ -1699,3 +1699,12 @@ An empty first list is the assertion worth making. It also explains rises in the
 2. `ScrollArea::id_salt(id_salt: impl Hash)` wraps its argument in `Id::new` — pass an already-hashed `Id` and it is hashed *again*. Computing the persistent id as `ui.make_persistent_id(scroll_id)` therefore does not match the state egui stores under `.id_salt(scroll_id)`; mirror the re-hash: `ui.make_persistent_id(Id::new(scroll_id))`.
 
 **Files:** `crates/egui_commonmark/egui_commonmark/tests/scroll_offset_beyond_extent.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show_scrollable` pre-selection clamp)
+
+---
+
+### egui silently skips set_fonts when definitions compare equal
+**Context:** Font presets GitHub and VS Code appeared to "not switch" between each other while both switched to/from Default fine.
+**Problem:** `Context::set_fonts` diffs the new `FontDefinitions` against the installed ones (comparing TTF data) and returns early on equality (`egui-0.33.3 context.rs:1968`). Two presets whose CSS stacks resolve to the same installed faces — the normal case on stock Linux, where GitHub's and VS Code's stacks both end up at Adwaita Sans + Noto Sans Mono — produce byte-identical definitions, so nothing re-renders.
+**Fix:** Give presets differences beyond family resolution: per-preset base body size (GitHub 16px vs VS Code preview 14px) applied to `TextStyle::Body`/`Heading`/`Monospace`, and preset-driven renderer line heights (GitHub 1.5/1.45, VS Code 1.6/1.36). The renderer derives all document sizes from `TextStyle::Body`, so one style entry cascades everywhere.
+**Gotchas:** Don't scale `TextStyle::Small` — it sizes chrome controls. State/checkmark UI updating is not evidence fonts changed: assert against `fonts(|f| f.definitions().clone())` or rendered metrics in tests.
+**Files:** `src/system_fonts.rs`, `src/main.rs`
