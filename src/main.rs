@@ -1055,12 +1055,21 @@ impl Tab {
     }
 
     fn navigate_to_link(&mut self, link: &str) -> io::Result<bool> {
+        // A same-document fragment scrolls this tab — no path resolution, no
+        // history entry, the same semantics as clicking the heading in the
+        // outline. Unmatched fragments do nothing rather than error: the
+        // document opened fine, the anchor simply does not exist.
+        if let Some(fragment) = link.strip_prefix('#') {
+            return Ok(apply_fragment_navigation(self, fragment));
+        }
+
         // Share resolution and error handling with the ctrl+click path. These
         // used to differ: #78 taught percent-decoding and `file://` handling
         // to `resolve_local_link_path`, but this function still did a raw
         // `join`, so a link with an encoded space opened in a new tab on
         // ctrl+click and silently did nothing on a plain click.
-        let Some(target_path) = self.resolve_link(link)? else {
+        let (destination, fragment) = split_link_fragment(link);
+        let Some(target_path) = self.resolve_link(destination)? else {
             return Ok(false);
         };
 
@@ -1069,6 +1078,13 @@ impl Tab {
         }
         let previous_path = self.path.clone();
         self.load_file(&target_path)?;
+        // `guide.md#section` opens the document *and* lands on the heading —
+        // the #141 decision that an anchor selects a place in the document,
+        // not just the document. Applied after `load_file`, whose
+        // `reset_scroll` would otherwise clear it.
+        if let Some(fragment) = &fragment {
+            apply_fragment_navigation(self, fragment);
+        }
         self.history_back.push(previous_path);
         self.history_forward.clear();
         Ok(true)
@@ -1148,24 +1164,127 @@ impl Tab {
     }
 }
 
+/// Split a clicked destination into its file part and `#fragment`, if the
+/// fragment is non-empty. A trailing `#` with nothing after it is a link with
+/// no anchor, not a navigation request.
+fn split_link_fragment(link: &str) -> (&str, Option<&str>) {
+    match link.split_once('#') {
+        Some((path, fragment)) if !fragment.is_empty() => (path, Some(fragment)),
+        _ => (link, None),
+    }
+}
+
+/// GitHub-style anchor slug for a heading title: lowercased, whitespace runs
+/// become hyphens, and anything that is not a letter, number, hyphen or
+/// underscore is dropped. This is the convention most markdown sites use for
+/// `#fragment` anchors, so `#settings--config` matches a `Settings & Config`
+/// heading.
+fn slugify_heading(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                '\u{0}'
+            }
+        })
+        .filter(|c| *c != '\u{0}')
+        .collect()
+}
+
+/// Where a `#fragment` landed inside a document.
+enum FragmentTarget<'a> {
+    /// The document title (the first `h1`, which the outline excludes) — the
+    /// very top of the document.
+    DocumentTop,
+    Header(&'a Header),
+    Missing,
+}
+
+/// Resolve a `#fragment` against a document's headings using slug semantics:
+/// exact slug match, first heading wins. The document title is matched before
+/// the outline headers because it is the page's primary anchor.
+fn find_fragment_target<'a>(
+    document_title: Option<&str>,
+    headers: &'a [Header],
+    fragment: &str,
+) -> FragmentTarget<'a> {
+    let wanted = slugify_heading(fragment);
+    if wanted.is_empty() {
+        return FragmentTarget::Missing;
+    }
+    if let Some(title) = document_title {
+        if slugify_heading(title) == wanted {
+            return FragmentTarget::DocumentTop;
+        }
+    }
+    headers
+        .iter()
+        .find(|header| slugify_heading(&header.title) == wanted)
+        .map(FragmentTarget::Header)
+        .unwrap_or(FragmentTarget::Missing)
+}
+
+/// Point a tab at the heading a `#fragment` names, mirroring the outline-click
+/// flow: a cached heading position scrolls immediately, and a fresh document
+/// (no measured height, nothing cached) starts at the top and lets the
+/// post-render corrective pass snap to the recorded position once the
+/// bootstrap has painted. Returns whether the fragment named a heading.
+fn apply_fragment_navigation(tab: &mut Tab, fragment: &str) -> bool {
+    match find_fragment_target(
+        tab.document_title.as_deref(),
+        &tab.outline_headers,
+        fragment,
+    ) {
+        FragmentTarget::DocumentTop => {
+            tab.pending_scroll_offset = Some(0.0);
+            true
+        }
+        FragmentTarget::Header(header) => {
+            let key = header_position_key(header.source_start);
+            if let Some(y_pos) = tab.cache.get_header_position(&key) {
+                tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
+            } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
+                let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
+                    * tab.last_content_height;
+                tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
+                // The estimate only gets us near the target; one full paint
+                // records the exact position for the corrective pass.
+                tab.pending_header_click_key = Some(key);
+            } else {
+                tab.pending_header_click_key = Some(key);
+            }
+            true
+        }
+        FragmentTarget::Missing => false,
+    }
+}
+
 /// Handle a renderer link hook without coupling path resolution to the UI.
 ///
 /// Plain click navigates the current tab, while Ctrl/Cmd+click returns a path
-/// for the caller to open in a new tab. Both modes surface path-resolution
-/// errors consistently.
+/// and `#fragment` for the caller to open in a new tab. Both modes surface
+/// path-resolution errors consistently.
 fn handle_local_link_click(
     tab: &mut Tab,
     clicked_link: &str,
     open_in_new_tab: bool,
-) -> (Option<PathBuf>, Option<String>) {
+) -> (Option<(PathBuf, Option<String>)>, Option<String>) {
     let result = if open_in_new_tab {
-        tab.resolve_link(clicked_link)
+        let (destination, fragment) = split_link_fragment(clicked_link);
+        tab.resolve_link(destination)
+            .map(|path| path.map(|p| (p, fragment.map(str::to_owned))))
     } else {
-        tab.navigate_to_link(clicked_link).map(|_| None)
+        tab.navigate_to_link(clicked_link)
+            .map(|_| None::<(PathBuf, Option<String>)>)
     };
 
     match result {
-        Ok(target_path) => (target_path, None),
+        Ok(target) => (target, None),
         Err(error) => (
             None,
             Some(format!("Unable to open {clicked_link}: {error}")),
@@ -2275,23 +2394,37 @@ impl MarkdownApp {
     }
 
     fn open_in_new_tab(&mut self, path: PathBuf) {
-        // Canonicalize for consistent comparison with existing tabs
+        self.open_in_new_tab_with_fragment(path, None);
+    }
+
+    /// Open a document in its own tab, optionally landing on the heading a
+    /// `#fragment` names. An already-open document is focused *and* scrolled
+    /// to the fragment — the tab-switch must not silently drop the anchor.
+    fn open_in_new_tab_with_fragment(&mut self, path: PathBuf, fragment: Option<String>) {
         let path = path.canonicalize().unwrap_or(path);
         // Check if already open
         if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
             self.active_tab = idx;
             self.title_dirty = true;
+            if let Some(fragment) = &fragment {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    apply_fragment_navigation(tab, fragment);
+                }
+            }
             return;
         }
 
         // Add new tab
-        let tab = match Tab::new(path.clone()) {
+        let mut tab = match Tab::new(path.clone()) {
             Ok(tab) => tab,
             Err(error) => {
                 self.error_message = Some(format!("Unable to open {}: {error}", path.display()));
                 return;
             }
         };
+        if let Some(fragment) = &fragment {
+            apply_fragment_navigation(&mut tab, fragment);
+        }
         self.record_recent(&path);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
@@ -3511,8 +3644,14 @@ impl MarkdownApp {
         }
     }
 
-    fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
-        let mut open_in_new_tab: Option<PathBuf> = None;
+    /// Render the active tab's content. Returns a path and optional
+    /// `#fragment` when the renderer hook requests it be opened in a new tab.
+    fn render_tab_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctrl_held: bool,
+    ) -> Option<(PathBuf, Option<String>)> {
+        let mut open_in_new_tab: Option<(PathBuf, Option<String>)> = None;
         let mut navigation_error = None;
 
         // Snapshot search state before taking a mutable borrow on the active tab
@@ -5355,7 +5494,7 @@ impl eframe::App for MarkdownApp {
         self.render_outline(ctx);
 
         // Main content area
-        let mut open_in_new_tab: Option<PathBuf> = None;
+        let mut open_in_new_tab: Option<(PathBuf, Option<String>)> = None;
         let path_before_render = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO))
@@ -5378,8 +5517,8 @@ impl eframe::App for MarkdownApp {
         }
 
         // Open link in new tab if requested
-        if let Some(path) = open_in_new_tab {
-            self.open_in_new_tab(path);
+        if let Some((path, fragment)) = open_in_new_tab {
+            self.open_in_new_tab_with_fragment(path, fragment);
         }
 
         // Check if a mermaid diagram was clicked → open lightbox
@@ -6011,6 +6150,142 @@ mod tests {
             "navigate_to_link must accept file:// URIs too"
         );
         assert_eq!(tab.path, guide.canonicalize().unwrap());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn slugify_heading_matches_github_anchor_conventions() {
+        let cases = [
+            ("Hello World", "hello-world"),
+            ("Settings & Config", "settings--config"),
+            ("C++ & Rust?", "c--rust"),
+            ("42. The Meta", "42-the-meta"),
+            // Each space becomes its own hyphen; existing hyphens are kept.
+            ("A -- B_c", "a----b_c"),
+            ("Ünïcode Tïtle", "ünïcode-tïtle"),
+        ];
+        for (title, expected) in cases {
+            assert_eq!(
+                slugify_heading(title),
+                expected,
+                "slug of {title:?} must match the GitHub anchor convention"
+            );
+        }
+    }
+
+    #[test]
+    fn find_fragment_target_prefers_document_title_then_outline_order() {
+        let headers = vec![
+            Header {
+                level: 2,
+                title: "Installation".to_owned(),
+                source_start: 10,
+                line_number: 4,
+            },
+            Header {
+                level: 2,
+                title: "Settings & Config".to_owned(),
+                source_start: 90,
+                line_number: 20,
+            },
+        ];
+
+        // Slug semantics: case, punctuation and spacing differences all
+        // collapse to the same anchor.
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "installation"),
+            FragmentTarget::Header(_)
+        ));
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "settings--config"),
+            FragmentTarget::Header(_)
+        ));
+
+        // The first h1 is excluded from the outline but is still the page's
+        // primary anchor; it navigates to the top.
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "my-manual"),
+            FragmentTarget::DocumentTop
+        ));
+
+        // An unmatched or empty fragment is a no-op, not an error.
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "no-such-section"),
+            FragmentTarget::Missing
+        ));
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "#"),
+            FragmentTarget::Missing
+        ));
+    }
+
+    #[test]
+    fn same_document_fragment_scrolls_without_touching_history() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-same-doc-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("single.md");
+        fs::write(&document, "# Title\n\ntext\n\n## A Section\n\ntext\n").unwrap();
+
+        let mut tab = Tab::new(document.clone()).unwrap();
+        let original_path = tab.path.clone();
+
+        assert!(
+            tab.navigate_to_link("#a-section").unwrap(),
+            "a matching same-document fragment must navigate"
+        );
+        assert_eq!(
+            tab.path, original_path,
+            "same-document navigation stays put"
+        );
+        assert!(tab.history_back.is_empty(), "no history entry for a scroll");
+        assert!(
+            tab.pending_header_click_key.is_some() || tab.pending_scroll_offset.is_some(),
+            "the click must schedule the scroll"
+        );
+
+        // An unmatched fragment does nothing at all — no navigation, and the
+        // scroll scheduled by the earlier match is left alone.
+        let key_before = tab.pending_header_click_key.clone();
+        assert!(!tab.navigate_to_link("#no-such-anchor").unwrap());
+        assert_eq!(tab.pending_header_click_key, key_before);
+        assert_eq!(tab.path, original_path);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cross_document_fragment_opens_and_lands_on_heading() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-cross-doc-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let home = root.join("home.md");
+        let guide = root.join("guide.md");
+        fs::write(&home, "# Home\n\n[Setup](guide.md#setup)\n").unwrap();
+        fs::write(&guide, "# Guide\n\nintro\n\n## Setup\n\nsteps\n").unwrap();
+
+        let mut tab = Tab::new(home.clone()).unwrap();
+        assert!(tab.navigate_to_link("guide.md#setup").unwrap());
+        assert_eq!(tab.path, guide.canonicalize().unwrap());
+        assert!(
+            tab.pending_header_click_key.is_some(),
+            "a fresh document has no cached heading positions, so the \
+             corrective pass must be armed to land on the heading"
+        );
+
+        // ctrl+click carries the fragment through to the new-tab request.
+        let (new_tab, error_message) = handle_local_link_click(&mut tab, "guide.md#setup", true);
+        assert!(error_message.is_none());
+        let (path, fragment) = new_tab.expect("ctrl+click resolves to a path");
+        assert_eq!(path, guide.canonicalize().unwrap());
+        assert_eq!(fragment.as_deref(), Some("setup"));
 
         fs::remove_dir_all(&root).ok();
     }
