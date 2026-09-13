@@ -703,9 +703,7 @@ fn install_strong_font_family(
 /// `preferred_family` optionally names a specific installed family (matched
 /// case-insensitively) to use as the primary proportional font instead of the
 /// auto-detected system sans-serif; an unset or unresolvable preference falls
-/// back to today's auto-detect behavior. Returns the sorted, deduplicated
-/// list of installed family names so callers can build a font picker without
-/// scanning the font collection a second time.
+/// back to today's auto-detect behavior.
 /// Lead the monospace chain with the preset's code face, keeping egui's
 /// bundled monospace (and any installed fallbacks) as fallback. Returns
 /// whether a preset face was installed.
@@ -746,13 +744,10 @@ pub(crate) fn setup_fonts(
     preferred_family: Option<&str>,
     preset: FontPreset,
     size: TextSizeClass,
-) -> Vec<String> {
+) {
     let started = std::time::Instant::now();
     let mut collection = Collection::new(CollectionOptions::default());
-    let mut family_names: Vec<String> = collection.family_names().map(str::to_owned).collect();
-    family_names.sort_by_key(|name| name.to_lowercase());
-    family_names.dedup();
-    let family_count = family_names.len();
+    let family_count = collection.family_names().count();
     let mut source_cache = SourceCache::default();
     let locale = sys_locale::get_locale();
     let mut definitions = FontDefinitions::default();
@@ -800,7 +795,61 @@ pub(crate) fn setup_fonts(
     }
     ctx.set_fonts(definitions);
     apply_text_size_class(ctx, size);
-    family_names
+}
+
+/// Enumerate the family names the font picker should offer: one canonical
+/// name per family, filtered to families that can actually serve as the
+/// document body font.
+///
+/// Fontique's raw `family_names()` is unusable for a picker. On a stock Arch
+/// system it reports 742 names for only 317 distinct families — every
+/// localized name and weight-instance name ("Noto Sans Black", …) is a
+/// separate entry that resolves to the base family and would pick the very
+/// same regular face — and roughly two thirds of the listed names
+/// (script-specific families such as "Noto Sans Devanagari", emoji and
+/// symbol faces) have no basic-Latin coverage, so picking them silently fell
+/// back to the auto-detected default. The body-font gate here is the same
+/// one `install_regular_fonts` applies when installing a picked family, so
+/// every listed name is guaranteed to take effect.
+///
+/// Costs one face load per candidate (every face of script-only families is
+/// probed and rejected) — around half a second on a stock Arch system — so
+/// callers run this off the UI thread (see the egui workflow's async phase).
+pub(crate) fn scan_pickable_font_families() -> Vec<String> {
+    let mut collection = Collection::new(CollectionOptions::default());
+    let mut source_cache = SourceCache::default();
+    pickable_family_names(&mut collection, &mut source_cache)
+}
+
+fn pickable_family_names(
+    collection: &mut Collection,
+    source_cache: &mut SourceCache,
+) -> Vec<String> {
+    let mut names: Vec<String> = collection.family_names().map(str::to_owned).collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names.retain(|name| {
+        let Some(id) = collection.family_id(name) else {
+            return false;
+        };
+        // Keep only each family's canonical (first-seen) name so aliases —
+        // localized names and weight-instance names — collapse into a single
+        // entry instead of five rows that all pick the same regular face.
+        let canonical = collection.family_name(id).map(str::to_owned);
+        if canonical.as_deref() != Some(name.as_str()) {
+            return false;
+        }
+        select_from_families(
+            collection,
+            source_cache,
+            &[id],
+            FontWeight::NORMAL,
+            "Aa",
+            false,
+        )
+        .is_some()
+    });
+    names
 }
 
 #[cfg(test)]
@@ -913,6 +962,58 @@ mod tests {
             .find(|f| f.primary)
             .expect("primary font installed");
         assert_eq!(primary.selected.family, family_name);
+    }
+
+    #[test]
+    #[ignore = "requires installed system fonts"]
+    fn pickable_family_list_is_deduplicated_and_body_capable() {
+        let names = scan_pickable_font_families();
+        assert!(!names.is_empty(), "no pickable families found");
+
+        // Sorted case-insensitively, no duplicate names.
+        let mut sorted = names.clone();
+        sorted.sort_by_key(|name| name.to_lowercase());
+        assert_eq!(names, sorted, "pickable family list must stay sorted");
+
+        // One canonical name per family, and every listed family must pass
+        // the same body-font gate used when installing a picked family —
+        // otherwise picking it silently falls back to the default again.
+        let mut collection = Collection::new(CollectionOptions::default());
+        let total = collection.family_names().count();
+        let mut source_cache = SourceCache::default();
+        let mut seen_ids = HashSet::new();
+        for name in &names {
+            let id = collection
+                .family_id(name)
+                .unwrap_or_else(|| panic!("listed family {name:?} does not resolve"));
+            assert!(
+                seen_ids.insert(id),
+                "duplicate family id behind {name:?} — alias leak"
+            );
+            assert_eq!(
+                collection.family_name(id).map(str::to_owned).as_deref(),
+                Some(name.as_str()),
+                "{name:?} is an alias, not the family's canonical name"
+            );
+            assert!(
+                select_from_families(
+                    &mut collection,
+                    &mut source_cache,
+                    &[id],
+                    FontWeight::NORMAL,
+                    "Aa",
+                    false,
+                )
+                .is_some(),
+                "listed family {name:?} cannot serve as a body font"
+            );
+        }
+        assert!(
+            names.len() < total,
+            "aliases and script-only families should be filtered ({}/{})",
+            names.len(),
+            total
+        );
     }
 
     #[test]
