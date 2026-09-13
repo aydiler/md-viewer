@@ -29,6 +29,7 @@ use std::ops::Range;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rewrite {
     at: usize,
+    original_len: usize,
     replacement: &'static str,
 }
 
@@ -64,28 +65,38 @@ impl OffsetMap {
 /// `\(...\)` / `\[...\]` delimiters to `$...$` / `$$...$$` on an in-memory
 /// copy when paired occurrences exist in prose. Returned event ranges always
 /// refer to `text`, the original source.
-pub fn parse_events(text: &str, math_enabled: bool) -> Vec<(Event<'static>, Range<usize>)> {
+pub fn parse_events(
+    text: &str,
+    math_enabled: bool,
+    frontmatter_enabled: bool,
+) -> Vec<(Event<'static>, Range<usize>)> {
     if !math_enabled {
-        return parse_owned(text, false);
+        return parse_owned(text, false, frontmatter_enabled);
     }
     let rewrites = find_rewrites(text);
     if rewrites.is_empty() {
-        return parse_owned(text, true);
+        return parse_owned(text, true, frontmatter_enabled);
     }
     let (normalized, map) = build_normalized(text, &rewrites);
-    let mut events = parse_owned(&normalized, true);
+    let mut events = parse_owned(&normalized, true, frontmatter_enabled);
     for (_, range) in events.iter_mut() {
         map.map_range(range);
     }
     events
 }
 
-fn parse_owned(text: &str, math_enabled: bool) -> Vec<(Event<'static>, Range<usize>)> {
-    let options = if math_enabled {
-        parser_options() | Options::ENABLE_MATH
-    } else {
-        parser_options()
-    };
+fn parse_owned(
+    text: &str,
+    math_enabled: bool,
+    frontmatter_enabled: bool,
+) -> Vec<(Event<'static>, Range<usize>)> {
+    let mut options = parser_options();
+    if math_enabled {
+        options |= Options::ENABLE_MATH;
+    }
+    if frontmatter_enabled {
+        options |= Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+    }
     Parser::new_ext(text, options)
         .into_offset_iter()
         .map(|(event, range)| (event.into_static(), range))
@@ -234,10 +245,29 @@ fn scan_run(text: &str, run: Range<usize>, out: &mut Vec<Rewrite>) {
         }) {
             out.push(Rewrite {
                 at: open_at,
+                original_len: 2,
                 replacement: kind.replacement(),
             });
+            // CommonMark recognizes table separators before it recognizes math.
+            // Hide bare absolute-value bars inside a completed LaTeX-style pair
+            // from the table parser; the math backend decodes the entity again.
+            for bar in open_at + 2..i {
+                let preceding_slashes = bytes[..bar]
+                    .iter()
+                    .rev()
+                    .take_while(|&&byte| byte == b'\\')
+                    .count();
+                if bytes[bar] == b'|' && preceding_slashes % 2 == 0 {
+                    out.push(Rewrite {
+                        at: bar,
+                        original_len: 1,
+                        replacement: "&#124;",
+                    });
+                }
+            }
             out.push(Rewrite {
                 at: i,
+                original_len: 2,
                 replacement: kind.replacement(),
             });
             pending = None;
@@ -256,9 +286,9 @@ fn build_normalized<'a>(text: &'a str, rewrites: &[Rewrite]) -> (String, OffsetM
     for rw in rewrites {
         out.push_str(&text[prev..rw.at]);
         out.push_str(rw.replacement);
-        delta += 2i64 - rw.replacement.len() as i64;
+        delta += rw.original_len as i64 - rw.replacement.len() as i64;
         shifts.push((out.len(), delta));
-        prev = rw.at + 2;
+        prev = rw.at + rw.original_len;
     }
     out.push_str(&text[prev..]);
     (out, OffsetMap { shifts })
@@ -271,7 +301,7 @@ mod tests {
 
     /// Collect (event-debug, original-slice) pairs.
     fn outline(text: &str) -> Vec<(String, String)> {
-        parse_events(text, true)
+        parse_events(text, true, false)
             .into_iter()
             .map(|(event, range)| (format!("{event:?}"), text[range].to_string()))
             .collect()
@@ -285,7 +315,7 @@ mod tests {
     }
 
     fn plain_texts(text: &str) -> Vec<String> {
-        parse_events(text, true)
+        parse_events(text, true, false)
             .into_iter()
             .filter(|(event, _)| matches!(event, Event::Text(_)))
             .map(|(event, _)| match event {
@@ -303,6 +333,35 @@ mod tests {
         assert_eq!(slice, "\\(P_B,P_A\\)");
         // Prose around the formula still lands in Text events unchanged.
         assert!(plain_texts(text).iter().any(|t| t.contains("after")));
+    }
+
+    #[test]
+    fn table_formula_keeps_command_before_closing_delimiter() {
+        let text = concat!(
+            "| formula |\n|---|\n",
+            r"| \(D_t+\epsilon\) |",
+            "\n",
+            r"| \(a_t/(D_t^{opp}+\epsilon)\) |",
+            "\n",
+        );
+        let formulas: Vec<_> = parse_events(text, true, false)
+            .into_iter()
+            .filter_map(|(event, range)| match event {
+                Event::InlineMath(tex) => Some((tex.into_string(), text[range].to_string())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            formulas,
+            [
+                (r"D_t+\epsilon".into(), r"\(D_t+\epsilon\)".into()),
+                (
+                    r"a_t/(D_t^{opp}+\epsilon)".into(),
+                    r"\(a_t/(D_t^{opp}+\epsilon)\)".into(),
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -330,6 +389,32 @@ mod tests {
         assert_eq!(display.len(), 1);
         assert!(inline.iter().any(|(_, s)| s == "$a$"));
         assert!(inline.iter().any(|(_, s)| s == "\\(b\\)"));
+    }
+
+    #[test]
+    fn absolute_value_bars_do_not_split_markdown_table_cells() {
+        let text = concat!(
+            "| name | formula | kind |\n",
+            "|---|---|---|\n",
+            r"| first | \(\operatorname{EW}[|\Delta OI|]\) | native |",
+            "\n",
+        );
+        let events = parse_events(text, true, false);
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(event, _)| matches!(event, Event::Start(Tag::TableCell)))
+                .count(),
+            6
+        );
+        let formula = events.iter().find_map(|(event, range)| match event {
+            Event::InlineMath(tex) => Some((tex.as_ref(), range.clone())),
+            _ => None,
+        });
+        let (formula, range) = formula.expect("inline formula");
+        assert_eq!(formula, r"\operatorname{EW}[&#124;\Delta OI&#124;]");
+        assert_eq!(&text[range], r"\(\operatorname{EW}[|\Delta OI|]\)");
     }
 
     #[test]
@@ -409,7 +494,7 @@ mod tests {
     #[test]
     fn ranges_after_conversion_point_into_the_original() {
         let text = "a \\(x\\) b";
-        let events = parse_events(text, true);
+        let events = parse_events(text, true, false);
         let after = events
             .iter()
             .find(|(e, _)| matches!(e, Event::Text(t) if t.contains('b')))
@@ -426,14 +511,14 @@ mod tests {
     fn fast_path_when_nothing_converts() {
         // No LaTeX pairs: identical output to a direct parse.
         assert_eq!(
-            parse_events("plain $x$ text", true),
-            parse_owned("plain $x$ text", true)
+            parse_events("plain $x$ text", true, false),
+            parse_owned("plain $x$ text", true, false)
         );
     }
 
     #[test]
     fn math_disabled_leaves_everything_alone() {
-        let events = parse_events("\\(x\\)", false);
+        let events = parse_events("\\(x\\)", false, false);
         assert!(events.iter().all(|(e, _)| !matches!(
             e,
             Event::InlineMath(_) | Event::DisplayMath(_)

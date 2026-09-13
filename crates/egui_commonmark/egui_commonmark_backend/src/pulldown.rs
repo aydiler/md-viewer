@@ -26,18 +26,28 @@ pub struct ScrollableCache {
     /// theme is_dark). When this changes, split_points must be cleared —
     /// their y-positions are no longer valid for the new layout.
     pub layout_signature: u64,
-    /// Content height as reported by the previous frame's ScrollAreaOutput.
-    pub last_content_h: f32,
-    /// Content height captured at the most recent bootstrap. Subsequent
-    /// paints compare `last_content_h` against this value with a hysteresis
-    /// threshold: only when |last - bootstrap| exceeds the threshold do we
-    /// invalidate page_size and trigger a re-bootstrap. This avoids the
-    /// known egui artifact where `ScrollArea::show` (bootstrap path) and
-    /// `ScrollArea::show_viewport` (skip-paint path) report content_size.y
-    /// differing by ~44 px (the panel chrome offset) for the same content —
-    /// without hysteresis that oscillation crosses any bucket boundary and
-    /// keeps the renderer in a perpetual bootstrap loop.
-    pub bootstrap_content_h: f32,
+    /// Renderer-owned async content revision (for example completed math or images).
+    pub layout_revision: u64,
+    /// Content geometry captured by the bootstrap pass that produced
+    /// `page_size` and `split_points`: the content column's width, and its
+    /// left edge as an offset from the scroll area's `max_rect().left()`.
+    ///
+    /// Viewport slices must lay out at exactly this geometry. Recomputing it
+    /// from the slice's own `Ui` yields a different available width (the
+    /// bootstrap and viewport passes reserve scrollbar space differently), so
+    /// the slice wrapped its content at a different column than the pass that
+    /// measured `page_size` — the document extent came out wrong and blocks
+    /// such as tables rendered narrower and horizontally offset.
+    pub content_geometry: Option<ContentGeometry>,
+}
+
+/// Layout geometry of the content column, captured at bootstrap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContentGeometry {
+    /// Width the content was laid out (and wrapped) at.
+    pub width: f32,
+    /// Left edge, relative to the scroll area's `max_rect().left()`.
+    pub left_offset: f32,
 }
 
 pub type EventIteratorItem<'e> = (usize, (pulldown_cmark::Event<'e>, Range<usize>));
@@ -125,6 +135,11 @@ fn parse_row<'e>(
         if let pulldown_cmark::Event::End(pulldown_cmark::TagEnd::TableCell) = e {
             row.push(column);
             column = Vec::new();
+            // The boundary belongs between cells, not at the start of the
+            // following cell. Keeping it in `column` makes the renderer's
+            // TableCell-end handler paint a two-space label before every
+            // column after the first, changing its wrap point and row height.
+            continue;
         }
 
         if let pulldown_cmark::Event::End(pulldown_cmark::TagEnd::TableHead) = e {
@@ -348,5 +363,29 @@ mod tests {
         let mut iter = events.into_iter().enumerate();
         let collected = delayed_events_list_item(&mut iter);
         assert_eq!(collected.len(), 2);
+    }
+
+    #[test]
+    fn parsed_table_cells_do_not_keep_neighbor_boundaries() {
+        let md = "| first | second |\n|---|---|\n| alpha | beta |";
+        let events: Vec<_> = Parser::new_ext(md, parser_options())
+            .into_offset_iter()
+            .map(|(event, range)| (event.into_static(), range))
+            .collect();
+        let table_start = events
+            .iter()
+            .position(|(event, _)| matches!(event, Event::Start(Tag::Table(_))))
+            .expect("table start");
+        let mut iter = events.into_iter().enumerate().skip(table_start + 1);
+        let table = parse_table(&mut iter);
+
+        for cell in table.header.iter().chain(table.rows.iter().flatten()) {
+            assert!(
+                !cell
+                    .iter()
+                    .any(|(event, _)| matches!(event, Event::End(TagEnd::TableCell))),
+                "cell boundary leaked into visible cell events: {cell:?}"
+            );
+        }
     }
 }

@@ -255,18 +255,26 @@ if raw_scroll.abs() > 0.0 {
 ### Resize handle and scrollbar overlap causes jitter
 **Context:** Resizing outline panel caused mouse jitter when near content scrollbar
 **Problem:** The SidePanel resize handle sensing area overlaps with the adjacent ScrollArea scrollbar, causing rapid switching between resize and scroll modes.
-**Fix:** Combine reduced grab radius with minimal margin:
-```rust
-// 1. Reduce resize grab radius
-style.interaction.resize_grab_radius_side = 2.0; // Default ~5.0
+**Original fix (no longer what the code does):** shrink the grab radius to 2.0 and add a 3 px right margin. Reduced radius alone was not enough; the margin provided physical separation without a visible gap.
 
-// 2. Add minimal right margin to content area (not visually noticeable)
-egui::Frame::none()
-    .inner_margin(egui::Margin { right: 3, ..Default::default() })
-    .show(ui, |ui| { /* content */ });
+**Superseded by #79 (`616989e`), which inverted the strategy.** Sidebars became freely resizable with full labels, and the geometry is now a *large* grab radius plus named gutters wider than it:
+
+```rust
+const SIDEBAR_RESIZE_GRAB_RADIUS: f32 = 8.0;   // was 2.0; egui's default is ~5.0
+const EXPLORER_RIGHT_RESIZE_GUTTER: i8 = 12;   // explorer's right edge
+const CONTENT_RIGHT_RESIZE_GUTTER: i8 = 10;    // document's right edge
 ```
-**Why both?** Reduced grab radius alone isn't enough. The 3px margin provides physical separation without creating a visible gap (8px was too much and created a black gap).
-**Files:** `src/main.rs`
+
+Current geometry at each boundary — both gutters exceed the grab radius:
+
+| boundary | adjacent margins | grab radius |
+|---|---|---|
+| explorer ↔ document | explorer right **12**, document left 8 | 8.0 |
+| document ↔ outline | document right **10**, outline left 8 | 8.0 |
+
+**Do not "restore" the 2.0 radius from the old entry.** It would make the divider hard to grab, which is what #79 widened it to fix. If the jitter returns (see #139), the lever is the gutter-to-radius ratio at the specific boundary, not the radius alone — and note the asymmetry: #139 reports the *left* boundary reproducing more readily even though it has the *wider* gutter, which a pure ratio model does not explain.
+
+**Files:** `src/main.rs` (the three constants above), issue #139
 
 ---
 
@@ -501,6 +509,44 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
   if: steps.check.outputs.proceed == 'true'
 ```
 **Files:** `.github/workflows/release.yml`
+
+### A probe that can never pass is worse than no probe
+*Part of the family indexed under "Before trusting a check, ask which way it cannot fail".*
+**Context:** #135 added a crates.io token pre-flight to catch the dead credential that had left the registry four versions behind. #151 moved it into its own job so one bad token would not cost four channels. Both changes were right about the *structure* and wrong about the *check*.
+**The check could never succeed.** It called `GET /api/v1/me` with the token in an `Authorization` header. That endpoint is session-only — crates.io answers **any** API token with:
+```
+403 {"errors":[{"detail":"this action can only be performed on the crates.io website"}]}
+```
+So a perfectly valid token failed the gate, `publish-crates` was skipped, and the pipeline manufactured exactly the silent crates.io gap the job existed to prevent.
+**Why it survived two PRs and a code review:** the token really was dead when the check landed, so its failure looked like a success — the probe reported what the author expected, for the wrong reason. It was never once exercised against a working token, which is the only run that could have distinguished the two.
+**The cost was not theoretical.** It rejected two freshly minted tokens on the maintainer's behalf and reported them as "rejected by crates.io", sending him to mint a replacement that was then rejected the same way. A separate ad-hoc `curl` compounded it: crates.io returns `403` to a generic `curl/8.x` User-Agent even on public endpoints, so the same status code had two unrelated causes in the same investigation.
+**crates.io has no read-only endpoint that authenticates with an API token.** There is nothing to probe. The gate is now a shape check (`^cio[A-Za-z0-9]{32}$`), which still catches the two failure modes that actually occur — an unset secret and a paste that lost characters — in a second, before anything is built. A genuinely revoked token fails in `publish-crates`, which since #151 gates nothing else.
+**General lesson, and it generalizes past credentials:** a check whose passing condition has never been observed is not a check. Before trusting a new guard, make it succeed once on input known to be good — the same discipline as "never trust a test that has not been observed red", in the other direction. Both halves are needed: a guard must be seen to pass on the good case *and* fail on the bad one. This one was only ever seen to fail.
+**Files:** `.github/workflows/release.yml` (`check-crates-token`), `~/.local/bin/mdv-set-crates-token`, PRs #135 / #151
+
+### A fail-fast check belongs in its own job, not in a gate everything needs
+**Context:** crates.io publishing had been silently broken since 2026-07-23 — `md-viewer` stuck at 0.1.15 — because the token expired and `publish-crates` runs last, after the snap, both AUR packages and the GitHub Release have already published. The release *looked* delivered. #135 added a one-second `GET /api/v1/me` pre-flight so a dead token fails immediately instead of twenty minutes in.
+
+**The mistake:** the check went into `validate`, which every other job declares in `needs`. So an expired token stopped being a crates.io problem and became a **total** release outage — no snap, no AUR, no GitHub Release, no binaries. The fix for a silent partial failure created a loud complete one.
+
+It surfaced the same day: the token really was expired, so `v0.2.0` could not be tagged at all.
+
+**The rule:** placing a check where it fails fast and placing it where it fails *narrowly* are different decisions, and CI's `needs` graph couples them. Before adding a validation step, ask what depends on the job it lands in. A check for channel X belongs in its own job that only X's publish step needs:
+
+```yaml
+check-crates-token:
+  needs: —                                   # gates nothing by itself
+publish-crates:
+  needs: [validate, build, check-crates-token]
+publish-snap:
+  needs: [validate, build]                   # unaffected
+```
+
+The fast-fail benefit is fully preserved — it still fails in a second, and the run still goes red under an obvious name — while one dead credential costs one channel instead of four.
+
+**Corollary for `validate`:** it should only hold checks whose failure genuinely invalidates *every* channel. Today that is the tag/`Cargo.toml`/snapcraft version comparison and the vendored-fork publishability check; both are true release-wide contracts.
+
+**Files:** `.github/workflows/release.yml`, PRs #135 and #151
 
 ### Docker bind-mount `chown` breaks host runner ownership
 **Context:** Regenerating `.SRCINFO` inside a containerized `archlinux/archlinux:base-devel` because `makepkg` refuses to run as root
@@ -750,6 +796,27 @@ ui.vertical(|ui| {
 **Mitigation:** Filter empty rows before rendering: `rows.into_iter().filter(|r| !r.is_empty()).collect::<Vec<_>>()`. Without this, TableBuilder's `body.row()` runs with no cells and may render a 0-cell phantom row (no visible effect, but wasted work).
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`table`)
 
+### A structural parser event that reaches the painter becomes invisible content
+**Context:** Issue #116 — table cells wrapped a line early and clipped their last line near a wrap boundary, and the PR's CI failed a multi-link regression that looked unrelated.
+
+**Root cause, one missing `continue`.** `parse_row` (`egui_commonmark_backend/src/pulldown.rs`) closed a cell on `Event::End(TagEnd::TableCell)` by pushing `column` and resetting it — then fell through the rest of the loop body, which appended the same event to the *new* column. Every column after the first therefore began with an `End(TableCell)` marker it did not own.
+
+The renderer's TableCell-end handler paints that event as a two-space label. Result: roughly 6 px of first-line indent on every column but the first, present in the paint pass and **absent from the height measurement**, which walks the same events but ignores structural ones. Near a wrap boundary those 6 px push one word onto a new line, the row is one line taller than reserved, and the last line is clipped.
+
+**Why it is worth a lesson rather than a footnote:** the symptom is a *layout* bug, the measurement and paint passes disagree, and the cause is in neither of them — it is in the parser handing the painter something that is not content. Two independent rewrites of the row-height logic (#98, #116's own galley measurement) could not have fixed it, because both measure what they are given.
+
+**The diagnostic:** when paint and measurement disagree about a cell, dump the event stream the painter actually receives and check for `Event::End(..)` markers inside it. `parse_table`'s cells should contain only content events. #116 added exactly that as a test:
+
+```rust
+for cell in table.header.iter().chain(table.rows.iter().flatten()) {
+    assert!(!cell.iter().any(|(event, _)| matches!(event, Event::End(TagEnd::TableCell))));
+}
+```
+
+**Related trap already recorded above:** `parse_table trailing empty row from pulldown_cmark`. Both come from the same place — the boundary between "events the parser emits" and "events a cell contains" is not enforced by a type, so every consumer has to get it right by hand.
+
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`parse_row`), PR #116
+
 ### Inline-code wrap segmentation: blind char-count cut, not break-friendly chars
 **Context:** Issue #5 — long inline-code tokens (file paths) overflowed the content column, clipping leading characters and overlapping adjacent text. Fixed by splitting long tokens into chunks separated by `ui.end_row()` in `Event::Code` handling.
 **First attempt that regressed:** Splitting at break-friendly characters (`/ \ - _ . :`) past 56 chars to keep paths readable. At narrow window widths the variable-length segments (60-120 chars) still exceeded the column width, and egui's intra-widget wrap re-introduced the original clipping bug.
@@ -793,6 +860,81 @@ Belt-and-suspenders: keep `cargo publish --allow-dirty` in `scripts/publish-crat
 **Recovery for v0.1.9:** the fork crates DID publish (their working dirs were unaffected by the root Cargo.toml mutation); only md-viewer's publish failed. Manual `cargo publish` from a clean local checkout shipped 0.1.9.
 **Files:** `.github/workflows/release.yml` (build job + publish-crates job — both have the transform), `scripts/publish-crates.sh`
 
+### A missing `required-features` makes the obvious command look like a broken checkout
+
+**Context:** Issue #122 recorded that a plain `cargo test` in the renderer
+workspace fails with `cannot find macro commonmark in this scope`, and named
+that — not the extra typing — as the real cost of the two-workspace split:
+"a mistake in *how* you invoke the tests is hard to distinguish from a genuine
+failure". It cost a wrong "renderer tests run" claim once, and cost this author
+a second detour months later, working around it with the feature list out of
+`ci.yml` instead of noticing what was actually wrong.
+
+**It had nothing to do with the workspace layout.** `commonmark!` and
+`commonmark_str!` exist only under the `macros` feature, and **not one
+`[[example]]` section declared `required-features`**, so Cargo built
+`examples/macros.rs` and `examples/mixing.rs` in every configuration:
+
+```toml
+[[example]]
+name = "macros"
+required-features = ["macros"]
+```
+
+Before: 16 errors, zero tests run. After: **148 tests, all green, with no
+features at all.**
+
+**The doctest half is the non-obvious part.** The same crate had a `commonmark!`
+example in its crate-level docs as a plain fence, while the `commonmark_str!`
+example right below it was already `rust,ignore`. Doctests cannot take
+`required-features` — but **rustdoc compiles a doctest with the crate's own
+cfgs**, so the example can be gated rather than un-tested:
+
+```rust
+//! ```
+//! # #[cfg(feature = "macros")]
+//! # fn main() {
+//! use egui_commonmark_extended::{CommonMarkCache, commonmark};
+//! # }
+//! # #[cfg(not(feature = "macros"))]
+//! # fn main() {}
+//! ```
+```
+
+Marking it `ignore` to match its sibling would have been one character of work
+and would have silently dropped a check that CI currently runs. The gate keeps
+it compiled and executed wherever the macro exists.
+
+**Both directions have to be measured, or the fix is worse than the defect.**
+`required-features` could just as easily stop building the examples in the
+configuration where they *should* build — trading a loud failure for a silent
+skip:
+
+| check | result |
+|---|---|
+| with `macros`: are the example binaries actually produced? | `macros` ✓ `mixing` ✓ |
+| without: skipped cleanly, and the other seven still built? | 0 errors, `hello_world` ✓ |
+| gated doctest, body deliberately broken, **with** the feature | `FAILED. 15 passed; 1 failed` |
+| same broken body, **without** the feature | `ok. 16 passed` |
+
+The last two rows are the ones that prove the gate is a gate and not a mute
+button. Counts alone cannot: 16 doctests pass either way.
+
+**A measurement trap met on the way, worth its own line:** `cargo clippy` emits
+**nothing** on a cached build. A before/after warning count is meaningless
+unless the sources are touched first — an uncritical reading gave "0 warnings"
+for both trees and briefly looked like a clean result. Forced, both are 23.
+
+**General lesson:** when a crate has feature-gated macros, every target that
+uses them needs its gate declared — `required-features` for examples, benches
+and integration tests, a `cfg` for doc examples. Otherwise the default
+invocation fails on a target nobody asked for, in a message that names a
+missing macro rather than a missing flag, and every newcomer reads it as a
+broken repository.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/Cargo.toml`,
+`crates/egui_commonmark/egui_commonmark/src/lib.rs`, PR #185, issue #122
+
 ### `CHANGELOG.md` is hand-curated — do NOT `git-cliff -o CHANGELOG.md`
 **Context:** `.claude/rules/release-workflow.md` suggests running `git-cliff -o CHANGELOG.md` to generate changelog entries before tagging.
 **Problem:** git-cliff parses conventional commits. This repo's commit history doesn't conform (171/N commits skipped on the v0.1.8 attempt), so the generated CHANGELOG is sparse and drops entire versions (e.g. v0.1.4, v0.1.6, v0.1.7 vanished). Running `-o` overwrites the existing rich hand-written prose with the degraded version.
@@ -805,6 +947,12 @@ Belt-and-suspenders: keep `cargo publish --allow-dirty` in `scripts/publish-crat
 **Problem:** Most text events contain no recognized shortcode, so paint-time allocation churn paid transformation costs for unchanged content.
 **Fix:** Use direct visitor callbacks. Plain/raw slices borrow parser input, recognized emoji borrow static `Emoji::as_str()` values, and highlight splitting emits borrowed slices directly. Capture active-match Y during emission, then mutate cache only after immutable search-range borrows end. Tests collect owned snapshots only at the test boundary and use pointer identity to prove no-colon and unknown-only paths borrow original input.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`
+
+### makepkg LTO poisons cc-compiled C deps — `options=('!lto')` in the AUR PKGBUILD
+**Context:** AUR comment on `md-viewer-git` (djboris): linking failed with undefined symbols on a fresh Arch system unless `options=('!lto')` was set. Our PKGBUILD didn't set it.
+**Root cause:** Arch's default `makepkg.conf` enables LTO and appends `-flto=auto` to `CFLAGS`/`LDFLAGS`. Cargo ignores those, but the `cc` crate does not — so `libmimalloc-sys` (the only C dependency, via `mimalloc`) compiles to GCC LTO objects. The final link is driven by rustc: with `lto = true` in `[profile.release]` it runs its own LLVM LTO and never passes `-flto` to the linking driver, so the GCC LTO object's symbols are invisible → `undefined symbol: mi_*`. Reproduced in isolation: `gcc -c -flto=auto` + `rustc -C lto=yes -C link-arg=foo.o` → `ld.lld: error: undefined symbol`; the same object built without `-flto` links and runs.
+**Fix:** `options=('!lto')` in `aur/PKGBUILD` (+ pkgrel bump). `!lto` only neutralizes makepkg's injected flags; cargo's own `lto = true` still fat-LTOs all Rust code, so binary size/performance are unchanged. This is the standard pattern in Arch Rust PKGBUILDs. `md-viewer-bin` is unaffected (prebuilt binary, no build step). Any future PKGBUILD for a Rust crate that compiles C through the `cc` crate needs the same line.
+**Files:** `aur/PKGBUILD`
 
 ---
 
@@ -1043,6 +1191,33 @@ if out.state.offset.y > real_max_scroll {
 | Fix 1 only (no drift signal from skip) | 3 | 68246 | 34030 (still overshoots) | No, but blank at scroll>33880 |
 | Fix 1 + Fix 2 (clamp) | 3 | 68246 | 34022→clamped to 33880 | No |
 
+**Verified under the condition it defends against, 2026-09-07.** The clamp was
+added from a failure trace; nobody had since watched it work while the document
+actually shrank underneath a deep offset. A fixture of eighty 12000×120 noise
+PNGs (4 MB each, incompressible so decode costs real time, wide-and-flat so each
+renders ~4 px against a ~160 px placeholder reservation) collapses the document
+as rows finish decoding:
+
+| | |
+|---|---|
+| extent | **21973 → 14464 → 12631**, a 43 % collapse |
+| viewport bottom at those transitions | 8430, then 8585 — deep, not at the top |
+| deepest viewport bottom over the run | **12631** |
+| smallest extent over the run | **12631** |
+
+The offset tracks the shrinking document exactly to its new end and never past
+it — the two extremes are the same number. Over 1767 instrumented frames,
+`MDV_DIAG_SPLIT` reported zero offset-exceeds-extent frames and zero degenerate
+slice ranges.
+
+Two traps on the way to that fixture, both worth avoiding next time: small local
+images do not work at all (a 296-byte PNG is decoded before its row is painted,
+so the placeholder phase never persists), and *large square* images make the
+document **grow** rather than shrink — 2600×2600 noise took it from 16020 to
+38482, the wrong direction entirely. The reservation is
+`column_width.min(line_height * 8.0)`, so the image must render *shorter* than
+that to shrink anything.
+
 **General lesson:** when one stored quantity is the authoritative source of truth (here: `page_size.y` from bootstrap), don't let derived/observed values from a different code path (here: `out.content_size.y` from skip-paint) feed back into anything that affects state. Treat the skip-paint output as a paint-only artifact, not a measurement.
 
 **Why simpler alternatives don't work:**
@@ -1134,3 +1309,434 @@ Do not change renderer soft-break behavior to satisfy a fixture whose syntax exp
 **Testing technique:** Inspect final-pass painted `Shape::Text` rectangles and assert strict top-to-bottom ordering. Response height alone can miss overlap. Keep one `CommonMarkCache` across render passes so tests match production cache lifetime and egui layout can settle.
 
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `docs/devlog/043-list-code-block-layout.md`
+
+### Viewport slices must reproduce the bootstrap's layout exactly
+**Context:** Issue reported after #96 landed on main: on a document with a long table, scrolling stopped at the end of the table, everything below it (math, CJK, code blocks) rendered blank, and the table itself sat shifted to the right.
+
+**Root cause:** three independent divergences between the bootstrap pass (which measures `page_size` and records `split_points`) and the slice pass (which paints every later frame). All three are the same mistake in different clothes — the slice deriving something for itself instead of reproducing what the measuring pass did.
+
+1. **Recomputed column.** The slice called `options.max_width(ui)` against its own `Ui`. The bootstrap and viewport passes reserve scrollbar space differently, so the slice wrapped content at a different column than the pass that measured the document.
+2. **Squeezed rect.** The slice was bounded to a fixed-height rect (`slice_top..=slice_bottom`). Content needing more room overflowed the `Ui`, which inflated the reported extent and let the scroll offset run past the real document — the "stuck with a blank page below" symptom.
+3. **Line state never reset.** The paint loop cleared `should_not_start_newline_forced` on `index == 0` only. A slice starting at event 868 never sees index 0, so the flag stayed set, the slice's first block did not open its own row, and it was placed after the leading inline space. That was the 44px horizontal shift — a two-line cause with a purely visual symptom.
+
+**Fix:** record the content column (`ContentGeometry { width, left_offset }`) in the bootstrap pass that produces `page_size`, and have slices reuse it verbatim; make the slice rect zero-height so it grows with its content exactly like the bootstrap's `allocate_ui_with_layout(vec2(max_width, 0.0), ..)`; and key the line-state reset off the slice's first event instead of event 0.
+
+**Do not "fix" this by disabling slicing.** That was tried first and does work — main shipped that way before #96 — but it costs a full paint every frame (measured 2.3 ms sliced vs 22.7 ms full on a 59 574 px document, ~10x).
+
+**This bug is not reachable from the crate's headless tests.** Five formulations were tried — a forced-bootstrap reference frame (`pending_scroll_offset` clamps the offset, so the frames compare at different scroll positions), storing `ScrollArea` state directly (does not move the offset at all in a headless pass — a test doing this silently compares two frames at the top and passes on anything), leftmost-text-on-screen (table cells are legitimately inset from the table frame, so the metric mixes content kinds), a wheel-driven table-cell column comparison, and finally the same with the `math` feature plus md-viewer's own `table_max_width`/`default_width` options. Every one passed on the visibly broken build. The slice path *is* exercised there (1 bootstrap + 14 slice frames), so the harness is not bypassing the code; the shift appears to need md-viewer's real font stack, which the crate's test build does not load. `scripts/visual-regression.sh` covers it instead — verified to exit 1 on the broken build (38 px shift detected) and 0 on the fix.
+
+**#96's own test enshrined the bug.** `deep_scroll_keeps_content_extent_and_paints_visible_text` asserted the extent stays within 1 px, which was true only because the broken code *pinned* the extent to one bootstrap measurement — the very mechanism that made the document unreachable. Both its assertions (stable extent, some text painted) remain true of content painted in the wrong column. The bound is now 32 px, loose enough for a live-laid-out slice settling a few pixels past the measurement, tight enough to catch a slice at the wrong column (which moved it by thousands).
+
+**Xvfb harness pitfalls** hit while proving this out, all of which silently produce wrong evidence:
+- `pkill -f md-viewer` does not match a binary copied to another name (`mdv-fix`, `mdv-stock`). Eleven instances accumulated across runs; **screenshots of an obscured X11 window return the overlapping window's pixels**, so captures were mixing builds. Match process *names*, and assert exactly one window exists.
+- A `pkill -f` pattern that appears in the script's own command line kills the script itself.
+- md-viewer persists scroll position, so a second run starts where the last one ended. Isolate `XDG_DATA_HOME`/`XDG_CONFIG_HOME` per run.
+- A backgrounded `Xvfb &` inherits stdout and holds the pipe open, so `script.sh | tail` hangs forever waiting for EOF. Redirect it.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`ContentGeometry`), `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `crates/egui_commonmark/egui_commonmark/tests/slice_perf.rs`, `scripts/visual-regression.sh`, `docs/devlog/055-viewport-slice-layout.md`
+
+### Making a block's height depend on ambient width breaks viewport-slice selection
+**Context:** #166 fixed a frontmatter value being clipped mid-word by changing one line — `ui.label(value)` to `ui.add(egui::Label::new(value).wrap())`. It shipped. It caused #167: at a 1040 px window the *entire document below the frontmatter table stopped painting*.
+
+**What the fix traded away.** Clipping is cosmetic and local — one value is cut, everything else renders. The regression is total: the outline still lists later headings and the scroll thumb still reports a long document, but the pane below the first paragraph is blank. A worse bug in every respect, shipped to fix a smaller one.
+
+**Mechanism, measured.** `split_points` record each block's start/end y during the bootstrap pass; the slice path then selects an event range with `partition_point(|(_, start, _)| start.y <= viewport.max.y)` and takes `split_points[below + 1]`. With `.wrap()`, the frontmatter block's height became a function of whatever width the *ambient* `Ui` happened to have, and the bootstrap pass's width differs from the paint pass's. At 1040 px the block was recorded 1103 px taller than it painted, which pushed every later split point past the viewport bottom:
+
+| build | window | `sp[0] end.y` | `below` | `last_ev` | content |
+|---|---|---|---|---|---|
+| with #166 | 1040 | **1336** | 1 | **11** | missing |
+| with #166 | 1080 | 236 | 6 | 63 | complete |
+| #166 reverted | 1040 | **214** | 6 | 63 | complete |
+
+Deterministic: at 1040 the last of 203 frames was byte-identical to the first, so the recorded values never converge.
+
+**The precise irony.** #166 also *deleted* a computation that bounded the value column against the widest key, on the grounds that `.wrap()` alone sufficed. It did suffice visually, at the one width tested. That bound was what made the block's height a function of the passed `max_width` — which `ContentGeometry` (#96) guarantees is identical in both passes — rather than of ambient width. Removing it is what coupled height to the pass.
+
+**General lesson:** in a renderer with a measure pass and a paint pass, *any* widget whose height depends on ambient available width is a latent slice bug, because the two passes do not have the same ambient width by construction. Wrapping is the common way to introduce that dependency. Bind the wrap to a width the two passes provably share, or reserve the height explicitly. Same family as #116 (`parse_row` leaking a structural event into the paint pass only) and #129/#131 — measurement and paint disagreeing, with the cause in neither of them.
+
+**And the diagnostic that settled it in minutes:** `MDV_DIAG_SPLIT=1` dumping the split-point table plus both `partition_point` results. `MDV_DIAG_SLICE=1` reported *zero* off-screen placements in both the working and broken runs — a true negative that correctly excluded the placement hypothesis and pointed at range selection instead. Both probes report every frame, which is why their silence carried information.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`render_frontmatter_table`), `docs/devlog/064-frontmatter-wrap-revert.md`, issues #166 / #167
+
+**Resolved** by bounding the value column against the measured key width and
+`max_width` (devlog 065). The bound also fixed a second symptom the original
+#128 report never mentioned: because the oversized block widens the *content
+column for the whole document*, the prose of every later block was clipped too
+— visible at 1200 px as "md-viewer rende…". A frontmatter document now lays out
+identically to the same document with the `---` block removed.
+
+**The test lesson from the fix is worth as much as the fix.** Two of the three
+assertions first landed in a regime where they could not fail: at a 700 px
+content column the fixture value *nearly* fits on one line, so `rows > 1` broke
+on the fixed build and the content-column assertion **passed on the broken
+one**. Narrowing to 400 made both detect the defect, the second one reporting
+`657.06 > 400`. That is #166's mistake committed a second time, three days
+later, by the same author — caught only because the control run is now
+mandatory rather than optional.
+
+### An option-gated render path makes a test measure something else entirely
+*Part of the family indexed under "Before trusting a check, ask which way it cannot fail".*
+**Context:** Regression test for the #166 frontmatter clipping fix (since reverted — see the entry above — but this lesson is independent of that outcome).
+**Problem:** The test passed identically before and after the fix, so it was worthless as a guard. `CommonMarkOptions::render_frontmatter` defaults to `false` and gates **both** parsing and rendering: `latex_delimiters::parse_events` only enables pulldown-cmark's metadata-block option when it is set. The shared `render_geometry` test helper never enabled it, so a `---` block parsed as an ordinary paragraph. Ordinary paragraphs wrap on their own, so the assertions were satisfied by content that never reached `render_frontmatter_table`.
+**Fix:** a helper variant that turns the option on, plus an assertion *inside* the test that the table was actually rendered:
+```rust
+assert!(
+    painted.iter().any(|t| t.text.contains("abstract")),
+    "frontmatter table was not rendered; the test would prove nothing: {painted:#?}"
+);
+```
+**General lesson:** when a feature sits behind a default-off option, a test that does not enable it does not fail — it silently exercises the fallback path and reports success. Shared render helpers are where this hides, because the option is set by the *application*, not the helper. Two defenses: assert a marker only the intended path can produce, and never trust a test that has not been observed red. Same family as the #157 fixtures that all landed in the excluded dense regime, and the #115 control run against a stale `main`.
+**A caveat this episode adds:** the corrected test *was* observed red, and the fix it guarded was still wrong. A test proven to detect the bug it targets says nothing about what else the change breaks. Being red-then-green is a floor, not a ceiling.
+**Files:** `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`
+
+### The Xvfb guards outlive no wrapper that reaps its process group
+**Context:** running `scripts/scroll-regression.sh` as the pre-tag check for 0.2.0.
+**Problem:** the walk takes 10–40 minutes. Four attempts died partway — at 24, 56, 76 and 98 of 151 frames — each leaving an empty log and no verdict. Backgrounding, `setsid`, and a foreground call with a long timeout all failed the same way: the agent harness reaps the process group when the invoking call ends, and `setsid` did not save it.
+**Two false readings this produced,** both of which had to be caught before they became claims:
+- An exit code of 1 with **no output at all** looks like a FAIL. It was a truncated run. A guard that reports nothing has not reported a failure.
+- One attempt left an orphan still running, so the next attempt started a **second** guard on the same display. Two instances fighting over one X server produce results that are not evidence of anything.
+**Fix:** detach from the caller entirely with a transient unit, which survives the harness:
+```bash
+systemd-run --user --unit=mdv-scrollguard --collect \
+  --working-directory="$PWD" --setenv=MDV_DISPLAY=96 \
+  --property=StandardOutput="file:/tmp/guard.log" \
+  --property=StandardError="append:/tmp/guard.log" \
+  /bin/bash ./scripts/scroll-regression.sh
+```
+Poll `systemctl --user is-active <unit>`; read the verdict from the log and `ExecMainStatus` when it goes inactive. Both guards then completed on the first try — scroll PASS (bottom at frame 68 of 150, the documented value for that fixture, which is itself evidence the walk traversed the document), visual PASS (`left_edge` 230–236, a 6 px spread against the 12 px bound from #165).
+**A second harness trap in the same session:** do **not** pre-start an Xvfb on `MDV_DISPLAY`. The scripts start their own and kill it by PID on exit; a server already sitting on that number collides, and the run dies with `Killed` and no verdict. That cost one of the four attempts and briefly looked like a defect in the guard.
+**General lesson:** a long-running verification must be detached from whatever invoked it, or its result is a function of the caller's lifetime rather than of the code under test. And when a guard produces no output, the correct reading is "did not run", never "passed" and never "failed".
+**Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh` (both now carry this in their usage header)
+
+### A scroll-regression fixture only proves anything if the sampling is fine enough to land in the failure window
+**Context:** Issue #121 — scrolling the wrench `asset_reference.md` intermittently painted an empty document pane. Writing `scripts/scroll-regression.sh` to guard the fix.
+**What the guard has to catch:** a viewport slice that anchors outside the viewport and paints nothing, so scrolling appears to skip whole sections. `scripts/visual-regression.sh` does not catch it — on the broken build (main @ 7b8f53b) it reports PASS while four of sixty-one captured frames are blank.
+
+**Two false-confidence traps hit while building it, both of which produce a green test that checks nothing:**
+
+1. **The fixture was too short and too uniform.** A first fixture of five identical 40-row tables reached the document bottom at frame 13 and never went blank on the broken build. Matching the real document's shape — twenty tables from 4 to 51 rows, cell text of varying length so row heights differ, a nested index list at the top — pushed the bottom out to frame 31, comparable to the real document's 35.
+2. **Even the right fixture passed at the wrong granularity.** At 60 steps of 10 wheel clicks the fixture still reported PASS on the broken build. The blank states occupy narrow scroll windows, and coarse steps jump over them. At 150 steps of 3 clicks the same fixture and the same binary produce `FAIL: 1 frame(s) painted an empty document pane`. The real document was more forgiving (4 blanks at 60x10) purely because it has more and taller tables, so it offers more windows to land in.
+
+**Validation matrix — a scroll guard is not trustworthy until all four cells are confirmed:**
+
+| build | fixture 60x10 | fixture 150x3 | real doc 60x10 |
+|---|---|---|---|
+| broken (7b8f53b) | PASS (useless) | **FAIL** | **FAIL** (4 blanks) |
+| fixed (#113) | PASS | PASS | PASS |
+
+**The metric matters too.** `visual-regression.sh` keys off the leftmost painted pixel, which works on its own flush-left fixture but false-positives on any document with indented content — a nested list item legitimately starts further right, which reported a bogus 26px "shift" on `asset_reference.md`. It also false-positives on its **own** fixture once any legitimate indentation changes: #164 gave Markdown table cells 4 px of inset per side, and the guard failed on a 5-6 px "shift" because its baseline is frame 0's leftmost pixel while later frames show a table where frame 0 shows prose. The bound was 2 px against a defect that moved content 38 px; it is now 12 px, keeping a factor of three over the real failure while ignoring layout. The structural flaw stands: the metric compares the leftmost pixel of *whatever a frame happens to show*, not the same content across frames, so any bound near the noise floor turns it into a false-alarm generator. The scroll guard keys off painted-content volume in the document pane plus frame-to-frame difference, which does not depend on document shape. Measure the document pane only (crop out explorer and outline): both side panels keep painting when the document pane goes blank, so a whole-window measurement hides exactly the failure being hunted.
+
+**Distinguishing "stuck" from "at the bottom":** a run of identical frames at the tail is the document bottom and is correct; the same run in the middle means scrolling stopped advancing. Find the tail run first, then only flag non-advancing frames before it.
+
+**What the finished guard immediately found:** with the fixture and granularity that survive the traps above, the build of the day still painted a blank pane at one scroll position — deterministic across three runs, and identical before and after #113, so a second independent path. Cutting the fixture to the four sections around it did *not* reproduce, which said the trigger was scroll depth rather than the local table boundary. That became #125, and #114 fixed it; the guard is green on main as of 7a6346c.
+
+**Never accept a PASS without a control run.** #114 changes table layout, so a clean run on the new build could equally mean the blank moved somewhere the walk no longer visits. The check that settles it is re-running the identical guard against the *previous* build in the same session: it still reported the blank, so the PASS was a real PASS and not a broken probe. Confirming in both width modes (Full Width on and off, two different table geometries) closed the remaining gap. A green test whose detector has quietly stopped detecting is indistinguishable from a fix.
+
+**Files:** `scripts/scroll-regression.sh`, `docs/devlog/058-scroll-regression-guard.md`
+
+### The screenshot guards are blind to one-frame artifacts, and burst capture does not fix it
+**Context:** Issue #140 reports an intermittent *one-frame* blank document pane, distinct from the table-boundary blank #131 fixed. Tried to make `scripts/scroll-regression.sh` reproduce it.
+
+**The fixture worked.** Unloaded images in table cells reserve `column_width.min(line_height * 8.0)`; a 12×12 px icon in a ~200 px column reserves ~192 px and paints ~12 px. Viewport slicing means images below the fold are never painted and so never loaded — they load as you scroll onto them, which is exactly a "content shrinks while the offset is deep" trigger. A 60-row icon table after twelve ordinary sections collapsed the document mid-walk: bottom reached at frame 51 instead of 103, painted pixels dropping 2770 → 1313 at the shrink.
+
+**Follow-up, 2026-09-07: that recipe did not reproduce the shrink a second time,
+and the reason matters.** Two fresh fixtures built from this description — a
+60-row icon table after twelve ordinary sections, once with the icon alone in a
+narrow column and once sharing a wide column with a long caption — produced no
+height change at all across ~2000 instrumented frames each:
+
+| attempt | icon column | distinct `extent` values observed |
+|---|---|---|
+| 1 | narrow (icon only) | 2 (10142, 10145) |
+| 2 | wide (icon + caption) | **1** (11581) |
+
+The first was my own misreading: the reservation is a `min`, so a *narrow*
+column reserves little and there is nothing to over-reserve. The second fixed
+that and still did not move.
+
+A screenshot of the table explains it. The icons render and the rows are
+compact — **a 296-byte local PNG on a warm filesystem is loaded by the time its
+row is painted**, so the placeholder phase this trigger depends on never
+persists. The paragraph above reads as though any unloaded image works; it does
+not. Reproducing it needs images that are genuinely slow — remote URLs, or files
+large enough that decode takes real time.
+
+Recorded rather than fixed, because the useful fix is a fixture that actually
+reproduces and I do not have one. The measurements above are so that the next
+attempt starts after these two rather than repeating them.
+
+**No blank appeared, and that result is worthless.** The guard does three wheel clicks, sleeps 0.45 s, then takes **one** screenshot — about one sample out of ~27 frames at 60 fps. A single-frame artifact has roughly a 1-in-27 chance of being seen per step.
+
+**Burst capture does not rescue it.** Six `import -window` captures back-to-back inside the settle window, 366 frames instead of 61, still zero blanks — and then the control that mattered:
+
+```
+steps where all 6 burst frames were identical: 61
+steps where the burst captured >1 distinct state:  0
+```
+
+Every burst photographed the same settled state six times. `import -window` takes long enough that the app finishes settling before the first capture completes, and md-viewer only repaints on demand (`request_repaint_after`, plus the 16 ms virtual-display sleep), so afterwards there are no new frames to catch at all.
+
+**The general rule:** X11 screenshot capture samples *settled states*, not frames. `scripts/scroll-regression.sh` and `scripts/visual-regression.sh` can only detect an artifact that persists until the app stops repainting. They are strong evidence about steady-state rendering — they found #125, the #114 residue, and a #115 false alarm — and **no evidence at all** about transient one-frame behavior. A PASS from either script must never be quoted against a transient-artifact report.
+
+**What would work instead:** in-app instrumentation that observes every frame regardless of when a screenshot lands — a debug counter of painted shapes per frame, or a renderer-side assertion that the selected slice intersects the viewport. Both fire on the bad frame itself.
+
+**Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh`, issue #140
+
+### Before trusting a check, ask which way it cannot fail
+
+The single most-violated rule in this repository, by a wide margin. Five separate
+instances in one session (2026-09-07), each in a different disguise, each of
+which nearly became a confident wrong statement. Six entries below describe
+specific shapes of it; this one exists so that grepping any one term finds the
+rest.
+
+| shape | the question that catches it | entry |
+|---|---|---|
+| a test never observed red | does it fail on a build known to be broken? | *An option-gated render path makes a test measure something else entirely* |
+| a guard never observed green on input known to be good | does it pass when it should? | *A probe that can never pass is worse than no probe* |
+| a **null** result | was the instrument reporting at all, in this same run? | *A null result is evidence only if the instrument is proven live in the same run* |
+| a comparison against the **wrong baseline** | is the control current `main`, not the branch's base? | *A FAIL blames the branch only if the control is current main* |
+| a fixture in the **wrong regime** | did the condition under test actually occur? | this entry, below |
+| a mutation run that reports **only the first target** | did the run reach the binary holding the test you care about? | *A test runner that stops at the first failing target reports nothing about the targets it never ran* |
+| a step that **destroys or waits** | was its precondition checked, and can that check fail? | *A destructive or blocking step needs its precondition checked, not assumed* |
+
+**The fifth shape has no entry of its own, so it is recorded here.** A fixture can
+sit outside the region it is meant to probe and still produce a clean-looking
+number. It happened three times in that session: the `#157` optimizer fixtures
+all landed in the dense case the change explicitly excludes; two `#140` shrink
+fixtures never changed the document height, so their zero counts measured
+nothing; and a `#139` cursor sweep counted how many regions it crossed rather
+than whether any was unstable — a metric that stayed at "3" whether the
+suspected cause was present or not, which is what finally exposed it.
+
+The tell is the same in all five: **the result looks like an answer.** A green
+test, a silent probe, a zero, a clean diff. What distinguishes evidence from
+decoration is whether you can say what the *other* outcome would have looked
+like, and have seen it at least once.
+
+### A test runner that stops at the first failing target reports nothing about the targets it never ran
+
+**Context:** Reviewing PR #182 (Phase 2 dense-table overflow). The contributor had
+been asked to confirm the new guards fail with the cap set to 25 % or with early
+exit enabled, so the review mutated the production code three ways and recorded
+which tests noticed.
+
+**The matrix looked complete and was missing its most important cell.** Each
+mutation run printed exactly one `test result:` line, where the unmutated
+baseline printed four. `cargo test` is fail-fast **at the target level**: once
+the lib binary fails, the remaining test binaries are never built or run. So
+three runs said a great deal about the unit tests in `src/` and *nothing at all*
+about the two fixtures in `tests/wrapping.rs` — which were the ones whose regime
+was actually in question, because a fixture outside the dense case would pass for
+a reason unrelated to the change (the `#157` trap, one entry above).
+
+Running the integration target explicitly is what answered it:
+
+```bash
+cargo test ... -p egui_commonmark_extended --features "$F" --test wrapping
+```
+
+| mutation | lib | `--test wrapping` |
+|---|---|---|
+| cap 0.30 → 0.25 | 3 red | 1 red |
+| early exit at first non-improvement | 3 red | **green** |
+| Phase 2 never engaged | 4 red | **2 red — both `dense_*` fixtures** |
+
+The last row is the evidence that mattered, and no amount of reading the first
+column would have produced it. The middle row is worth noting too: a mutation
+can be caught by the unit tests and be invisible to the integration tests, so
+"green" there is information rather than a gap.
+
+**Rule:** a mutation matrix must name the *target* each cell was measured on. Run
+each test binary separately (`--lib`, then each `--test <name>`), or pass
+`--no-fail-fast`; a single aggregate run reports the first failing binary and
+stops. The same applies to reading a CI log: one red job hides whatever ran
+after it in the same step.
+
+**Second trap, in the failure detector itself.** The first pass classified all
+three mutation runs as `!! BUILD FEHLER — result worthless`, because the detector
+matched `^error` and cargo announces a *test* failure as
+`error: test failed, to rerun pass \`-p … --lib\``. Three correct red runs were
+thrown away and repeated. Match `error[E` or `could not compile` for a real build
+failure; a bare `^error:` cannot tell "the thing I wanted to observe" from "the
+instrument broke", which is the one distinction the detector exists to make.
+
+**Files:** N/A (verification discipline), PR #182
+
+### A destructive or blocking step needs its precondition checked, not assumed
+
+**Context:** One session (2026-09-09) produced four instances of the same shape,
+two of them the *identical* mistake twenty minutes apart, and one of them made
+me report progress on work that was not running.
+
+| what ran | the unchecked precondition | what it cost |
+|---|---|---|
+| `git checkout -- src/main.rs` to remove a temporary probe | that the surrounding work was **committed** | deleted a complete implementation, twice — the second time after I had already written up the first |
+| `until … && ! pgrep -f 'cargo build'; do sleep; done` | that the pattern cannot match the **loop's own** command line | the loop never exited, the `systemd-run` after it never fired, and two replies claimed a scan was running that had never started |
+| `bash script.sh \| tail; echo "exit=$?"` | that `$?` after a pipeline is the **last stage's** status | a contract check that failed with `sed: can't read …` was reported as `exit=0` |
+| `cargo clippy \| grep -c warning` twice in a row | that clippy **re-emits** on a cached build | it does not; "0 warnings on both trees" looked like a clean before/after and measured nothing |
+
+**They are one rule, not four tips.** Each is a step whose *effect* is
+irreversible or whose *result* is load-bearing, run after a condition that was
+assumed rather than tested. The existing entries in this family ask whether a
+check can fail; this one asks whether the step should run at all.
+
+Concretely, before each:
+
+- **Commit before probing.** A probe is added to be thrown away, and the
+  cheapest way to throw it away is `git checkout` — which cannot distinguish
+  the probe from everything else uncommitted. A one-line WIP commit makes the
+  discard safe. `git status --porcelain` before the checkout is the check.
+- **A `pgrep -f` / `pkill -f` pattern must describe a foreign command line.**
+  Already recorded one entry below for `pkill`; the *waiting* form is worse,
+  because it fails silently and forever rather than killing something. Bracket
+  a character (`'[c]argo build'`) or query the thing directly
+  (`systemctl --user is-active <unit>`).
+- **Never read `$?` through a pipe.** Capture into a variable first
+  (`out=$(cmd 2>&1); rc=$?`) or use `PIPESTATUS`. A pipeline into `tail`,
+  `head` or `grep` reports success for a failed producer.
+- **A cached build measures nothing.** `touch` the sources, or `cargo clean -p`,
+  before any before/after lint or warning count.
+
+**The tell, in all four:** the step produced *no visible complaint*. A silent
+success and a silent no-op are indistinguishable without the precondition, and
+the reflex to check it only fires if you have paid for it before. I had, in the
+same session, and it fired too late twice.
+
+**Files:** N/A (verification discipline)
+
+### A null result is evidence only if the instrument is proven live in the same run
+**Context:** This failure mode hit four times in one session, each time in a different disguise, and each time it nearly produced a confident wrong statement.
+
+| what was measured | the null | why it meant nothing |
+|---|---|---|
+| Burst screenshots for #140 | 366 frames, zero blanks | all six captures per step were **byte-identical** — `import` is slower than the settle, so the burst photographed one state six times |
+| `until ! pgrep -f 'scroll-regression'` wait loop | never exited | the pattern matched the **wrapper's own command line**; the guard had finished minutes earlier |
+| `MDV_DIAG_OPT` probe in #157 | "0 OPT lines — the optimizer is never called" | the build had **failed**; `tail -1` on its output hid the error and the old binary ran |
+| Three fixtures for #157 | zero differing pixels, "does not engage" | all three sat in the **dense case the PR deliberately excludes**, where every column is already at its word floor |
+
+**The rule:** before reporting that something did not happen, prove the instrument could have seen it happen — in the same run, from its own output, not by reasoning about the setup.
+
+Concretely:
+- A probe should report on **every** occurrence, not only on failure. That is why the #140 slice probe prints each frame: its silence is only evidence because its output shows it was working (3 419 lines).
+- After building an instrumented binary, check the instrument is *in* the binary (`strings target/debug/app | grep -c MARKER`), not merely that the build command exited.
+- Never `tail -1` the output of a build you are about to trust.
+- For a differential test, first confirm the two sides differ **at all** on some input. Three identical renders should prompt "am I in the right regime?" before "the change does nothing".
+- `pgrep -f` / `pkill -f` patterns must describe a *foreign* command line. `pgrep -f 'scroll-regression'` inside a script that mentions `scroll-regression` matches itself; `pgrep -f "Xvfb :98 "` cannot.
+
+**The same question in a destructive form:** a step that destroys something must not run unconditionally after a step that can fail. A `gh pr merge` answered with `HTTP 503` was followed by an unconditional branch delete in the same chain, which closed the pull request; the commit survived only because git had not garbage-collected it. Chain destructive cleanup behind a checked success, or run it separately.
+
+**Files:** N/A (verification discipline)
+
+### A FAIL blames the branch only if the control is *current main*, not the PR's base
+**Context:** Issue #121's guard reported a blank document pane on PR #115 but not on `main`, so the merge was held and the finding was reported to the contributor as theirs.
+**The hold was wrong.** The control ran against `main` @ 2cca28a — the commit the PR was *branched from*. #131, which fixes table height reservation, landed after that. So the comparison never contained the fix, and a defect belonging to `main` was attributed to the branch.
+
+**What settles it** is rebasing the branch onto current `main` and running the identical guard, same session, same display, same fixture:
+
+| build | f011 `content_px` | verdict |
+|---|---|---|
+| PR on its own base (no #131) | 197 | FAIL — blank |
+| PR rebased onto `main` (with #131) | 1954 | PASS |
+
+The neighbouring frames barely move (f010 1814 → 1811, f012 2176 → 2173, f013 1927 → 1924), which is what rules out the alternative reading — that the blank merely moved somewhere the walk no longer visits.
+
+**The general rule, sharpening the "never accept a PASS without a control run" entry above:** a control run answers *"is the detector still working?"*. It does not answer *"whose bug is this?"*. For attribution the comparison must be `branch-rebased-onto-main` versus `main`, both current. Comparing a branch against its own base measures the branch plus everything main fixed since — and on a fast-moving repository that difference is usually larger than the branch.
+
+**Cheap check before any deep diagnosis:** `git merge-base --is-ancestor <suspected-fix> <branch>`. If the fix is not in the branch, rebase and re-run before writing a single line of analysis.
+
+**Files:** `scripts/scroll-regression.sh`, PR #115
+
+### A textually clean rebase can still be a broken build
+**Context:** Rebasing PR #116 (table cell wrapping) onto `main` after #113, #114, #129 and #131 had all touched the same renderer.
+**Symptom:** git reported exactly one conflict, in a test file. After resolving it the build failed with two `E0061` errors.
+**Cause:** both branches added a *parameter* to the same function, at different lines. git sees no textual overlap, so it merges silently:
+- `table_cell_height` gained `options: &CommonMarkOptions` on `main` (#129, image heights); the branch still called it with five arguments.
+- `collect_painted_text` gained a `clip_rect` parameter on the branch; `main`'s helper from #114 still called the two-argument form.
+
+Neither is visible in `git status`, in the conflict markers, or in GitHub's `mergeable` field. A PR marked CLEAN can be un-buildable.
+
+**Rule:** always `cargo build` (or at minimum `cargo check`) after a rebase, before reporting the rebase as done — and never treat GitHub's mergeable state as evidence that a branch compiles.
+
+**Second trap, in the conflict resolution itself:** when both sides of a hunk end mid-block, the closing brace lives in the *shared tail below* the `>>>>>>>` marker. "Keep both sides" then leaves the first block unclosed — `error: this file contains an unclosed delimiter`. It bit twice in one session:
+- two test functions in `wrapping.rs` (#116);
+- two dialog functions and two menu-button `if` blocks in `src/main.rs` (#119), where the shared prologue (`if !flag { return; } let mut open = true;`) belongs to *each* function and must be duplicated, not shared.
+
+Check `count('{') - count('}')` on the resolved file before compiling; a non-zero balance names the mistake immediately.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/wrapping.rs`, `src/main.rs`, PRs #116 and #119
+
+### A rebase that drops tests looks exactly like a rebase that adds them
+**Context:** Verifying rebases of #115, #116 and #119.
+**Problem:** `cargo test` prints one `test result:` line per test binary. Reading "76 passed" from one run and "69 passed" from another compares different binaries and invents a regression — I did exactly that and briefly believed #116 had deleted seven tests.
+**Fix:** compare inventories, not counts, with the identical command on both trees:
+```bash
+cargo test --locked -- --list | grep ': test' | sed 's/: test//' | sort > /tmp/a.txt
+comm -23 /tmp/main.txt /tmp/a.txt   # present on main, missing on the branch
+comm -13 /tmp/main.txt /tmp/a.txt   # added by the branch
+```
+An empty first list is the assertion worth making. It also explains rises in the *ignored* count without alarm — #119's two new `system_fonts` tests are skipped for want of installed fonts, exactly like the existing CJK one.
+
+**Files:** N/A (verification discipline)
+
+### On a wrapping row, nothing about a label's position is knowable before the label runs
+**Context:** #196 — list markers sat ~1.7 px above the item text's lowercase optical centre. The marker code centred itself on its own allocated box (`bottom − raw/2`), which the comment described as bottom-alignment compensation. Measurement showed the marker box and the text galley shared neither top nor bottom edge — they were 6.00 px apart at *every* edge, so the compensation was compensating for a box offset, not aligning anything.
+
+**Root cause, in egui's layout:** on `Layout::left_to_right(Align::BOTTOM).with_main_wrap(true)`, `ui.label` does not use the row's bottom alignment at all. `Label::layout_in_ui` has a special path for wrapping horizontal layouts: it lays the text as a full-width galley anchored at `pos2(max_rect.left, cursor.top)`, and sets `first_row_min_height = cursor.height()` **at label time**. Inside the galley, glyphs are then pushed to the bottom of the row box (`valign` factor × the row height minus the format's line height). Two consequences:
+
+1. Every widget allocated earlier on the line — the marker's own box, a task checkbox, an inline image — inflates `cursor.height()` and pushes the text down. The marker's oversized box (line height resolved against `text_style_height` ≈1.2× size instead of the font size: 27.6 px vs 24 px) was itself what moved the text.
+2. A marker position computed at slot-reservation time is wrong by construction. `Rect::bottom()` of an allocation says nothing about where a later label will paint.
+
+**Fix:** reserve the slot in `start_item`, paint later. The renderer flushes deferred markers immediately before the item's first `ui.label`, and the position comes from a *reference galley*: a one-character `"x"` job laid out with the label's own `TextFormat` (taken from the job `append_to` builds, `valign` overridden to `ui.text_valign()`) and the same `first_row_min_height` the label will see. egui performs its own arithmetic on the reference; the code only reads back `glyph.pos.y` (baseline) and `glyph.uv_rect.size.y` (x-height) and centres the dot on `baseline − x_height/2`. Delegating the math beats re-deriving it: the formula (`font_impl_ascent + valign × (row_height − glyph.line_height) + ½(font_height − font_impl_height)`, plus pixel rounding) has inputs that are not all public.
+
+**Corollaries:**
+- Compensations can cancel to near-zero and read as "aligned": the ordered marker landed 0.18 px from the text baseline through *two* stacked errors (oversized box + `RIGHT_CENTER` re-centring). A coincidence at today's metrics is not a derivation; the acceptance test has to pin the mechanism's quantity (dot centre vs x-glyph optical centre), not today's residuals.
+- Flush points for deferred paints need every path the renderer can take between slot and first text: nested `start_item`, non-text-first content (code block, math, buffered link/image text via `TagEnd::Item`), and the text path itself. The reference-galley fallback with `None` keeps those markers painted, if with a stale cursor.
+- `misc.rs` already documented the `text_style_height` vs font-size distinction for inline math ("formulas ~1 px low"); the marker path is the second instance. When a renderer constant reads like a fudge factor, grep the lessons before tuning it again.
+
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/elements.rs` (`reserve_list_marker`, `paint_list_marker`, `first_line_baseline`), `crates/egui_commonmark/egui_commonmark/src/lib.rs` (`List::start_item`, `flush_pending_markers`), `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`emit_text` flush, `TagEnd::Item` fallback), `crates/egui_commonmark/egui_commonmark/tests/list_marker_alignment.rs`
+
+### What a screenshot guard cannot see, an in-process frame drive can
+**Context:** #140 — an intermittent one-frame blank document pane. Four fixtures failed to reproduce it, the runtime probes (`MDV_DIAG_SLICE`, `MDV_DIAG_SPLIT`) saw thousands of frames without the watched condition, and the screenshot burst experiment proved `import -window` capture is slower than the app's settle: six captures inside a settle window were byte-identical in all 61 steps. A one-frame artifact was unreachable by construction — the guard samples ~1 frame in 27, and md-viewer repaints on demand.
+
+**What worked:** a renderer test that drives `ctx.run` one frame at a time and inspects every painted shape. The precondition the field could not produce was injected directly — `scroll_area::State` with an oversized offset stored under the ScrollArea's own `Id` (read from `ScrollAreaOutput.id` the frame before) — and the next frame was asserted to paint visible text inside the scroll clip. Red on `main`, green with the fix, deterministic, sub-second.
+
+**Two egui 0.33 gotchas the test surfaced:**
+1. `ScrollArea::show_viewport` computes its window as `ZERO + state.offset` in `begin`, **unclamped** — the content height is not even known yet. Any position decided before `begin` runs from a stale stored offset selects and paints against a viewport past the content. A clamp that runs after `show_viewport` returns is one frame late by construction.
+2. `ScrollArea::id_salt(id_salt: impl Hash)` wraps its argument in `Id::new` — pass an already-hashed `Id` and it is hashed *again*. Computing the persistent id as `ui.make_persistent_id(scroll_id)` therefore does not match the state egui stores under `.id_salt(scroll_id)`; mirror the re-hash: `ui.make_persistent_id(Id::new(scroll_id))`.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/tests/scroll_offset_beyond_extent.rs`, `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show_scrollable` pre-selection clamp)
+
+---
+
+### egui silently skips set_fonts when definitions compare equal
+**Context:** Font presets GitHub and VS Code appeared to "not switch" between each other while both switched to/from Default fine.
+**Problem:** `Context::set_fonts` diffs the new `FontDefinitions` against the installed ones (comparing TTF data) and returns early on equality (`egui-0.33.3 context.rs:1968`). Two presets whose CSS stacks resolve to the same installed faces — the normal case on stock Linux, where GitHub's and VS Code's stacks both end up at Adwaita Sans + Noto Sans Mono — produce byte-identical definitions, so nothing re-renders.
+**Fix:** Give presets differences beyond family resolution: per-preset base body size (GitHub 16px vs VS Code preview 14px) applied to `TextStyle::Body`/`Heading`/`Monospace`, and preset-driven renderer line heights (GitHub 1.5/1.45, VS Code 1.6/1.36). The renderer derives all document sizes from `TextStyle::Body`, so one style entry cascades everywhere.
+**Gotchas:** Don't scale `TextStyle::Small` — it sizes chrome controls. State/checkmark UI updating is not evidence fonts changed: assert against `fonts(|f| f.definitions().clone())` or rendered metrics in tests.
+**Files:** `src/system_fonts.rs`, `src/main.rs`
+
+### CentralPanel's clip is window-wide — but ScrollArea inner rects already bound wide blocks; clip from max_rect and you erase widgets
+**Context:** "I can drag tables over the right sidebar, code blocks go above it, and resizing the sidebar resets table widths." Three reports, one egui asymmetry, one width policy — and two wrong fixes before the right one.
+
+**The asymmetry:** egui 0.33 clips `SidePanel`s to their own rect but `CentralPanel` content to `ctx.content_rect()` — the whole window (`containers/panel.rs`: `set_clip_rect(panel_rect)` vs `set_clip_rect(ctx.content_rect())`). `Ui::new_child` clones the parent painter, so every descendant inherits that window-wide clip; an explicit child `max_rect` is *not* intersected with it (the #64 carve-out depends on this). The vertical document ScrollArea only tightens the *scrolled* (Y) dimension of its content clip, so the X extent stays window-wide all the way down to tables and code blocks.
+
+**Why it still doesn't leak (much):** every wide block lives in a `ScrollArea::horizontal` whose inner rect is bounded by its parent's *available* rect — pane-bounded — and its content clip is `inner ± clip_rect_margin` (3px). Xvfb E2E (body drag, column-separator drag, wheel, sidebar resize, code selection drag) confirmed 0.2.2 paints wide blocks at most ~3px past the pane edge, hidden by the content gutter. The dramatic overlap reports trace to the *width policy*, not the clip.
+
+**Wrong fix #1:** capping carve-outs at `ui.clip_rect().right()` is a **no-op** — that clip is window-wide. Bound layout at `ui.max_rect().right()`, which *is* the viewport column.
+
+**Wrong fix #2 (data loss):** `ui.set_clip_rect(clip ∩ max_rect)` inside a carve-out **erased HTML tables entirely**. In the HTML/main-wrap path the scope's `max_rect` is *degenerate* (`max.y == min.y` — zero height); layout overflowing `max_rect` is legal — only the painter clip forbids painting, so pre-change content painted fine and post-change the clip was a zero-height rect. Never clip to `max_rect`; it is a layout hint and may be degenerate.
+
+**The width policy that actually bit:** `TableBuilder` persists user-resized widths and never re-shrinks them; reset-on-any-bound-change fired on every sidebar nudge, and because fitted columns fill the pane, *any* shrink overflows → reset *every* time. Fix: `table_shrink_rescale_widths` — growth keeps, shrink-that-fits keeps, shrink-that-overflows **rescales the persisted widths proportionally** (floored at per-column minimums) with a `reset()` so they take effect. Bound history distinguishes a genuine shrink from a user-dragged column: egui_extras resize does **not** redistribute width (one column grows by the pointer delta), so drags overflow by choice and must never be punished by an overflow rule.
+
+**Testing technique (three traps this fix walked into):**
+1. **Verify red-before-green.** Two "passing" regression tests were vacuous: budget-capped columns never overflow at rest, and rendering the fixture inside a blockquote shrinks the table bound so it never overflowed. A clip test whose fixture never approaches the clip passes forever.
+2. **One `begin_pass` per frame.** Calling `ctx.begin_pass(RawInput{events})` and then a helper that calls `begin_pass` again zeroes `pointer.delta()` — simulated drags silently do nothing while `button_down` stays true.
+3. **Drive `show_scrollable`, not `.show()`.** The renderer-owned ScrollArea creates the pane-bounded geometry; the plain entry cannot express any of it.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (bootstrap + slice width caps, both table carve-outs, `table_shrink_rescale_widths`, `store_table_column_widths`), `crates/egui_commonmark/egui_commonmark/tests/pane_clip.rs`, `docs/devlog/068-wide-block-pane-clip.md`
+
+### Fontique `family_names()` is an alias dump, not a picker list
+**Context:** The font picker offered ~742 names on a stock Arch system but "most fonts don't even change the font": ~481 names (script-specific families like "Noto Sans Devanagari", emoji/symbol faces) have no basic-Latin coverage, so the installer's `"Aa"` gate silently fell back to the auto-detected default; another ~425 names (localized names, weight-instance names like "Noto Sans Black") are aliases resolving to the base family's id, so they picked the very same regular face. Only 317 distinct families existed behind the 742 names.
+**Fix:** `scan_pickable_font_families()` keeps a name only if it is the family's canonical name (`collection.family_name(family_id(name)) == name` collapses each alias group to one entry) AND `select_from_families` finds a normal-style face covering `"Aa"` — the identical gate `install_regular_fonts` applies, so anything listed is guaranteed to take effect. The probe costs ~0.5 s (one face load per rejected candidate), so it runs on a background thread and the dialog shows "System Default" + a scanning note until it lands.
+**Gotchas:** `family_names()` order is HashMap-arbitrary — sort case-insensitively yourself. `family_name(id)` returns the first-seen name for the id, which is the canonical one. Listing a family whose selection would fail re-creates the silent-fallback bug; always mirror the installer's gate.
+**Files:** `src/system_fonts.rs` (`scan_pickable_font_families`, `pickable_family_names`), `src/main.rs` (`pending_font_family_scan` poll), `docs/devlog/068-fonts-one-menu.md`

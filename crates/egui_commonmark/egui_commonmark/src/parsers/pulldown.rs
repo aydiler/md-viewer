@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -15,6 +17,7 @@ use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
 
 use pulldown_cmark::{CowStr, HeadingLevel};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Search-match highlight kind for a single rendered text segment.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -203,6 +206,133 @@ fn visit_highlight_segments<'a>(
 /// Blind char-count cut (not break-friendly on `/`, `-`, etc.): variable-length
 /// segments can still exceed the column at narrow widths and re-introduce the
 /// original clipping bug. Fixed-size chunks always fit.
+/// Split a YAML frontmatter block into top-level key/value pairs.
+///
+/// Deliberately not a YAML parser. VS Code renders frontmatter as a flat
+/// two-column table and does not descend into nested structures; matching that
+/// keeps a de-facto-standard block readable without taking on a YAML
+/// dependency and its error modes. Anything that is not a top-level
+/// `key: value` line — nested mappings, sequence items, folded scalars — is
+/// appended to the preceding value verbatim, so no source text is dropped.
+fn parse_frontmatter_pairs(raw: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // A continuation line is indented, or is a sequence item, or has no
+        // colon at all. Only an unindented `key:` starts a new row.
+        let is_continuation = line.starts_with(char::is_whitespace) || line.trim_start().starts_with('-');
+        let split = if is_continuation {
+            None
+        } else {
+            line.find(':')
+        };
+
+        match split {
+            Some(idx) => {
+                let key = line[..idx].trim().to_owned();
+                let value = line[idx + 1..].trim().to_owned();
+                pairs.push((key, value));
+            }
+            None => {
+                if let Some((_, value)) = pairs.last_mut() {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(line.trim());
+                } else {
+                    // Leading junk before any key: keep it visible rather than
+                    // silently dropping it.
+                    pairs.push((String::new(), line.trim().to_owned()));
+                }
+            }
+        }
+    }
+
+    pairs
+}
+
+/// Paint a frontmatter block as a two-column key/value table.
+fn render_frontmatter_table(
+    ui: &mut Ui,
+    raw: &str,
+    options: &CommonMarkOptions,
+    max_width: f32,
+) {
+    let pairs = parse_frontmatter_pairs(raw);
+    if pairs.is_empty() {
+        return;
+    }
+
+    let _ = options;
+
+    // Both the key gap and the value column are derived from `max_width`, never
+    // from `ui.available_width()`. That is deliberate: `max_width` comes from
+    // `ContentGeometry` (#96) and is identical in the bootstrap pass that
+    // records `split_points` and in the slice pass that paints. Deriving either
+    // one from the ambient width makes this block's *height* differ between the
+    // two passes, which collapses slice selection and blanks the rest of the
+    // document — that was #167, and it is why #166's bare `Label::wrap()` had
+    // to be reverted.
+    const KEY_GAP: f32 = 12.0;
+    // Frame::group's two inner margins plus its stroke. Deliberately generous:
+    // over-reserving narrows the value column slightly, while under-reserving
+    // lets it overflow the frame and clip.
+    const FRAME_CHROME: f32 = 24.0;
+    const MIN_VALUE_WIDTH: f32 = 80.0;
+
+    let key_width = pairs
+        .iter()
+        .map(|(key, _)| {
+            egui::WidgetText::from(egui::RichText::new(key).strong())
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                )
+                .size()
+                .x
+        })
+        .fold(0.0f32, f32::max);
+
+    let item_spacing = ui.spacing().item_spacing.x;
+    let value_width =
+        (max_width - key_width - KEY_GAP - item_spacing - FRAME_CHROME).max(MIN_VALUE_WIDTH);
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_max_width(max_width);
+        egui::Grid::new(ui.next_auto_id())
+            .num_columns(2)
+            .spacing(egui::vec2(item_spacing, 4.0))
+            .striped(true)
+            .show(ui, |ui| {
+                for (key, value) in pairs {
+                    // The gap has to be produced *inside* the key cell: the
+                    // grid sizes column one to its widest entry, so a long key
+                    // otherwise ends flush against its value ("authorJane Doe").
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(key).strong());
+                        ui.add_space(KEY_GAP);
+                    });
+                    // Wrap inside a scope bounded by the precomputed width. A
+                    // bare `ui.label` does not wrap, so a long value grew the
+                    // column past the frame, which then clipped both the value
+                    // and — because the oversized block widens the content
+                    // column — the prose of every block after it (#128).
+                    ui.scope(|ui| {
+                        ui.set_max_width(value_width);
+                        ui.add(egui::Label::new(value).wrap());
+                    });
+                    ui.end_row();
+                }
+            });
+    });
+}
+
 fn inline_code_wrap_segments(text: &str) -> Vec<String> {
     const MAX_SEGMENT_CHARS: usize = 56;
 
@@ -228,34 +358,797 @@ fn inline_code_wrap_segments(text: &str) -> Vec<String> {
     segments
 }
 
-/// Count the visual lines a markdown table cell will occupy when rendered.
-/// Used by the `fn table` renderer to compute heterogeneous row heights so
-/// long inline-code paths (chunked by `inline_code_wrap_segments`) don't get
-/// clipped by a fixed row height. Only `Event::Code` chunking adds visual
-/// lines today; other inline events flow on a single line within a cell.
-fn cell_visual_lines(cell: &[(pulldown_cmark::Event, Range<usize>)]) -> usize {
-    let mut max_lines = 1usize;
+/// Measure a table cell's visible labels in their rendering order. The cell
+/// uses a wrapping horizontal layout: every label continues the current row,
+/// then uses the full column width for subsequent rows. Long code chunks call
+/// `ui.end_row()` in production, so they also finish a measurement row here.
+fn cell_visual_lines(
+    cell: &[(pulldown_cmark::Event, Range<usize>)],
+    ui: &Ui,
+    column_width: f32,
+) -> usize {
+    // `RichText::code().size(selected_font_size)` renders code with the body
+    // size and monospace family, not with the (usually smaller) Monospace text
+    // style. Keep measurement on that exact font-size path.
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let code_font = egui::FontId::new(body_font.size, egui::FontFamily::Monospace);
+    let wrap_width = (column_width - 8.0).max(1.0);
+    let item_spacing = ui.spacing().item_spacing.x;
+    let mut remaining_width = wrap_width;
+    let mut completed_lines = 0usize;
+    let measure_label = |text: &str, font_id: &egui::FontId, used_width: f32| {
+        let mut job = egui::text::LayoutJob::simple(
+            text.to_owned(),
+            font_id.clone(),
+            egui::Color32::WHITE,
+            wrap_width,
+        );
+        if let Some(first_section) = job.sections.first_mut() {
+            first_section.leading_space = used_width;
+        }
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    };
+
+    let add_label = |text: &str,
+                     font_id: &egui::FontId,
+                     remaining_width: &mut f32,
+                     completed_lines: &mut usize| {
+        let used_width = wrap_width - *remaining_width;
+        let galley = measure_label(text, font_id, used_width);
+        *completed_lines += galley.rows.len().saturating_sub(1);
+        let last_row_width = galley
+            .rows
+            .last()
+            .map_or(0.0, |row| row.rect().width())
+            .min(wrap_width);
+        *remaining_width = (wrap_width - last_row_width - item_spacing).max(0.0);
+    };
+
     for (event, _) in cell {
-        if let pulldown_cmark::Event::Code(text) = event {
-            let chunks = inline_code_wrap_segments(text).len();
-            if chunks > max_lines {
-                max_lines = chunks;
+        match event {
+            pulldown_cmark::Event::Text(text)
+            | pulldown_cmark::Event::InlineHtml(text)
+            | pulldown_cmark::Event::Html(text)
+            | pulldown_cmark::Event::FootnoteReference(text) => {
+                add_label(text, &body_font, &mut remaining_width, &mut completed_lines);
+            }
+            pulldown_cmark::Event::Code(code) => {
+                let segments = inline_code_wrap_segments(code);
+                let force_rows = segments.len() > 1;
+                for segment in segments {
+                    add_label(
+                        &segment,
+                        &code_font,
+                        &mut remaining_width,
+                        &mut completed_lines,
+                    );
+                    if force_rows {
+                        completed_lines += 1;
+                        remaining_width = wrap_width;
+                    }
+                }
+            }
+            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
+                add_label(" ", &body_font, &mut remaining_width, &mut completed_lines);
+            }
+            pulldown_cmark::Event::TaskListMarker(checked) => {
+                add_label(
+                    if *checked { "[x] " } else { "[ ] " },
+                    &body_font,
+                    &mut remaining_width,
+                    &mut completed_lines,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (completed_lines + usize::from(remaining_width < wrap_width)).max(1)
+}
+
+fn table_cell_height(
+    cell: &[(pulldown_cmark::Event, Range<usize>)],
+    line_height: f32,
+    cache: &CommonMarkCache,
+    ui: &Ui,
+    column_width: f32,
+    options: &CommonMarkOptions,
+) -> f32 {
+    let text = markdown_cell_text(cell);
+    let mut height = wrapped_text_height(ui, &text, column_width, line_height).max(
+        line_height * cell_visual_lines(cell, ui, column_width) as f32
+            + ui.spacing().item_spacing.y,
+    );
+    let has_visible_text = cell.iter().any(|(event, _)| {
+        matches!(
+            event,
+            pulldown_cmark::Event::Text(_)
+                | pulldown_cmark::Event::Code(_)
+                | pulldown_cmark::Event::InlineHtml(_)
+                | pulldown_cmark::Event::Html(_)
+                | pulldown_cmark::Event::FootnoteReference(_)
+                | pulldown_cmark::Event::TaskListMarker(_)
+        )
+    });
+    let mut inline_math_height = 0.0;
+    let mut inline_math_count = 0usize;
+    for (event, _) in cell {
+        // Images contribute their painted height. The URI has to be resolved
+        // exactly the way the painting path does it (`Image::new` applies the
+        // scheme rules), otherwise the cache lookup misses and the row silently
+        // stays text-height.
+        if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) = event {
+            let uri = crate::Image::new(dest_url, options).uri;
+            let image_height = match cache.observed_image_size(&uri) {
+                // Painted at least once: the width is already capped by the
+                // cell, so the recorded height is what the row needs.
+                Some(size) if size.y > 0.0 => size.y,
+                // Not yet loaded. Reserving nothing collapses the row and the
+                // image is clipped on every frame until it loads; reserving a
+                // full cell width of height over-reserves for a wide thin
+                // image. A square-ish guess bounded by the column keeps the
+                // first frame usable, and `observe_image_size` marks the layout
+                // dirty once the real size arrives so this is re-measured.
+                _ => column_width.min(line_height * 8.0),
+            };
+            height = height.max(image_height);
+        }
+
+        if let pulldown_cmark::Event::InlineMath(_tex) = event {
+            let conservative = line_height * 2.0;
+            #[cfg(feature = "math")]
+            let formula_height = crate::cached_inline_math_height(ui, cache, _tex, options)
+                .map(|exact| exact + line_height * 0.5)
+                .unwrap_or(conservative);
+            #[cfg(not(feature = "math"))]
+            let formula_height = {
+                let _ = (cache, ui, options);
+                conservative
+            };
+            inline_math_height += formula_height;
+            inline_math_count += 1;
+        }
+    }
+    if inline_math_count == 1 && !has_visible_text {
+        height = height.max(inline_math_height);
+    } else if inline_math_count > 0 {
+        // Formula widgets participate in the same horizontal wrapping flow as
+        // labels. Without cached formula widths we cannot know whether each
+        // formula shares a row, so reserve their heights cumulatively whenever
+        // other visible content (or another formula) can force a row break.
+        height += inline_math_height
+            + (ui.spacing().item_spacing.y + 1.0) * inline_math_count as f32;
+    }
+
+    height
+}
+
+fn markdown_cell_text(cell: &[(pulldown_cmark::Event, Range<usize>)]) -> String {
+    let mut text = String::new();
+    for (event, _) in cell {
+        match event {
+            pulldown_cmark::Event::Text(value)
+            | pulldown_cmark::Event::Code(value)
+            | pulldown_cmark::Event::InlineHtml(value)
+            | pulldown_cmark::Event::Html(value)
+            | pulldown_cmark::Event::FootnoteReference(value)
+            | pulldown_cmark::Event::InlineMath(value)
+            | pulldown_cmark::Event::DisplayMath(value) => text.push_str(value),
+            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => text.push('\n'),
+            pulldown_cmark::Event::TaskListMarker(checked) => {
+                text.push_str(if *checked { "[x] " } else { "[ ] " });
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+fn markdown_table_digest(rows: &[Vec<Vec<(pulldown_cmark::Event, Range<usize>)>>]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in rows {
+        row.len().hash(&mut hasher);
+        for cell in row {
+            cell.len().hash(&mut hasher);
+            for (event, source) in cell {
+                // Preserve formatting identity as well as visible text: the same
+                // bytes can wrap differently as prose, inline code, or a link.
+                let _ = write!(HasherWriter(&mut hasher), "{event:?}");
+                source.start.hash(&mut hasher);
+                source.end.hash(&mut hasher);
             }
         }
     }
-    max_lines
+    hasher.finish()
 }
 
-/// Heuristic visual-line count for an HTML-table cell (rendered as a plain
-/// `RichText` string, not as a markdown event stream). Counts explicit
-/// newlines and adds a crude wrap estimate of ~60 chars per visual line.
-/// Over-estimates slightly by design — extra row height is preferable to
-/// clipping. Exact estimation would require knowing the rendered column
-/// width up front, which TableBuilder doesn't expose before render.
-fn html_cell_visual_lines(cell: &str) -> usize {
-    let explicit_lines = cell.lines().count().max(1);
-    let wrap_est = cell.len().saturating_sub(1) / 60;
-    explicit_lines.saturating_add(wrap_est).max(1)
+struct HasherWriter<'a, H>(&'a mut H);
+
+impl<H: Hasher> std::fmt::Write for HasherWriter<'_, H> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.0.write(value.as_bytes());
+        Ok(())
+    }
+}
+
+fn html_table_digest(rows: &[(bool, &[String])]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (is_header, row) in rows {
+        is_header.hash(&mut hasher);
+        row.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn natural_text_width(ui: &Ui, text: &str) -> f32 {
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    text.lines()
+        .map(|line| {
+            ui.painter()
+                .layout_no_wrap(line.to_owned(), font_id.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max)
+        + 16.0
+}
+
+/// Width needed to keep the widest Unicode word on one line.
+///
+/// Body content may wrap aggressively, but a short table header such as
+/// `Required` should not be forced into `Require` / `d`. Unicode word
+/// boundaries keep CJK headers breakable while treating shaped scripts and
+/// combining sequences as words rather than splitting scalar values.
+fn unbreakable_text_width(ui: &Ui, text: &str) -> f32 {
+    text.unicode_words()
+        .map(|word| natural_text_width(ui, word))
+        .fold(40.0, f32::max)
+}
+
+fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32) -> f32 {
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui.painter().layout(
+        text.to_owned(),
+        font_id,
+        egui::Color32::WHITE,
+        (column_width - 8.0).max(1.0),
+    );
+    line_height * galley.rows.len().max(1) as f32
+}
+
+pub(crate) fn body_line_height(ui: &Ui, options: &CommonMarkOptions) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let natural = ui
+        .text_style_height(&egui::TextStyle::Body)
+        .max(font.size);
+    options
+        .typography
+        .resolve_line_height(font.size)
+        // A configured line box can be smaller than the glyphs, but a fixed
+        // table row must still reserve their natural painted height.
+        .map_or(natural, |configured| configured.max(natural))
+}
+
+/// Blend max-min fairness with proportional content demand while fitting the
+/// available width. The fair component prevents one outlier from starving its
+/// neighbors; the proportional component preserves meaningful differences
+/// between wider columns. If hard minimums do not fit, horizontal scrolling
+/// remains available.
+fn fit_column_widths(desired: &[f32], available: f32, minimums: &[f32]) -> Vec<f32> {
+    if desired.is_empty() {
+        return Vec::new();
+    }
+    assert_eq!(desired.len(), minimums.len());
+    let minimums: Vec<f64> = minimums
+        .iter()
+        .map(|width| width.max(40.0) as f64)
+        .collect();
+    let desired: Vec<f64> = desired
+        .iter()
+        .zip(&minimums)
+        .map(|(width, minimum)| (*width as f64).max(*minimum))
+        .collect();
+    let available = available as f64;
+    let desired_total = desired.iter().sum::<f64>();
+    if desired_total <= available {
+        return desired.into_iter().map(|width| width as f32).collect();
+    }
+    let minimum_total = minimums.iter().sum::<f64>();
+    if available <= minimum_total {
+        return minimums.into_iter().map(|width| width as f32).collect();
+    }
+
+    // Reserve every header floor first, then distribute the remaining space
+    // fairly across each column's unmet demand. With equal floors this is the
+    // original max-min water filling translated by that common floor.
+    let headrooms: Vec<f64> = desired
+        .iter()
+        .zip(&minimums)
+        .map(|(wanted, minimum)| wanted - minimum)
+        .collect();
+    let surplus = available - minimum_total;
+    let mut sorted = headrooms.clone();
+    sorted.sort_by(f64::total_cmp);
+    let mut remaining = surplus;
+    let mut active = sorted.len();
+    let mut fair_cap = 0.0;
+    for wanted in sorted {
+        let equal_share = remaining / active as f64;
+        if wanted <= equal_share {
+            remaining -= wanted;
+            active -= 1;
+            fair_cap = wanted;
+        } else {
+            fair_cap = equal_share;
+            break;
+        }
+    }
+
+    // Proportional allocation above the hard minimum is continuous and keeps
+    // meaningful differences in unmet demand. Blend mostly toward fairness so
+    // a very large outlier cannot dominate.
+    const FAIR_WEIGHT: f64 = 0.6;
+    let proportional_scale = surplus / (desired_total - minimum_total);
+
+    minimums
+        .into_iter()
+        .zip(headrooms)
+        .map(|(minimum, headroom)| {
+            let fair = minimum + headroom.min(fair_cap);
+            let proportional = minimum + proportional_scale * headroom;
+            (FAIR_WEIGHT * fair + (1.0 - FAIR_WEIGHT) * proportional) as f32
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct HeightAwareTableLayout {
+    key: u64,
+    widths: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TableHeightScore {
+    row_max_total: f32,
+    cell_total: f32,
+}
+
+fn table_height_score(
+    widths: &[f32],
+    row_count: usize,
+    measurements: &mut HashMap<(usize, u32), Vec<f32>>,
+    measurement_limit: usize,
+    measure_column: &mut impl FnMut(usize, f32) -> Vec<f32>,
+) -> Option<TableHeightScore> {
+    let mut row_maxima = vec![0.0_f32; row_count];
+    let mut cell_total = 0.0;
+    for (column, &width) in widths.iter().enumerate() {
+        let measurement_key = (column, width.to_bits());
+        if !measurements.contains_key(&measurement_key)
+            && measurements.len() >= measurement_limit
+        {
+            return None;
+        }
+        let heights = measurements
+            .entry(measurement_key)
+            .or_insert_with(|| measure_column(column, width));
+        for (row, &height) in heights.iter().enumerate().take(row_count) {
+            row_maxima[row] = row_maxima[row].max(height);
+            cell_total += height;
+        }
+    }
+    Some(TableHeightScore {
+        row_max_total: row_maxima.into_iter().sum(),
+        cell_total,
+    })
+}
+
+fn reduces_table_height(candidate: TableHeightScore, current: TableHeightScore) -> bool {
+    const MEANINGFUL_HEIGHT: f32 = 0.25;
+    candidate.row_max_total < current.row_max_total - MEANINGFUL_HEIGHT
+}
+
+fn better_table_height(candidate: TableHeightScore, current: TableHeightScore) -> bool {
+    const MEANINGFUL_HEIGHT: f32 = 0.25;
+    reduces_table_height(candidate, current)
+        || ((candidate.row_max_total - current.row_max_total).abs() <= MEANINGFUL_HEIGHT
+            && candidate.cell_total < current.cell_total - MEANINGFUL_HEIGHT)
+}
+
+fn columns_at_row_max(
+    widths: &[f32],
+    row_count: usize,
+    measurements: &HashMap<(usize, u32), Vec<f32>>,
+) -> Vec<bool> {
+    const MEANINGFUL_HEIGHT: f32 = 0.25;
+    let mut row_maxima = vec![0.0_f32; row_count];
+    for (column, width) in widths.iter().enumerate() {
+        let heights = &measurements[&(column, width.to_bits())];
+        for (row, height) in heights.iter().enumerate().take(row_count) {
+            row_maxima[row] = row_maxima[row].max(*height);
+        }
+    }
+
+    widths
+        .iter()
+        .enumerate()
+        .map(|(column, width)| {
+            measurements[&(column, width.to_bits())]
+                .iter()
+                .enumerate()
+                .take(row_count)
+                .any(|(row, height)| *height >= row_maxima[row] - MEANINGFUL_HEIGHT)
+        })
+        .collect()
+}
+
+/// Refine the deterministic natural-width allocation using the row heights
+/// that the production table renderer will actually reserve. Width moves are
+/// bounded and quantized, so the work stays predictable even for large tables.
+fn optimize_fitted_widths(
+    baseline: &[f32],
+    desired: &[f32],
+    minimums: &[f32],
+    row_count: usize,
+    mut measure_column: impl FnMut(usize, f32) -> Vec<f32>,
+) -> Vec<f32> {
+    let mut measurements = HashMap::new();
+    optimize_fitted_widths_with_cache(
+        baseline,
+        desired,
+        minimums,
+        row_count,
+        &mut measurements,
+        &mut measure_column,
+    )
+}
+
+fn optimize_fitted_widths_with_cache(
+    baseline: &[f32],
+    desired: &[f32],
+    minimums: &[f32],
+    row_count: usize,
+    measurements: &mut HashMap<(usize, u32), Vec<f32>>,
+    measure_column: &mut impl FnMut(usize, f32) -> Vec<f32>,
+) -> Vec<f32> {
+    const WIDTH_STEP: f32 = 8.0;
+    const MAX_PASSES: usize = 8;
+    const MAX_PAIR_STEPS: usize = 8;
+
+    if baseline.len() < 2
+        || baseline.len() != desired.len()
+        || baseline.len() != minimums.len()
+        || row_count == 0
+    {
+        return baseline.to_vec();
+    }
+
+    let can_transfer = (0..baseline.len()).any(|donor| {
+        baseline[donor] > minimums[donor] + 0.01
+            && (0..baseline.len()).any(|receiver| {
+                receiver != donor
+                    && baseline[receiver] + 0.01
+                        < desired[receiver].max(minimums[receiver])
+            })
+    });
+    if !can_transfer {
+        return baseline.to_vec();
+    }
+
+    let mut widths = baseline.to_vec();
+    let measurement_budget = MAX_TABLE_MEASURED_CELLS / row_count;
+    if measurement_budget < baseline.len() {
+        return baseline.to_vec();
+    }
+    // Phase 2 reuses measurements shared with earlier width candidates, but
+    // every candidate receives the same bounded allowance for new layouts.
+    let measurement_limit = measurements.len().saturating_add(measurement_budget);
+    let mut score = table_height_score(
+        &widths,
+        row_count,
+        measurements,
+        measurement_limit,
+        measure_column,
+    )
+    .expect("the baseline fits the checked measurement budget");
+    let mut best_widths = widths.clone();
+    let mut used_neutral_move = false;
+
+    for _ in 0..MAX_PASSES {
+        // Widening a column that is below every current row maximum cannot
+        // reduce table height. Recompute after each accepted move so a column
+        // that becomes the new maximum remains eligible on the next pass.
+        let relevant_receivers = columns_at_row_max(&widths, row_count, measurements);
+        let mut best: Option<(TableHeightScore, usize, usize, f32)> = None;
+        for donor in 0..widths.len() {
+            let donor_room = widths[donor] - minimums[donor];
+            if donor_room <= 0.01 {
+                continue;
+            }
+            for receiver in 0..widths.len() {
+                if donor == receiver || !relevant_receivers[receiver] {
+                    continue;
+                }
+                let receiver_room = desired[receiver].max(minimums[receiver]) - widths[receiver];
+                let max_transfer = donor_room.min(receiver_room);
+                if max_transfer <= 0.01 {
+                    continue;
+                }
+
+                // Wrapping height is a staircase: one quantum can sit on a
+                // flat section even though a later quantum removes a line.
+                // Check every 8 px step through the bounded 64 px window.
+                for step in 1..=MAX_PAIR_STEPS {
+                    let transfer = WIDTH_STEP * step as f32;
+                    if transfer > max_transfer + 0.01 {
+                        break;
+                    }
+                    let mut candidate_widths = widths.clone();
+                    candidate_widths[donor] -= transfer;
+                    candidate_widths[receiver] += transfer;
+                    let Some(candidate) = table_height_score(
+                        &candidate_widths,
+                        row_count,
+                        measurements,
+                        measurement_limit,
+                        measure_column,
+                    ) else {
+                        return best_widths;
+                    };
+                    if !better_table_height(candidate, score) {
+                        continue;
+                    }
+                    let replace =
+                        best.is_none_or(|(best_score, best_donor, best_receiver, _)| {
+                            better_table_height(candidate, best_score)
+                                || (!better_table_height(best_score, candidate)
+                                    && (donor, receiver) < (best_donor, best_receiver))
+                        });
+                    if replace {
+                        best = Some((candidate, donor, receiver, transfer));
+                    }
+                }
+            }
+        }
+
+        let Some((next_score, donor, receiver, transfer)) = best else {
+            break;
+        };
+        let reduces_rows = reduces_table_height(next_score, score);
+        // Cross at most one flat step (enough for two tied row maxima). If the
+        // following move still does not reduce the sum of row maxima, stop and
+        // return the last primary improvement. Exhausting the measurement
+        // budget follows the same rollback path above. Wider plateaus remain
+        // deliberately out of scope for this bounded Phase 1 heuristic.
+        if !reduces_rows && used_neutral_move {
+            break;
+        }
+        widths[donor] -= transfer;
+        widths[receiver] += transfer;
+        score = next_score;
+        if reduces_rows {
+            best_widths.clone_from(&widths);
+            used_neutral_move = false;
+        } else {
+            used_neutral_move = true;
+        }
+    }
+    best_widths
+}
+
+const TABLE_OVERFLOW_STEP: f32 = 32.0;
+const TABLE_OVERFLOW_MAX: f32 = 160.0;
+const TABLE_OVERFLOW_FRACTION: f32 = 0.30;
+const TABLE_OVERFLOW_KNEE: f32 = 0.90;
+const MAX_TABLE_MEASURED_CELLS: usize = 4_096;
+
+fn table_floors_overflow(minimum_total: f32, visible_column_budget: f32) -> bool {
+    minimum_total > visible_column_budget + 0.01
+}
+
+fn overflow_candidates(minimum_total: f32, desired_total: f32) -> Vec<f32> {
+    let cap = TABLE_OVERFLOW_MAX
+        .min(TABLE_OVERFLOW_FRACTION * minimum_total)
+        .min((desired_total - minimum_total).max(0.0));
+    let mut candidates = vec![0.0];
+    let mut added = TABLE_OVERFLOW_STEP;
+    while added < cap - 0.01 {
+        candidates.push(added);
+        added += TABLE_OVERFLOW_STEP;
+    }
+    if cap > 0.01 {
+        candidates.push(cap);
+    }
+    candidates
+}
+
+fn select_overflow_knee(
+    candidates: &[(f32, Vec<f32>, TableHeightScore)],
+) -> Option<&(f32, Vec<f32>, TableHeightScore)> {
+    let baseline = candidates.first()?;
+    let best = candidates.iter().min_by(|left, right| {
+        left.2
+            .row_max_total
+            .total_cmp(&right.2.row_max_total)
+            .then_with(|| left.2.cell_total.total_cmp(&right.2.cell_total))
+            .then_with(|| left.0.total_cmp(&right.0))
+    })?;
+    if !reduces_table_height(best.2, baseline.2) {
+        return Some(baseline);
+    }
+    let target = baseline.2.row_max_total
+        - TABLE_OVERFLOW_KNEE * (baseline.2.row_max_total - best.2.row_max_total);
+    candidates
+        .iter()
+        .find(|candidate| candidate.2.row_max_total <= target + 0.25)
+        .or(Some(best))
+}
+
+/// When header-word floors already overflow the visible column budget, score
+/// a small bounded set of wider layouts and select the first one at the 90%
+/// row-height knee. The viewport itself remains unchanged and scrollable.
+fn optimize_table_widths(
+    baseline: &[f32],
+    desired: &[f32],
+    minimums: &[f32],
+    visible_column_budget: f32,
+    row_count: usize,
+    mut measure_column: impl FnMut(usize, f32) -> Vec<f32>,
+) -> Vec<f32> {
+    let minimum_total = minimums.iter().map(|width| width.max(40.0)).sum::<f32>();
+    let desired_total = desired
+        .iter()
+        .zip(minimums)
+        .map(|(wanted, minimum)| wanted.max(*minimum).max(40.0))
+        .sum::<f32>();
+    if !table_floors_overflow(minimum_total, visible_column_budget) || row_count == 0 {
+        return optimize_fitted_widths(
+            baseline,
+            desired,
+            minimums,
+            row_count,
+            measure_column,
+        );
+    }
+
+    let mut measurements = HashMap::new();
+    let mut scored = Vec::new();
+    for added in overflow_candidates(minimum_total, desired_total) {
+        let fitted = fit_column_widths(desired, minimum_total + added, minimums);
+        let widths = optimize_fitted_widths_with_cache(
+            &fitted,
+            desired,
+            minimums,
+            row_count,
+            &mut measurements,
+            &mut measure_column,
+        );
+        let measurement_limit = measurements
+            .len()
+            .saturating_add(MAX_TABLE_MEASURED_CELLS / row_count);
+        let Some(score) = table_height_score(
+            &widths,
+            row_count,
+            &mut measurements,
+            measurement_limit,
+            &mut measure_column,
+        ) else {
+            // This can only fail when one complete score exceeds the fixed
+            // per-candidate budget, a table-wide condition that is identical
+            // for every candidate. It therefore fails on candidate zero (or
+            // never) and is a fail-closed guard, not a curve-based early exit.
+            break;
+        };
+        scored.push((added, widths, score));
+    }
+
+    select_overflow_knee(&scored)
+        .map(|candidate| candidate.1.clone())
+        .unwrap_or_else(|| baseline.to_vec())
+}
+
+fn table_layout_key(
+    ui: &Ui,
+    desired: &[f32],
+    minimums: &[f32],
+    line_height: f32,
+    content_digest: u64,
+    layout_revision: u64,
+    math_scale: f32,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    desired.len().hash(&mut hasher);
+    for width in desired {
+        width.to_bits().hash(&mut hasher);
+    }
+    for width in minimums {
+        width.to_bits().hash(&mut hasher);
+    }
+    // The visible column budget is deliberately NOT part of this key: it is
+    // derived from the pane width, and hashing it made every sidebar resize
+    // count as a layout change — re-deriving (and resetting) column widths
+    // the user had arranged. Column widths persist across pane-width changes
+    // and the outer horizontal scroller absorbs any overflow; this key only
+    // guards inputs that genuinely change measured heights.
+    line_height.to_bits().hash(&mut hasher);
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let monospace_font = egui::TextStyle::Monospace.resolve(ui.style());
+    body_font.size.to_bits().hash(&mut hasher);
+    let _ = write!(HasherWriter(&mut hasher), "{:?}", body_font.family);
+    monospace_font.size.to_bits().hash(&mut hasher);
+    let _ = write!(HasherWriter(&mut hasher), "{:?}", monospace_font.family);
+    ui.ctx().pixels_per_point().to_bits().hash(&mut hasher);
+    content_digest.hash(&mut hasher);
+    layout_revision.hash(&mut hasher);
+    math_scale.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cached_height_aware_widths(
+    ui: &Ui,
+    table_id: Id,
+    key: u64,
+    baseline: &[f32],
+    desired: &[f32],
+    minimums: &[f32],
+    visible_column_budget: f32,
+    row_count: usize,
+    measure_column: impl FnMut(usize, f32) -> Vec<f32>,
+) -> (Vec<f32>, bool) {
+    let cache_id = table_id.with("_height_aware_widths");
+    let previous = ui.data(|data| data.get_temp::<HeightAwareTableLayout>(cache_id));
+    if let Some(cached) = &previous {
+        if cached.key == key {
+            return (cached.widths.clone(), false);
+        }
+    }
+    let had_previous_layout = previous.is_some();
+
+    let widths = optimize_table_widths(
+        baseline,
+        desired,
+        minimums,
+        visible_column_budget,
+        row_count,
+        measure_column,
+    );
+    ui.data_mut(|data| {
+        data.insert_temp(
+            cache_id,
+            HeightAwareTableLayout {
+                key,
+                widths: widths.clone(),
+            },
+        );
+    });
+    (widths, had_previous_layout)
+}
+
+/// Fit columns inside the table's outer width contract.
+///
+/// The group frame contributes padding and a stroke on both sides. Those are
+/// part of the table's visible width, so only the remaining space belongs to
+/// columns and their separators.
+fn framed_table_widths(
+    ui: &Ui,
+    desired: &[f32],
+    minimums: &[f32],
+    table_bound: f32,
+) -> (egui::Frame, Vec<f32>, f32) {
+    let frame = egui::Frame::group(ui.style());
+    let column_space = ui.spacing().item_spacing.x * desired.len().saturating_sub(1) as f32;
+    let frame_width = frame.total_margin().sum().x;
+    let column_budget = (table_bound - frame_width - column_space).max(0.0);
+    let widths = fit_column_widths(desired, column_budget, minimums);
+    (frame, widths, column_budget)
+}
+
+/// Shadow the column widths `TableBuilder` resolved this frame so
+/// so layout decisions (height measurement, resets) use what rendered.
+fn store_table_column_widths(ui: &Ui, table_id: Id, widths: &[f32]) {
+    ui.data_mut(|data| {
+        data.insert_temp(table_id.with("_column_widths"), widths.to_vec());
+    });
 }
 
 /// Redirect Shift+vertical-wheel over a hovered wide-table into its inner
@@ -300,6 +1193,125 @@ fn forward_shift_wheel_to_horizontal_scroll<R>(
         ui.ctx().input_mut(|i| i.smooth_scroll_delta.y = 0.0);
         ui.ctx().request_repaint();
     }
+}
+
+/// Diagnostic instrument for issue #140 (intermittent one-frame blank pane).
+///
+/// Inert unless `MDV_DIAG_SLICE` is set: the variable is read once and cached,
+/// so a normal build pays one relaxed bool load per painted slice.
+///
+/// It reports, for every frame, where the viewport slice is *placed*
+/// (`first_end_y`) against the viewport that frame actually shows. That is the
+/// shape the issue's candidate path would produce — a slice selected correctly
+/// from a stale scroll offset but positioned at its pre-shrink coordinate, so
+/// nothing lands on screen.
+///
+/// It deliberately reports **every** frame rather than only suspicious ones.
+/// A probe that prints only on failure cannot distinguish "did not happen"
+/// from "was not running", and the value of this instrument is that its
+/// silence means something.
+///
+/// This asserts nothing about the cause. It is an observation channel for the
+/// next real reproduction; the product fix belongs to whatever it captures.
+fn diag_report_slice(first_end_y: f32, viewport_top: f32, viewport_bottom: f32, events: usize) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("MDV_DIAG_SLICE").is_some()) {
+        return;
+    }
+    // A slice legitimately starts above the viewport: it resumes at the last
+    // complete block before it, which on a long document can be far up. Only a
+    // start below the viewport, or absurdly far above it, indicates the slice
+    // was placed outside what the frame shows.
+    const IMPLAUSIBLE_LEAD: f32 = 20_000.0;
+    let off_screen = first_end_y > viewport_bottom || first_end_y < viewport_top - IMPLAUSIBLE_LEAD;
+    eprintln!(
+        "DIAG slice first_end_y={first_end_y:.0} viewport=[{viewport_top:.0},{viewport_bottom:.0}] \
+events={events}{}",
+        if off_screen { " OFF-SCREEN" } else { "" }
+    );
+}
+
+/// Diagnostic instrument for issue #140, companion to [`diag_report_slice`].
+///
+/// Inert unless `MDV_DIAG_SPLIT` is set. Where `diag_report_slice` reports
+/// where a slice is *placed*, this reports how its event range was *chosen* —
+/// the split-point table and both `partition_point` results that select it.
+///
+/// #140's candidate path is a stored scroll offset that briefly exceeds the
+/// document's updated extent after an asynchronous layout change, so the two
+/// values that decide that are printed side by side: the viewport the frame
+/// shows, and `page_size.y`, the extent the bootstrap pass measured. When the
+/// former runs past the latter the line is marked `OFFSET>EXTENT`.
+///
+/// It earned its place on #167, where `MDV_DIAG_SLICE` correctly reported no
+/// off-screen placement in either the working or the broken run — a true
+/// negative that excluded the placement hypothesis but could not say what was
+/// wrong. This probe showed it in one frame: `below` had collapsed to 1, so
+/// the range ended at event 11 of 63 and everything below the frontmatter
+/// table went unpainted.
+///
+/// The summary line prints on **every** frame, so its silence means the probe
+/// was not running rather than that nothing happened. The full table is
+/// expensive on a long document, so it is dumped only when the selection looks
+/// degenerate — an empty range, or one that stops at the first split point
+/// while more of the document lies inside the viewport.
+#[allow(clippy::too_many_arguments)]
+fn diag_report_split(
+    split_points: &[(usize, Pos2, Pos2)],
+    above: usize,
+    below: usize,
+    first_event_index: usize,
+    last_event_index: usize,
+    total_events: usize,
+    viewport_min_y: f32,
+    viewport_max_y: f32,
+    extent_y: f32,
+) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("MDV_DIAG_SPLIT").is_some()) {
+        return;
+    }
+    let overshoot = viewport_max_y > extent_y;
+    eprintln!(
+        "DIAG split viewport=[{viewport_min_y:.0},{viewport_max_y:.0}] extent={extent_y:.0} \
+above={above} below={below} events=[{first_event_index},{last_event_index})/{total_events} \
+sp={}{}",
+        split_points.len(),
+        if overshoot { " OFFSET>EXTENT" } else { "" }
+    );
+
+    // A range that selects nothing, or that stops at the very first boundary
+    // while the viewport plainly reaches further, is the shape #167 produced.
+    let degenerate = first_event_index >= last_event_index
+        || (below <= 1 && split_points.len() > 2);
+    if degenerate {
+        for (i, (event_index, start, end)) in split_points.iter().enumerate() {
+            eprintln!("  sp[{i}] ev={event_index} start.y={:.1} end.y={:.1}", start.y, end.y);
+        }
+    }
+}
+
+fn markdown_table_id(source_id: Id, source_start: usize) -> Id {
+    source_id.with("_markdown_table").with(source_start)
+}
+
+fn content_relative_y(screen_y: f32, render_origin_y: f32, slice_start_y: f32) -> f32 {
+    slice_start_y + screen_y - render_origin_y
+}
+
+fn record_active_search_content_y(
+    cache: &mut CommonMarkCache,
+    screen_y: f32,
+    render_origin_y: f32,
+    slice_start_y: f32,
+) {
+    cache.record_active_search_content_y(content_relative_y(
+        screen_y,
+        render_origin_y,
+        slice_start_y,
+    ));
 }
 
 /// Newline logic is constructed by the following:
@@ -361,6 +1373,7 @@ struct DefinitionList {
 pub struct CommonMarkViewerInternal {
     curr_table: usize,
     curr_code_block: usize,
+    source_id: Option<Id>,
     text_style: Style,
     list: List,
     link: Option<Link>,
@@ -378,14 +1391,19 @@ pub struct CommonMarkViewerInternal {
 
     /// Track current heading for position recording
     current_heading_y: Option<f32>,
+    current_heading_source_start: Option<usize>,
     current_heading_text: String,
     /// Accumulate heading RichText fragments for single render at end
     current_heading_rich_texts: Vec<egui::RichText>,
-    /// Per-render-pass counter: number of headings seen so far with each
-    /// normalized title. Used to build composite cache keys that
-    /// disambiguate duplicate-titled headers (e.g. multiple `## Installation`).
-    /// Reset at the start of each `show*` call so the count restarts at 0.
-    heading_occurrence_counts: std::collections::HashMap<String, usize>,
+    /// Content-space Y of the first event rendered by the current slice.
+    slice_start_y: f32,
+    /// Screen-space Y of the root UI for the current full or sliced render.
+    /// Nested table/list/blockquote UIs must not replace this origin when
+    /// converting navigation positions into document coordinates.
+    render_origin_y: f32,
+    /// Raw text of the frontmatter block being collected. `Some` only between
+    /// `Tag::MetadataBlock` and its end, so ordinary text is unaffected.
+    frontmatter: Option<String>,
 }
 
 pub(crate) struct CheckboxClickEvent {
@@ -398,6 +1416,7 @@ impl CommonMarkViewerInternal {
         Self {
             curr_table: 0,
             curr_code_block: 0,
+            source_id: None,
             text_style: Style::default(),
             list: List::default(),
             link: None,
@@ -410,19 +1429,14 @@ impl CommonMarkViewerInternal {
             is_table: false,
             is_blockquote: false,
             checkbox_events: Vec::new(),
+            frontmatter: None,
             current_heading_y: None,
+            current_heading_source_start: None,
             current_heading_text: String::new(),
             current_heading_rich_texts: Vec::new(),
-            heading_occurrence_counts: std::collections::HashMap::new(),
+            slice_start_y: 0.0,
+            render_origin_y: 0.0,
         }
-    }
-}
-
-fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
-    if is_math_enabled {
-        parser_options() | pulldown_cmark::Options::ENABLE_MATH
-    } else {
-        parser_options()
     }
 }
 
@@ -454,14 +1468,11 @@ fn compute_layout_signature(ui: &egui::Ui, options: &CommonMarkOptions) -> u64 {
     // Caller-configured constraints that affect block widths.
     options.default_width.hash(&mut h);
     options.indentation_spaces.hash(&mut h);
+    // Formula size changes rendered formula extents, so split_points measured
+    // at the old scale are stale. Quantized like the heights above.
+    ((options.math_scale * 100.0).round() as i32).hash(&mut h);
     h.finish()
 }
-
-/// Threshold for content-height drift from the last bootstrap that triggers a
-/// re-bootstrap to refresh split_points. Larger than the known ~44px egui
-/// oscillation between show()/show_viewport() content-size reporting, but
-/// small enough to catch real image-load growth.
-const CONTENT_H_DRIFT_THRESHOLD: f32 = 1024.0;
 
 /// Whether a TagEnd marks a safe block-level boundary for viewport-skip.
 ///
@@ -573,6 +1584,57 @@ fn is_likely_currency(tex: &str) -> bool {
     true
 }
 
+/// Find source-visible references that the host registered as local links.
+/// The host can therefore restrict auto-linking to paths that actually exist.
+fn registered_auto_link_ranges(
+    text: &str,
+    hooks: &std::collections::HashMap<String, bool>,
+) -> Vec<(Range<usize>, String)> {
+    let is_path_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/');
+    let mut matches = Vec::new();
+
+    for destination in hooks.keys() {
+        if destination.is_empty() || destination.starts_with('#') {
+            continue;
+        }
+        for (start, _) in text.match_indices(destination) {
+            let end = start + destination.len();
+            let left_ok = text[..start].chars().next_back().is_none_or(|ch| !is_path_char(ch));
+            let right_ok = text[end..].chars().next().is_none_or(|ch| !is_path_char(ch));
+            if left_ok && right_ok {
+                matches.push((start..end, destination.clone()));
+            }
+        }
+    }
+
+    // Prefer a longer registered path when two candidates start at the same
+    // byte, then discard any remaining overlap.
+    matches.sort_by(|(left_range, _), (right_range, _)| {
+        left_range
+            .start
+            .cmp(&right_range.start)
+            .then_with(|| right_range.len().cmp(&left_range.len()))
+    });
+    let mut last_end = 0;
+    matches.retain(|(range, _)| {
+        if range.start < last_end {
+            false
+        } else {
+            last_end = range.end;
+            true
+        }
+    });
+    matches
+}
+
+fn registered_exact_auto_link(
+    text: &str,
+    hooks: &std::collections::HashMap<String, bool>,
+) -> Option<String> {
+    (!text.is_empty() && !text.starts_with('#') && hooks.contains_key(text))
+        .then(|| text.to_owned())
+}
+
 impl CommonMarkViewerInternal {
     /// Compute a hash of the text content for event cache lookup.
     fn hash_content(text: &str) -> u64 {
@@ -592,6 +1654,7 @@ impl CommonMarkViewerInternal {
         text: &str,
         split_points_id: Option<Id>,
     ) -> (egui::InnerResponse<()>, Vec<CheckboxClickEvent>) {
+        self.slice_start_y = 0.0;
         let max_width = options.max_width(ui);
         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
 
@@ -603,27 +1666,42 @@ impl CommonMarkViewerInternal {
             // rewritten pre-parse on an in-memory copy and ranges are mapped
             // back, so they stay valid against the original text.
             let owned_events: Vec<(pulldown_cmark::Event<'static>, Range<usize>)> =
-                super::latex_delimiters::parse_events(text, math_enabled);
+                super::latex_delimiters::parse_events(text, math_enabled, options.render_frontmatter);
             cache.set_cached_events(content_hash, owned_events);
         }
 
+        // Left edge of the scroll area's content ui. The content column's own
+        // left edge is recorded relative to this so a viewport slice can be
+        // placed at the same column (see `ContentGeometry`).
+        let scroll_area_left = ui.max_rect().left();
+        // Nothing may lay out past what is actually visible. `ui.clip_rect()`
+        // cannot be the bound here: the CentralPanel clips its content to the
+        // whole window (only side panels clip to their own rect), and the
+        // vertical ScrollArea passes that X extent straight through to its
+        // content (only the *scrolled* dimension gets tightened in
+        // `ScrollArea::begin`). `max_rect` *is* the viewport, so cap the
+        // document column at its right edge.
+        let max_width = max_width.min((ui.max_rect().right() - scroll_area_left).max(0.0));
         let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
+            let content_origin_y = ui.next_widget_position().y;
+            let content_origin_x = ui.max_rect().left();
+            self.render_origin_y = content_origin_y;
 
             // Use cached events — clone the Vec reference data for iteration
             // (events are 'static so this is cheap pointer copies, not re-parsing)
             let events_data = cache.get_cached_events(content_hash)
                 .expect("events just cached")
                 .to_vec();
-            let events_len = events_data.len();
+            let event_count = events_data.len();
             if crate::misc::edit_debug() {
                 eprintln!(
                     "[show] session={:?} region={} events={}",
                     options.edit_session.as_ref().map(|s| s.blocks.len()),
                     options.edit_region.is_some(),
-                    events_len
+                    event_count
                 );
             }
             let mut events = events_data
@@ -643,7 +1721,7 @@ impl CommonMarkViewerInternal {
                     "[show] mode: session={:?} edit_region={:?} events={}",
                     options.edit_session.as_ref().map(|s| s.blocks.len()),
                     options.edit_region.is_some(),
-                    events_len
+                    event_count
                 );
             }
 
@@ -821,6 +1899,14 @@ impl CommonMarkViewerInternal {
                     &e,
                     pulldown_cmark::Event::End(end) if is_block_end_tag(end)
                 );
+                // `table()` consumes the complete table, including its End
+                // event, from `events`. The outer loop therefore never sees
+                // TagEnd::Table and must record that block boundary from its
+                // Start event after processing finishes.
+                let is_atomic_table = matches!(
+                    &e,
+                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_))
+                );
 
                 if events.peek().is_none() {
                     self.line.should_end_newline_forced = false;
@@ -829,8 +1915,9 @@ impl CommonMarkViewerInternal {
                 self.process_event(ui, &mut events, e, src_span, cache, options, max_width);
 
                 // Defense in depth: only add a split point when we're at a
-                // block end AND outside any stateful container (list, table,
-                // blockquote). The viewport-skip path in `show_scrollable`
+                // block end (or just consumed an atomic table) AND outside any
+                // stateful container (list, table, blockquote). The
+                // viewport-skip path in `show_scrollable`
                 // recreates the renderer with `CommonMarkViewerInternal::new`
                 // each frame, so the transient state of `self.list`,
                 // `self.is_table`, and `self.is_blockquote` is *not* replayed
@@ -843,7 +1930,7 @@ impl CommonMarkViewerInternal {
                 // check below must run after `process_event` (above) since
                 // that's where the start/end of these containers updates
                 // `self.list` / `self.is_table` / `self.is_blockquote`.
-                let safe_for_split = is_block_end
+                let safe_for_split = (is_block_end || is_atomic_table)
                     && !self.list.is_inside_a_list()
                     && !self.is_table
                     && !self.is_blockquote;
@@ -858,15 +1945,35 @@ impl CommonMarkViewerInternal {
                         // split_points, so a later Live frame must not skip
                         // boundary recording just because the split point
                         // already exists.
+                        let split_index = if is_atomic_table {
+                            events
+                                .peek()
+                                .map(|(next_index, _)| *next_index)
+                                .unwrap_or(event_count)
+                        } else {
+                            index.saturating_add(1)
+                        };
                         let split_point_exists = scroll_cache
                             .split_points
                             .iter()
-                            .any(|(i, _, _)| *i == index);
+                            .any(|(i, _, _)| *i == split_index);
 
                         if !split_point_exists {
-                            scroll_cache
-                                .split_points
-                                .push((index, start_position, end_position));
+                            let relative_start = egui::pos2(
+                                start_position.x,
+                                (start_position.y - content_origin_y).max(0.0),
+                            );
+                            let relative_end = egui::pos2(
+                                end_position.x,
+                                (end_position.y - content_origin_y).max(0.0),
+                            );
+                            // Resume after this complete block. Starting at
+                            // its End tag would omit the matching Start state.
+                            scroll_cache.split_points.push((
+                                split_index,
+                                relative_start,
+                                relative_end,
+                            ));
                         }
 
                         if options.record_block_layout {
@@ -909,8 +2016,15 @@ impl CommonMarkViewerInternal {
             }
 
             if let Some(source_id) = split_points_id {
-                scroll_cache(cache, &source_id).page_size =
-                    Some(ui.next_widget_position().to_vec2());
+                let content_height = (ui.next_widget_position().y - content_origin_y).max(0.0);
+                let scroll_cache = scroll_cache(cache, &source_id);
+                scroll_cache.page_size = Some(egui::vec2(max_width, content_height));
+                // Capture the column this pass wrapped at, so slices reproduce
+                // it instead of deriving a different width from their own ui.
+                scroll_cache.content_geometry = Some(ContentGeometry {
+                    width: max_width,
+                    left_offset: content_origin_x - scroll_area_left,
+                });
             }
             // Flush persistent-session feedback collected this frame.
             for (salt, mut fb) in session_fb {
@@ -939,11 +2053,14 @@ impl CommonMarkViewerInternal {
         text: &str,
         content_version: Option<u64>,
         pending_scroll_offset: Option<f32>,
+        force_full_render: bool,
         scroll_source: Option<egui::scroll_area::ScrollSource>,
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
+        self.source_id = Some(source_id);
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
         let layout_sig = compute_layout_signature(ui, options);
+        let layout_revision = cache.layout_revision();
 
         // Ensure parsed events are cached on the ScrollableCache, keyed by a
         // content version. The caller can provide a monotonic version (bumped
@@ -952,11 +2069,12 @@ impl CommonMarkViewerInternal {
         // The big win either way is avoiding pulldown_cmark::Parser::new_ext +
         // collect on every frame (~52 ms at 100k lines).
         let version = content_version.unwrap_or_else(|| Self::hash_content(text));
-        let mut content_changed = false;
+        let mut layout_invalidated = false;
         {
             let sc = scroll_cache(cache, &source_id);
             if sc.events.is_empty() || sc.content_version != version {
-                content_changed = true;                // Must mirror `show()`'s `math_enabled` derivation
+                layout_invalidated = true;
+                // Must mirror `show()`'s `math_enabled` derivation
                 // (parsers/pulldown.rs in this file: `options.math_fn.is_some()
                 // || cfg!(feature = "math")`). The bootstrap branch below
                 // calls `self.show()` which parses again with `cfg!(feature =
@@ -973,7 +2091,7 @@ impl CommonMarkViewerInternal {
                 // Must produce byte-identical events to the cache-fill parse
                 // above — including any LaTeX delimiter rewrite (#60) — or
                 // split_points index into an unrelated stream (see devlog 027).
-                sc.events = super::latex_delimiters::parse_events(text, math_enabled);
+                sc.events = super::latex_delimiters::parse_events(text, math_enabled, options.render_frontmatter);
                 sc.content_version = version;
                 // Content changed — cached split_points y-coords are no
                 // longer valid for this content. Drop them so the first
@@ -985,52 +2103,16 @@ impl CommonMarkViewerInternal {
             // Width/zoom/theme change: y-coordinates are invalid for the
             // new layout, even though parsed events are still good.
             if sc.layout_signature != layout_sig {
+                layout_invalidated = true;
                 sc.layout_signature = layout_sig;
                 sc.page_size = None;
                 sc.split_points.clear();
                 sc.boundaries.clear();
                 sc.available_size = available_size;
             }
-            // When the caller wants to jump to a specific scroll position
-            // (outline click, search-jump), we must paint *every* event
-            // this frame — not just the viewport-clipped subset. Otherwise
-            // a far target's block doesn't paint, the cache.active_search_y
-            // / header_position never gets recorded, and the two-stage
-            // corrective scroll (src/main.rs:scroll_to_active_match) can't
-            // snap to the precise y. Forcing the bootstrap branch costs one
-            // full-paint frame (~100 ms at 100k lines) per jump, which is
-            // acceptable for a one-off action.
-            //
-            // Critically, we DO NOT clear split_points here even though
-            // `page_size = None` forces a bootstrap. Reason: split_points
-            // store screen-y coordinates which are only meaningful at the
-            // scroll position they were captured at. The original scroll=0
-            // bootstrap stored values where screen-y ≈ content-y + panel
-            // chrome (~44 px). Clearing here lets the forced bootstrap at
-            // non-zero scroll re-populate them with screen-y values that
-            // diverge from content-y by the scroll amount, breaking every
-            // subsequent skip-paint's partition_point / allocate_space math
-            // by hundreds of pixels (visible as outline-click landing at
-            // the wrong heading and blank space at viewport top after
-            // scrolling). The push-site dedup-by-event-index keeps the
-            // original (good) values intact even though bootstrap re-runs.
-            if pending_scroll_offset.is_some() {
-                sc.page_size = None;
-            }
-            // Content-height drift check: if the previous frame's content
-            // height has drifted from when split_points were captured by
-            // more than CONTENT_H_DRIFT_THRESHOLD, the y-positions are stale
-            // (typically because async image/font loading shifted the doc
-            // after the initial bootstrap). Invalidate to trigger ONE
-            // re-bootstrap with refreshed positions. Uses absolute-drift
-            // hysteresis instead of bucketing because egui's `show()` vs
-            // `show_viewport()` content_size.y reporting differs by ~44 px
-            // (panel chrome) for the same content — any bucket-boundary
-            // approach would oscillate; only |drift| > threshold breaks
-            // out of that cycle.
-            if sc.bootstrap_content_h > 0.0
-                && (sc.last_content_h - sc.bootstrap_content_h).abs() > CONTENT_H_DRIFT_THRESHOLD
-            {
+            if sc.layout_revision != layout_revision {
+                layout_invalidated = true;
+                sc.layout_revision = layout_revision;
                 sc.page_size = None;
                 sc.split_points.clear();
                 sc.boundaries.clear();
@@ -1045,16 +2127,39 @@ impl CommonMarkViewerInternal {
                     sc.content_version
                 );
             }
+            // An unknown navigation target may require painting every event
+            // so its precise position can be measured. Scrolling to an
+            // already cached Y must not take this path: nested virtualized
+            // widgets can report different off-screen heights during a
+            // nonzero-offset full paint and overwrite valid coordinates.
+            //
+            // Keep the already-valid split points: this bootstrap is needed
+            // to paint every event for the jump, not to recompute geometry.
+            // The push site deduplicates by event index, so the full render
+            // can still refresh page_size without rebuilding the split list.
+            // Editing modes must paint every event each frame: session
+            // feedback folds only blocks that actually paint, and boundary
+            // recording has to cover the whole document for click-to-edit
+            // hit-testing. A record_block_layout frame backfills ALL
+            // boundaries after Rendered-mode slice frames visited only part
+            // of the document. Re-bootstrap on those frames; plain rendered
+            // frames keep the viewport-slice fast path.
+            let editing_frame = options.edit_session.is_some()
+                || options.edit_region.is_some()
+                || options.record_block_layout;
+            if force_full_render || editing_frame {
+                sc.page_size = None;
+            }
         }
         // Header positions are content-keyed; new content means the cached
         // y values point at the wrong headings. Done outside the `sc` borrow
         // scope above so `cache` is reborrowable.
-        if content_changed {
+        if layout_invalidated {
             cache.clear_header_positions();
         }
 
         // Helper: build the renderer-owned ScrollArea with caller config.
-        let make_scroll_area = || {
+        let make_scroll_area = |pending_scroll_offset: Option<f32>| {
             let mut sa = egui::ScrollArea::vertical()
                 .id_salt(scroll_id)
                 .auto_shrink([false, true]);
@@ -1067,163 +2172,202 @@ impl CommonMarkViewerInternal {
             sa
         };
 
-        // FORCE BOOTSTRAP EVERY FRAME: disable viewport-virtualization until
-        // the skip-paint slicing bugs are fully resolved (see
-        // docs/devlog/030-skip-paint-investigation.md for the design plan).
-        // The slice path renders events without their preceding container
-        // context (Start tags before the slice are missing), producing
-        // layout differences vs bootstrap — visible as flicker, wrong
-        // spacing, and shifted indents during scroll. Bootstrap renders
-        // the full document each frame; measured on T470 (i5-7200U, 2c):
-        // 1.2 ms / 348 events, 5.7 ms / 2514 events, 39 ms / 20k events,
-        // 229 ms / 100k events. Acceptable up to ~10k events; degraded
-        // above. The skip-paint code below is kept as `unreachable!`
-        // so future restoration can drop the early return.
-        {
-            let out = make_scroll_area().show(ui, |ui| {
+        // Bootstrap once after content/layout invalidation. It records safe
+        // top-level block boundaries and content-relative positions. Normal
+        // frames then paint only the viewport slice between clean boundaries.
+        if scroll_cache(cache, &source_id).page_size.is_none() {
+            let out = make_scroll_area(pending_scroll_offset).show(ui, |ui| {
                 cache.set_scroll_offset(pending_scroll_offset.unwrap_or(0.0));
                 self.show(ui, cache, options, text, Some(source_id));
             });
             let sc = scroll_cache(cache, &source_id);
+            if let Some(page_size) = &mut sc.page_size {
+                // The ScrollArea output is the canonical extent. Nested
+                // widgets such as tables may advance the inner cursor beyond
+                // the space actually allocated by their outer response.
+                page_size.y = out.content_size.y;
+            }
             sc.available_size = available_size;
-            sc.last_content_h = out.content_size.y;
-            sc.bootstrap_content_h = out.content_size.y;
             convert_boundaries_to_content_space(&mut sc.boundaries, &out);
             return out;
-        }        // Kept for future restoration once skip-paint is bug-free.
+        }
+        // Kept for future restoration once skip-paint is bug-free.
         #[allow(unreachable_code)]
         let page_size_opt = scroll_cache(cache, &source_id).page_size;
-        #[allow(unreachable_code)]
         let Some(page_size) = page_size_opt else {
             unreachable!()
         };
 
+        // Clamp a persisted or requested offset that starts its window beyond
+        // the measured content end BEFORE the viewport is computed from it.
+        // egui's `show_viewport` loads the stored offset in `begin` and hands
+        // the closure `ZERO + state.offset` unclamped, so a document that
+        // shrank since the offset was written (async image decode, font
+        // fallback) selected a slice for a window past the last block and
+        // painted nothing for exactly one frame — the post-render clamp below
+        // only corrected the following frame (#140).
+        //
+        // The guard fires only when the offset outruns the content outright.
+        // Near-bottom offsets stay untouched: clamping against an estimated
+        // scrollable maximum here would fight the scrollbar allowance egui
+        // animates, and the window of an offset within the content still
+        // shows the document tail. For a deep overshoot, snapping to the
+        // deepest position is the behaviour the shrink asks for — the reader
+        // was at a tail that no longer exists.
+        // `ScrollArea::id_salt` wraps its argument in `Id::new`, so the state
+        // id is `ui.id` combined with the *re-hashed* salt — mirror that
+        // exactly or `State::load` finds nothing.
+        let scroll_state_id = ui.make_persistent_id(Id::new(scroll_id));
+        let deepest_scroll = (page_size.y - ui.available_height()).max(0.0);
+        if let Some(mut state) = egui::scroll_area::State::load(ui.ctx(), scroll_state_id) {
+            if state.offset.y > page_size.y {
+                state.offset.y = deepest_scroll;
+                state.store(ui.ctx(), scroll_state_id);
+            }
+        }
+        let pending_scroll_offset = pending_scroll_offset.map(|offset| {
+            if offset > page_size.y {
+                deepest_scroll
+            } else {
+                offset
+            }
+        });
+
         let num_rows = scroll_cache(cache, &source_id).events.len();
 
-        let out = make_scroll_area()
-            .show_viewport(ui, |ui, viewport| {
-                ui.set_height(page_size.y);
-                // ui.cursor().top() inside show_viewport is viewport-relative;
-                // record_header_position and record_active_search_y_viewport
-                // add this offset to recover content-relative y.
-                cache.set_scroll_offset(viewport.min.y);
-                let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
+        let out = make_scroll_area(pending_scroll_offset).show_viewport(ui, |ui, viewport| {
+            ui.set_height(page_size.y);
+            // The cursor inside show_viewport is viewport-relative; adding
+            // this offset recovers content-relative heading/search positions.
+            cache.set_scroll_offset(viewport.min.y);
+            let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
+            // Lay the slice out at the column the bootstrap pass measured.
+            // Deriving it from this ui instead yields a different available
+            // width — the bootstrap and viewport passes reserve scrollbar
+            // space differently — so the slice wrapped at a different column
+            // than the pass that produced `page_size` and `split_points`.
+            let recorded_geometry = scroll_cache(cache, &source_id).content_geometry;
+            let max_width = recorded_geometry
+                .map(|geometry| geometry.width)
+                .unwrap_or_else(|| options.max_width(ui));
+            let content_left =
+                ui.max_rect().left() + recorded_geometry.map_or(0.0, |g| g.left_offset);
+            // Same visible-edge cap as the bootstrap pass (see there for why
+            // this is `max_rect`, not `clip_rect`): the recorded width is
+            // relative to the content column, and re-anchoring it at
+            // `content_left` (which carries the content margin / indentation)
+            // used to extend the slice past the pane and over the sidebar.
+            let max_width = max_width.min((ui.max_rect().right() - content_left).max(0.0));
 
-                let max_width = options.max_width(ui);
-                ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
+            let (first_event_index, first_end_y, events_range,
+                 diag_viewport_min_y, diag_viewport_max_y) = {
+                let scroll_cache = scroll_cache(cache, &source_id);
+
+                // Resume after the last complete block above the viewport.
+                // Re-rendering an additional fully off-screen table here is
+                // unsafe: egui_extras virtualizes all of its heterogeneous
+                // rows and can report a collapsed height for that table.
+                let above = scroll_cache
+                    .split_points
+                    .partition_point(|(_, _, end)| end.y < viewport.min.y);
+                let (first_event_index, _, first_end_position) = if above >= 1 {
+                    scroll_cache.split_points[above - 1]
+                } else {
+                    (0, Pos2::ZERO, Pos2::ZERO)
+                };
+
+                let below = scroll_cache
+                    .split_points
+                    .partition_point(|(_, start, _)| start.y <= viewport.max.y);
+                let last_split = scroll_cache.split_points.get(below + 1);
+                let last_event_index = last_split
+                    .map(|(index, _, _)| *index)
+                    .unwrap_or(num_rows);
+
+                let range_end = last_event_index.min(scroll_cache.events.len());
+                let events_range = if first_event_index < range_end {
+                    scroll_cache.events[first_event_index..range_end].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                diag_report_split(
+                    &scroll_cache.split_points,
+                    above,
+                    below,
+                    first_event_index,
+                    last_event_index,
+                    scroll_cache.events.len(),
+                    viewport.min.y,
+                    viewport.max.y,
+                    page_size.y,
+                );
+
+                (first_event_index, first_end_position.y, events_range,
+                 viewport.min.y, viewport.max.y)
+            };
+
+            // Match egui's show_rows strategy: size the parent to the full
+            // document, then place only the visible slice in an absolute child.
+            //
+            // The rect is zero-height on purpose, mirroring the bootstrap's
+            // `allocate_ui_with_layout(vec2(max_width, 0.0), ..)`: the child
+            // grows downward from `slice_top` with its content. Bounding it at
+            // the slice's recorded end instead made content that needed more
+            // room than the bound overflow the ui, which inflated the reported
+            // extent and let the scroll offset run past the real document.
+            let content_top = ui.max_rect().top();
+            let slice_top = content_top + first_end_y;
+            diag_report_slice(first_end_y, diag_viewport_min_y, diag_viewport_max_y, events_range.len());
+
+            let slice_rect = egui::Rect::from_min_size(
+                egui::pos2(content_left, slice_top),
+                egui::vec2(max_width, 0.0),
+            );
+
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(slice_rect).layout(layout),
+                |ui| {
+                    self.slice_start_y = first_end_y;
+                    self.render_origin_y = ui.min_rect().top();
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let scroll_cache = scroll_cache(cache, &source_id);
+                    ui.set_row_height(ui.text_style_height(&TextStyle::Body));
 
-                    // split_points are populated in event order, which matches
-                    // top-to-bottom layout order, so y-coords are monotonic
-                    // non-decreasing. Binary-search instead of linear filter:
-                    // O(log N) vs the old O(N) at 15k+ split points (100k-line doc).
-
-                    // First waypoint: the second-to-last split point whose
-                    // end.y is still above the viewport. Picking "second-to-last"
-                    // gives us a safety frame above the viewport top to avoid
-                    // clipping inline-flow content that started just above.
-                    let above = scroll_cache
-                        .split_points
-                        .partition_point(|(_, _, end)| end.y < viewport.min.y);
-                    let (first_event_index, _, first_end_position) = if above >= 2 {
-                        scroll_cache.split_points[above - 2]
-                    } else {
-                        (0, Pos2::ZERO, Pos2::ZERO)
-                    };
-
-                    // Last waypoint: the second split point whose start.y is
-                    // strictly below the viewport bottom. Same safety idea on
-                    // the bottom edge.
-                    let below = scroll_cache
-                        .split_points
-                        .partition_point(|(_, start, _)| start.y <= viewport.max.y);
-                    let last_event_index = scroll_cache
-                        .split_points
-                        .get(below + 1)
-                        .map(|(index, _, _)| *index)
-                        .unwrap_or(num_rows);
-
-                    // Clone only the events we'll actually iterate this frame
-                    // — the visible viewport plus safety margins above/below.
-                    // The previous implementation cloned the full Vec (~1.5 ms
-                    // at 30k events on Recent-Changes.md), then `skip`ed all
-                    // but ~150 events. This trims the clone to the actual
-                    // range used, dropping per-frame allocation churn from
-                    // ~1.5 ms to ~10 µs on the same doc. The slice clone is
-                    // released before `process_event` mutably re-borrows the
-                    // cache for syntect/header state — NLL covers this.
-                    let range_end = last_event_index.min(scroll_cache.events.len());
-                    let events_range: Vec<(pulldown_cmark::Event<'static>, Range<usize>)> =
-                        if first_event_index < range_end {
-                            scroll_cache.events[first_event_index..range_end].to_vec()
-                        } else {
-                            Vec::new()
-                        };
-
-                    let last_sp_y_used = scroll_cache
-                        .split_points
-                        .get(below + 1)
-                        .map(|p| p.2.y)
-                        .unwrap_or(0.0);
-                    eprintln!(
-                        "[SKIP] vp=[{:.0},{:.0}] evt=[{},{}]/{} sp_y=[{:.0},{:.0}] a={} b={}",
-                        viewport.min.y, viewport.max.y,
-                        first_event_index, last_event_index, num_rows,
-                        first_end_position.y, last_sp_y_used,
-                        above, below
-                    );
-                    // Advance cursor VERTICALLY by first_end_position.y to
-                    // position events at the right viewport y. `to_vec2()`
-                    // would also pass first_end_position.x as allocation
-                    // width — that's the X-cursor where the previous block
-                    // ended (often a non-zero left margin or a list-indent
-                    // depth). In `left_to_right(BOTTOM).with_main_wrap`,
-                    // allocate_space consumes that as width-advance,
-                    // shifting subsequent events right and breaking
-                    // indentation of code blocks, tables, and text.
-                    ui.allocate_space(egui::vec2(0.0, first_end_position.y));
-
-                    // Re-attach original indices via map so peekable iteration
-                    // and downstream consumers still see the absolute event
-                    // index (used by `if i == 0 { ... }` below for the
-                    // bootstrap-newline gate).
                     let mut events = events_range
                         .into_iter()
                         .enumerate()
-                        .map(|(offset, ev)| (offset + first_event_index, ev))
+                        .map(|(offset, event)| (offset + first_event_index, event))
                         .peekable();
 
-                    while let Some((i, (e, src_span))) = events.next() {
+                    while let Some((index, (event, src_span))) = events.next() {
                         if events.peek().is_none() {
                             self.line.should_end_newline_forced = false;
                         }
-
-                        self.process_event(ui, &mut events, e, src_span, cache, options, max_width);
-
-                        if i == 0 {
+                        self.process_event(
+                            ui,
+                            &mut events,
+                            event,
+                            src_span,
+                            cache,
+                            options,
+                            max_width,
+                        );
+                        // Mirror the bootstrap pass, which clears this after
+                        // its own first event. A slice starting part-way into
+                        // the document never sees index 0, so the flag stayed
+                        // set and the slice's first block did not open its own
+                        // row — the block was placed after the leading inline
+                        // space instead, which is why a table rendered
+                        // horizontally offset from where the bootstrap
+                        // measured it.
+                        if index == first_event_index {
                             self.line.should_not_start_newline_forced = false;
                         }
                     }
-                });
-            });
-        // NOTE: deliberately NOT updating last_content_h from skip-paint's
-        // `out.content_size.y`. That value is unreliable: skip-paint does
-        // `set_height(page_size.y)` (min height) then `allocate_space(Vec2(0,
-        // first_end_position.y))` which can advance the cursor by tens of
-        // thousands of px when scrolled deep — content_size.y inflates to
-        // 2× the real document height. Feeding that into the drift check
-        // triggers an invalidation, re-bootstrap fires at the current
-        // (non-zero) scroll, split_points get repopulated with screen-y
-        // coords that are catastrophically off, the next skip-paint picks
-        // wrong events, content_h spikes the other way, drift fires again
-        // — death spiral. Empirically: 619 bootstraps in 30 s of scroll on
-        // T470, panel flickered blank with garbled styling. Restricting
-        // drift signal to bootstrap-only content_h prevents the false
-        // positive. Async-image-load growth is still caught — that fires
-        // during the SECOND bootstrap (which is allowed to happen for
-        // other reasons, e.g. font/scrollbar layout settling at startup),
-        // where the new content_h IS written to last_content_h.
+                },
+            );
+        });
+        // The absolutely positioned slice preserves the bootstrap content extent.
 
         // Scroll-overshoot clamp.
         let real_max_scroll = (page_size.y - out.inner_rect.height()).max(0.0);
@@ -1253,11 +2397,23 @@ impl CommonMarkViewerInternal {
         options: &CommonMarkOptions,
         max_width: f32,
     ) {
+        let table_source_start = matches!(
+            &event,
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_))
+        )
+        .then_some(src_span.start);
         self.event(ui, event, src_span, cache, options, max_width);
 
         self.def_list_def_wrapping(events, max_width, cache, options, ui);
         self.item_list_wrapping(events, max_width, cache, options, ui);
-        self.table(events, cache, options, ui, max_width);
+        self.table(
+            events,
+            cache,
+            options,
+            ui,
+            max_width,
+            table_source_start,
+        );
         self.blockquote(events, max_width, cache, options, ui);
     }
 
@@ -1404,11 +2560,15 @@ impl CommonMarkViewerInternal {
         options: &CommonMarkOptions,
         ui: &mut Ui,
         max_width: f32,
+        source_start: Option<usize>,
     ) {
         if self.is_table {
             self.line.try_insert_start(ui);
 
-            let id = ui.id().with("_table").with(self.curr_table);
+            let id = markdown_table_id(
+                self.source_id.unwrap_or_else(|| ui.id()),
+                source_start.unwrap_or(self.curr_table),
+            );
             self.curr_table += 1;
 
             // Consume events into header/rows up front so we know the column count
@@ -1423,7 +2583,7 @@ impl CommonMarkViewerInternal {
             } else {
                 rows.first().map(|r| r.len()).unwrap_or(0)
             };
-            let line_h = ui.text_style_height(&egui::TextStyle::Body);
+            let line_h = body_line_height(ui, options);
 
             if num_cols == 0 {
                 self.is_table = false;
@@ -1433,28 +2593,7 @@ impl CommonMarkViewerInternal {
                 self.line.try_insert_end(ui);
                 return;
             }
-            // Per-line cell height; rows grow taller when cells contain multi-chunk
-            // inline-code wraps (computed below via `cell_visual_lines`).
-            let cell_h = line_h * 1.5;
-            // Header is one row; its height grows if any header cell has wrapped code.
-            let header_lines = header
-                .iter()
-                .map(|c| cell_visual_lines(c))
-                .max()
-                .unwrap_or(1);
-            let header_h = cell_h * header_lines as f32;
-            // Pre-compute per-body-row height so multi-chunk cells aren't clipped.
-            let body_heights: Vec<f32> = rows
-                .iter()
-                .map(|row| {
-                    let max_lines = row
-                        .iter()
-                        .map(|c| cell_visual_lines(c))
-                        .max()
-                        .unwrap_or(1);
-                    cell_h * max_lines as f32
-                })
-                .collect();
+            let cell_h = line_h + ui.spacing().item_spacing.y;
             // Outer ScrollArea::horizontal handles the case where columns
             // (auto-sized to content) total wider than the parent ui; without it,
             // narrow windows clip the rightmost columns. Plain vertical wheel
@@ -1465,14 +2604,66 @@ impl CommonMarkViewerInternal {
             // flow Ui from the markdown renderer. Without the vertical scope the
             // body's first row overlaps the header row.
             //
-            // The bound is `table_max_width` rather than the prose `max_width` so a
-            // wide table spreads over the whole content pane even in reading mode,
-            // instead of being clipped at the reading column with its right side
-            // unreachable (#64).
+            // The caller chooses whether `table_max_width` is the capped reading
+            // width or the full content pane. Horizontal scrolling keeps columns
+            // reachable when their minimum widths exceed that bound (#64, #110).
             let table_bound = options
                 .table_max_width
                 .map(|w| w as f32)
                 .unwrap_or(max_width);
+            let minimum_widths: Vec<f32> = (0..num_cols)
+                .map(|column| {
+                    header
+                        .get(column)
+                        .map(|cell| unbreakable_text_width(ui, &markdown_cell_text(cell)))
+                        .unwrap_or(40.0)
+                })
+                .collect();
+            let mut table_rows = Vec::with_capacity(rows.len() + usize::from(!header.is_empty()));
+            if !header.is_empty() {
+                table_rows.push(header);
+            }
+            table_rows.extend(rows);
+            let desired_widths: Vec<f32> = (0..num_cols)
+                .map(|column| {
+                    table_rows
+                        .iter()
+                        .filter_map(|row| row.get(column))
+                        .map(|cell| natural_text_width(ui, &markdown_cell_text(cell)))
+                        .fold(40.0, f32::max)
+                })
+                .collect();
+            let (table_frame, baseline_widths, visible_column_budget) =
+                framed_table_widths(ui, &desired_widths, &minimum_widths, table_bound);
+            let layout_key = table_layout_key(
+                ui,
+                &desired_widths,
+                &minimum_widths,
+                line_h,
+                markdown_table_digest(&table_rows),
+                cache.layout_revision(),
+                options.math_scale,
+            );
+            let (initial_widths, height_layout_changed) = cached_height_aware_widths(
+                ui,
+                id,
+                layout_key,
+                &baseline_widths,
+                &desired_widths,
+                &minimum_widths,
+                visible_column_budget,
+                table_rows.len(),
+                |column, width| {
+                    table_rows
+                        .iter()
+                        .map(|row| {
+                            row.get(column).map_or(0.0, |cell| {
+                                table_cell_height(cell, line_h, cache, ui, width, options)
+                            })
+                        })
+                        .collect()
+                },
+            );
             // The document ui is allocated at the prose width, and a child ui
             // can never exceed its parent's allocation — so a wider viewport
             // must be carved out explicitly. egui does not clamp an explicit
@@ -1480,10 +2671,87 @@ impl CommonMarkViewerInternal {
             // the full pane while prose keeps the reading width. Anchor at
             // the current cursor, not max_rect, or the table would repaint on
             // top of everything above it.
+            let usable_bound_now = (table_bound
+                - table_frame.total_margin().sum().x
+                - table_frame.stroke.width * 2.0)
+                .max(0.0);
+            // Column widths persist across pane-width changes: a sidebar drag
+            // must not disturb the user's layout. TableBuilder keeps its own
+            // state and the outer horizontal scroller absorbs any overflow,
+            // so measure reserved heights with the widths that will actually
+            // render — last frame's — and fall back to the fresh proposal on
+            // first render (or after a genuine layout change, which resets
+            // below).
+            let last_widths = ui
+                .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")));
+            let initial_widths = last_widths.clone().unwrap_or(initial_widths);
+            // Cap separator drags at the pane edge: egui_extras grows the
+            // dragged column without shrinking its neighbours, so an
+            // unbounded drag pushed the columns to its right under the
+            // sidebar. A column may grow only into space the others are not
+            // using (floored at its own minimum); with no last frame there
+            // is no cap — fresh tables fit their budget anyway.
+            let column_caps = last_widths.map(|widths| {
+                let total: f32 = widths.iter().sum();
+                (0..initial_widths.len())
+                    .map(|column| {
+                        let others = total - widths.get(column).copied().unwrap_or(0.0);
+                        let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
+                        (usable_bound_now - others).max(minimum)
+                    })
+                    .collect::<Vec<f32>>()
+            });
             let mut table_scope_rect = ui.cursor();
-            table_scope_rect.max.x = table_scope_rect.min.x + table_bound;
-            table_scope_rect.max.y = ui.max_rect().bottom();
-            let scroll_out = ui
+            // Carve out a viewport wider than the prose column (#64), but
+            // never wider than what is visible. The bound must be
+            // `max_rect`, not `clip_rect`: the inherited clip is window-wide
+            // (the CentralPanel is not clipped to its own rect, and the
+            // document ScrollArea passes that X extent through), so a
+            // clip-based cap never bites. Floor at `min.x` keeps the rect
+            // non-inverted in degenerately narrow panes; the horizontal
+            // ScrollArea still pans the columns within whatever width
+            // remains.
+            table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
+                .min(ui.max_rect().right())
+                .max(table_scope_rect.min.x);
+            // Reserve the table's own height rather than "everything below the
+            // cursor".
+            //
+            // egui_extras accounts for the rows it skips only once its loop
+            // reaches the first *visible* row (`heterogeneous_rows` ->
+            // `add_buffer`). A table lying entirely above the visible range
+            // never gets there and reserves nothing, collapsing to zero height.
+            // Every block below it then lays out too high, so a paint made
+            // while scrolled measures the document shorter — and any position
+            // recorded during such a paint (heading y for outline clicks) is
+            // compressed by the same factor.
+            let reserved_row_heights: Vec<f32> = table_rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .enumerate()
+                        .map(|(column, cell)| {
+                            table_cell_height(
+                                cell,
+                                line_h,
+                                cache,
+                                ui,
+                                initial_widths.get(column).copied().unwrap_or(40.0),
+                                options,
+                            )
+                        })
+                        .fold(cell_h, f32::max)
+                })
+                .collect();
+            let group_frame = egui::Frame::group(ui.style());
+            let reserved_height = reserved_row_heights.iter().sum::<f32>()
+                + ui.spacing().item_spacing.y
+                    * reserved_row_heights.len().saturating_sub(1) as f32
+                + f32::from(group_frame.inner_margin.top)
+                + f32::from(group_frame.inner_margin.bottom)
+                + group_frame.stroke.width * 2.0;
+            table_scope_rect.max.y = table_scope_rect.min.y + reserved_height;
+            let _ = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(table_scope_rect), |ui| {
                     let mut scroll_out = egui::ScrollArea::horizontal()
                         .id_salt(id.with("_scroll"))
@@ -1491,9 +2759,10 @@ impl CommonMarkViewerInternal {
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
-                                egui::Frame::group(ui.style()).show(ui, |ui| {
-                                    let table = egui_extras::TableBuilder::new(ui)
-                                        .id_salt(id)
+                                table_frame.show(ui, |ui| {
+                                    let reset_column_widths = height_layout_changed;
+                                    let mut builder = egui_extras::TableBuilder::new(ui)
+                                        .id_salt(id.with("_wrapped"))
                                         .striped(true)
                                         .resizable(true)
                                         .vscroll(false)
@@ -1505,69 +2774,101 @@ impl CommonMarkViewerInternal {
                                         // max_width and provides horizontal scroll.
                                         .auto_shrink([true, true])
                                         .min_scrolled_height(0.0)
-                                        .cell_layout(egui::Layout::left_to_right(
-                                            egui::Align::Center,
-                                        ))
-                                        .columns(
-                                            egui_extras::Column::auto()
-                                                .resizable(true)
-                                                .at_least(40.0),
-                                            num_cols,
-                                        )
-                                        .header(header_h, |mut row| {
-                                            for col in header {
-                                                row.col(|ui| {
-                                                    let col_w = ui.available_width();
-                                                    for (e, src_span) in col {
-                                                        let tmp_start = std::mem::replace(
-                                                            &mut self.line.should_start_newline,
-                                                            false,
-                                                        );
-                                                        let tmp_end = std::mem::replace(
-                                                            &mut self.line.should_end_newline,
-                                                            false,
-                                                        );
-                                                        self.event(
-                                                            ui, e, src_span, cache, options,
-                                                            col_w,
-                                                        );
-                                                        self.line.should_start_newline = tmp_start;
-                                                        self.line.should_end_newline = tmp_end;
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    table.body(|mut body| {
-                                        for (row_idx, row) in rows.into_iter().enumerate() {
-                                            let h = body_heights
-                                                .get(row_idx)
-                                                .copied()
-                                                .unwrap_or(cell_h);
-                                            body.row(h, |mut row_ui| {
+                                        .cell_layout(egui::Layout::left_to_right(egui::Align::Min));
+                                    for (column, width) in initial_widths.into_iter().enumerate() {
+                                        let mut column_width = egui_extras::Column::initial(width)
+                                            .resizable(true)
+                                            .clip(true)
+                                            .at_least(minimum_widths[column]);
+                                        if let Some(max) =
+                                            column_caps.as_ref().and_then(|caps| caps.get(column))
+                                        {
+                                            column_width = column_width.at_most(*max);
+                                        }
+                                        builder = builder.column(column_width);
+                                    }
+                                    if reset_column_widths {
+                                        builder.reset();
+                                    }
+                                    builder.body(|mut body| {
+                                        let widths = body.widths().to_vec();
+                                        let heights: Vec<f32> = {
+                                            let measure_ui = body.ui_mut();
+                                            table_rows
+                                                .iter()
+                                                .map(|row| {
+                                                    row.iter()
+                                                        .enumerate()
+                                                        .map(|(column, cell)| {
+                                                            table_cell_height(
+                                                                cell,
+                                                                line_h,
+                                                                cache,
+                                                                measure_ui,
+                                                                widths
+                                                                    .get(column)
+                                                                    .copied()
+                                                                    .unwrap_or(40.0),
+                                                                options,
+                                                            )
+                                                        })
+                                                        .fold(cell_h, f32::max)
+                                                })
+                                                .collect()
+                                        };
+                                        store_table_column_widths(body.ui_mut(), id, &widths);
+                                        body.heterogeneous_rows(heights.into_iter(), |mut row_ui| {
+                                            let row = &table_rows[row_ui.index()];
                                                 for col in row {
                                                     row_ui.col(|ui| {
-                                                        let col_w = ui.available_width();
-                                                        for (e, src_span) in col {
-                                                            let tmp_start = std::mem::replace(
-                                                                &mut self.line.should_start_newline,
-                                                                false,
-                                                            );
-                                                            let tmp_end = std::mem::replace(
-                                                                &mut self.line.should_end_newline,
-                                                                false,
-                                                            );
-                                                            self.event(
-                                                                ui, e, src_span, cache, options,
-                                                                col_w,
-                                                            );
-                                                            self.line.should_start_newline =
-                                                                tmp_start;
-                                                            self.line.should_end_newline = tmp_end;
-                                                        }
+                                                        ui.style_mut().wrap_mode =
+                                                            Some(egui::TextWrapMode::Wrap);
+                                                        ui.set_width(ui.max_rect().width());
+                                                        egui::Frame::NONE
+                                                            .inner_margin(egui::Margin::symmetric(4, 0))
+                                                            .show(ui, |ui| {
+                                                                let col_w = ui.available_width();
+                                                                ui.set_width(col_w);
+                                                                // Isolate the wrapping cursor from the
+                                                                // preallocated TableBuilder row height.
+                                                                // Otherwise egui uses that entire height as
+                                                                // the first text line's minimum height and
+                                                                // later inline widgets overflow the row.
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    for (e, src_span) in col {
+                                                                        let tmp_start =
+                                                                            std::mem::replace(
+                                                                                &mut self
+                                                                                    .line
+                                                                                    .should_start_newline,
+                                                                                false,
+                                                                            );
+                                                                        let tmp_end =
+                                                                            std::mem::replace(
+                                                                                &mut self
+                                                                                    .line
+                                                                                    .should_end_newline,
+                                                                                false,
+                                                                            );
+                                                                        self.event(
+                                                                            ui,
+                                                                            e.clone(),
+                                                                            src_span.clone(),
+                                                                            cache,
+                                                                            options,
+                                                                            col_w,
+                                                                        );
+                                                                        self.line
+                                                                            .should_start_newline =
+                                                                            tmp_start;
+                                                                        self.line.should_end_newline =
+                                                                            tmp_end;
+                                                                    }
+                                                                });
+                                                            });
                                                     });
                                                 }
-                                            });
-                                        }
+                                        });
                                     });
                                 });
                             });
@@ -1595,12 +2896,28 @@ impl CommonMarkViewerInternal {
         max_width: f32,
     ) {
         match event {
-            pulldown_cmark::Event::Start(tag) => self.start_tag(ui, tag, options),
+            pulldown_cmark::Event::Start(tag) => {
+                self.start_tag(ui, tag, src_span.start, options)
+            }
             pulldown_cmark::Event::End(tag) => self.end_tag(ui, tag, cache, options, max_width),
             pulldown_cmark::Event::Text(text) => {
-                self.event_text_with_highlights(text, &src_span, cache, ui, options);
+                // Inside a frontmatter block the text is metadata, not prose:
+                // collect it and paint the whole block at TagEnd instead.
+                if let Some(buffer) = self.frontmatter.as_mut() {
+                    buffer.push_str(&text);
+                } else {
+                    self.event_text_with_highlights(text, &src_span, cache, ui, options);
+                }
             }
             pulldown_cmark::Event::Code(text) => {
+                // A bare local Markdown filename is often written as inline code.
+                // Preserve the code styling, but give an exact registered path the
+                // same click behavior as its plain-text counterpart.
+                let auto_link = self
+                    .link
+                    .is_none()
+                    .then(|| registered_exact_auto_link(&text, cache.link_hooks()))
+                    .flatten();
                 self.text_style.code = true;
                 let segments = inline_code_wrap_segments(&text);
                 let wrap = segments.len() > 1;
@@ -1619,6 +2936,12 @@ impl CommonMarkViewerInternal {
                     None
                 };
                 for segment in segments {
+                    if let Some(destination) = auto_link.as_ref() {
+                        self.link = Some(crate::Link {
+                            destination: destination.clone(),
+                            text: Vec::new(),
+                        });
+                    }
                     if let Some(ref span) = interior_span {
                         // Inline code stays source-literal while retaining byte-range highlights.
                         self.event_literal_text_with_highlights(
@@ -1630,6 +2953,11 @@ impl CommonMarkViewerInternal {
                         );
                     } else {
                         self.event_text(segment.into(), ui, options);
+                    }
+                    if auto_link.is_some() {
+                        if let Some(link) = self.link.take() {
+                            link.end(ui, cache);
+                        }
                     }
                     if wrap {
                         ui.end_row();
@@ -1679,7 +3007,11 @@ impl CommonMarkViewerInternal {
                 } else {
                     #[cfg(feature = "math")]
                     {
-                        crate::render_math(ui, cache, &tex, true);
+                        if self.is_table {
+                            crate::render_math_in_table(ui, cache, &tex, options);
+                        } else {
+                            crate::render_math(ui, cache, &tex, true, options);
+                        }
                     }
                     #[cfg(not(feature = "math"))]
                     if let Some(math_fn) = options.math_fn {
@@ -1696,7 +3028,7 @@ impl CommonMarkViewerInternal {
                 newline(ui);
                 #[cfg(feature = "math")]
                 {
-                    crate::render_math(ui, cache, &tex, false);
+                    crate::render_math(ui, cache, &tex, false, options);
                 }
                 #[cfg(not(feature = "math"))]
                 if let Some(math_fn) = options.math_fn {
@@ -1758,12 +3090,26 @@ impl CommonMarkViewerInternal {
         } else if let Some(link) = &mut self.link {
             link.text.push(rich_text);
         } else if self.text_style.heading.is_some() {
-            // Accumulate heading text for position tracking
             self.current_heading_text
                 .push_str(raw_heading_text.unwrap_or(&text));
             // Accumulate RichText - will render all at once in end_tag(Heading)
             self.current_heading_rich_texts.push(rich_text);
+        } else if self.is_table {
+            ui.add(egui::Label::new(rich_text).wrap());
         } else {
+            // The item's first text decides where its deferred marker paints:
+            // mirror exactly the job `ui.label` is about to build (same format,
+            // same valign) so the marker's reference galley matches the real
+            // layout, and flush with no widget in between.
+            let mut job = egui::text::LayoutJob::default();
+            rich_text.clone().append_to(
+                &mut job,
+                ui.style(),
+                egui::FontSelection::Default,
+                ui.text_valign(),
+            );
+            let format = job.sections.first().map(|section| section.format.clone());
+            self.list.flush_pending_markers(ui, format);
             ui.label(rich_text);
         }
     }
@@ -1792,12 +3138,77 @@ impl CommonMarkViewerInternal {
             },
         );
         if let Some(y) = active_y {
-            cache.record_active_search_y_viewport(y);
+            record_active_search_content_y(cache, y, self.render_origin_y, self.slice_start_y);
         }
     }
 
     /// Expand eligible emoji shortcodes, then preserve source-based search semantics.
     fn event_text_with_highlights(
+        &mut self,
+        text: CowStr,
+        span: &Range<usize>,
+        cache: &mut CommonMarkCache,
+        ui: &mut Ui,
+        options: &CommonMarkOptions,
+    ) {
+        // Existing Markdown links already own their text, while headings and
+        // image alt text have specialized accumulation semantics. Auto-link
+        // only ordinary visible prose whose bytes map exactly to source.
+        if self.link.is_none()
+            && self.image.is_none()
+            && self.code_block.is_none()
+            && self.text_style.heading.is_none()
+            && text.len() == span.len()
+        {
+            let links = registered_auto_link_ranges(&text, cache.link_hooks());
+            if !links.is_empty() {
+                let mut cursor = 0;
+                for (range, destination) in links {
+                    if cursor < range.start {
+                        self.event_text_segment_with_highlights(
+                            (&text[cursor..range.start]).into(),
+                            &(span.start + cursor..span.start + range.start),
+                            cache,
+                            ui,
+                            options,
+                        );
+                    }
+
+                    self.link = Some(crate::Link {
+                        destination,
+                        text: Vec::new(),
+                    });
+                    self.event_text_segment_with_highlights(
+                        (&text[range.clone()]).into(),
+                        &(span.start + range.start..span.start + range.end),
+                        cache,
+                        ui,
+                        options,
+                    );
+                    if let Some(link) = self.link.take() {
+                        link.end(ui, cache);
+                    }
+                    cursor = range.end;
+                }
+                if cursor < text.len() {
+                    self.event_text_segment_with_highlights(
+                        (&text[cursor..]).into(),
+                        &(span.start + cursor..span.end),
+                        cache,
+                        ui,
+                        options,
+                    );
+                }
+                return;
+            }
+        }
+
+        self.event_text_segment_with_highlights(text, span, cache, ui, options);
+    }
+
+    /// Expand emoji shortcodes and apply source-based highlights to one plain
+    /// or auto-linked visible text segment.
+    fn event_text_segment_with_highlights(
         &mut self,
         text: CowStr,
         span: &Range<usize>,
@@ -1842,11 +3253,17 @@ impl CommonMarkViewerInternal {
             );
         });
         if let Some(y) = active_y {
-            cache.record_active_search_y_viewport(y);
+            record_active_search_content_y(cache, y, self.render_origin_y, self.slice_start_y);
         }
     }
 
-    fn start_tag(&mut self, ui: &mut Ui, tag: pulldown_cmark::Tag, options: &CommonMarkOptions) {
+    fn start_tag(
+        &mut self,
+        ui: &mut Ui,
+        tag: pulldown_cmark::Tag,
+        source_start: usize,
+        options: &CommonMarkOptions,
+    ) {
         match tag {
             pulldown_cmark::Tag::Paragraph => {
                 self.line.try_insert_start(ui);
@@ -1856,6 +3273,7 @@ impl CommonMarkViewerInternal {
                 ui.end_row();
                 // Record position BEFORE spacing for scroll navigation
                 self.current_heading_y = Some(ui.cursor().top());
+                self.current_heading_source_start = Some(source_start);
                 self.current_heading_text.clear();
                 // Add extra spacing above headings if configured
                 heading_start_spacing(ui, &options.typography);
@@ -1950,7 +3368,10 @@ impl CommonMarkViewerInternal {
             pulldown_cmark::Tag::HtmlBlock => {
                 self.line.try_insert_start(ui);
             }
-            pulldown_cmark::Tag::MetadataBlock(_) => {}
+            pulldown_cmark::Tag::MetadataBlock(_) => {
+                self.line.try_insert_start(ui);
+                self.frontmatter = Some(String::new());
+            }
 
             pulldown_cmark::Tag::DefinitionList => {
                 self.line.try_insert_start(ui);
@@ -1997,53 +3418,45 @@ impl CommonMarkViewerInternal {
                         egui::vec2(available.width() + (available.left() - left_edge), available.height()),
                     );
                     let rich_texts = std::mem::take(&mut self.current_heading_rich_texts);
-                    ui.allocate_ui_at_rect(heading_rect, |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(heading_rect), |ui| {
                         for rt in rich_texts {
                             ui.label(rt);
                         }
                     });
                 }
-                // Record header position for scroll navigation. Composite key
-                // is `normalized_title` for the 0th occurrence and
-                // `normalized_title#N` for the Nth duplicate (matches the key
-                // built by the app's `header_position_key` helper), so multiple
-                // headings with the same title get distinct cache entries.
+                // Record under a source-stable key shared with the Outline parser.
                 if let Some(y) = self.current_heading_y.take() {
-                    if !self.current_heading_text.is_empty() {
-                        let normalized = self.current_heading_text.trim().to_lowercase();
-                        let nth = self
-                            .heading_occurrence_counts
-                            .entry(normalized.clone())
-                            .or_insert(0);
-                        let key = if *nth == 0 {
-                            normalized.clone()
-                        } else {
-                            format!("{normalized}#{nth}")
-                        };
-                        *nth += 1;
+                    if let Some(source_start) = self.current_heading_source_start.take() {
+                        let key = egui_commonmark_backend_extended::misc::header_position_key(
+                            source_start,
+                        );
                         // `y` (== `ui.cursor().top()` at heading start) is a
                         // SCREEN-y coordinate. The click handler uses the
                         // cached value with `ScrollArea::vertical_scroll_offset(N)`,
                         // which interprets N as a CONTENT-y (where 0 is the
-                        // top of the ScrollArea's content layout). Subtract
-                        // `ui.min_rect().top()` — that's the screen y of the
-                        // closure's ui top-left, which tracks the current
-                        // scroll offset (it shifts up as the user scrolls).
-                        // The subtraction cancels out both the panel chrome
-                        // AND any active scroll offset, leaving a pure
-                        // content-y that's invariant across scroll positions.
+                        // top of the ScrollArea's content layout). Subtract the
+                        // root render origin, which tracks the current scroll
+                        // offset but stays stable across nested table, list,
+                        // and blockquote UIs. This cancels out both the panel
+                        // chrome and any active scroll offset. A viewport slice
+                        // starts at `slice_start_y` rather than document y=0,
+                        // so add that origin back before updating the cache.
                         //
                         // Empirical verification on Recent-Changes.md:
-                        // - At scroll=0: title cursor=323, min_rect.top()=44
+                        // - At scroll=0: title cursor=323, render origin=44
                         //   → content_y = 279
                         // - After click to scroll=273: cursor=50,
-                        //   min_rect.top()=-229 → content_y = 279
+                        //   render origin=-229 → content_y = 279
                         // - Same heading, same content_y, regardless of scroll
                         //
                         // Previously stored `cur_offset + cursor.y` which gave
                         // 323 (off by 44 = panel chrome height), so scrolling
                         // to (323-50)=273 landed 44 px past the heading.
-                        let content_y = y - ui.min_rect().top();
+                        let content_y = content_relative_y(
+                            y,
+                            self.render_origin_y,
+                            self.slice_start_y,
+                        );
                         // Always refresh with current layout, not first-paint
                         // value. First-paint pinning produced increasing
                         // overshoot for deeper headers — the first frame
@@ -2059,6 +3472,7 @@ impl CommonMarkViewerInternal {
                         cache.record_header_content_y(&key, content_y);
                     }
                 }
+                self.current_heading_source_start = None;
                 self.current_heading_text.clear();
                 // Add extra spacing below headings if configured
                 heading_end_spacing(ui, &options.typography);
@@ -2088,7 +3502,13 @@ impl CommonMarkViewerInternal {
                     self.list = List::default();
                 }
             }
-            pulldown_cmark::TagEnd::Item => {}
+            pulldown_cmark::TagEnd::Item => {
+                // The item is over without ever painting text — a code block,
+                // nested list or math block came first, say — so align its
+                // deferred marker with whatever line the content produced
+                // rather than leaving the reserved slot empty.
+                self.list.flush_pending_markers(ui, None);
+            }
             pulldown_cmark::TagEnd::FootnoteDefinition => {
                 self.line.should_start_newline = true;
                 self.line.should_end_newline = true;
@@ -2143,7 +3563,12 @@ impl CommonMarkViewerInternal {
                 }
             }
 
-            pulldown_cmark::TagEnd::MetadataBlock(_) => {}
+            pulldown_cmark::TagEnd::MetadataBlock(_) => {
+                if let Some(raw) = self.frontmatter.take() {
+                    render_frontmatter_table(ui, &raw, options, max_width);
+                    self.line.try_insert_end(ui);
+                }
+            }
 
             pulldown_cmark::TagEnd::DefinitionList => self.line.try_insert_end(ui),
             pulldown_cmark::TagEnd::DefinitionListTitle
@@ -2184,37 +3609,13 @@ impl CommonMarkViewerInternal {
             .map(|r| r.len())
             .unwrap_or(0);
 
-        let line_h = ui.text_style_height(&egui::TextStyle::Body);
-        let cell_h = line_h * 1.5;
+        let line_h = body_line_height(ui, options);
+        let cell_h = line_h + ui.spacing().item_spacing.y;
 
         if num_cols == 0 {
             self.line.try_insert_end(ui);
             return;
         }
-
-        // Heuristic per-row heights: count explicit newlines + crude wrap est at
-        // ~60 chars/visual-line. Over-estimates slightly (extra row height is
-        // preferable to clipping). Header rows use the same heuristic.
-        let row_height_for = |cells: &[String]| -> f32 {
-            let max_lines = cells
-                .iter()
-                .map(|c| html_cell_visual_lines(c))
-                .max()
-                .unwrap_or(1);
-            cell_h * max_lines as f32
-        };
-        let header_h = table
-            .header
-            .first()
-            .map(|row| row_height_for(row))
-            .unwrap_or(cell_h);
-        let extra_header_heights: Vec<f32> = table
-            .header
-            .iter()
-            .skip(1)
-            .map(|row| row_height_for(row))
-            .collect();
-        let body_heights: Vec<f32> = table.rows.iter().map(|row| row_height_for(row)).collect();
 
         // Outer ScrollArea::horizontal handles wide tables that exceed parent width;
         // ui.vertical() prevents the header/body Y-overlap quirk. Plain vertical wheel
@@ -2225,12 +3626,96 @@ impl CommonMarkViewerInternal {
             .table_max_width
             .map(|w| w as f32)
             .unwrap_or(max_width);
+        let table_rows: Vec<(bool, &[String])> = table
+            .header
+            .iter()
+            .map(|row| (true, row.as_slice()))
+            .chain(table.rows.iter().map(|row| (false, row.as_slice())))
+            .collect();
+        let minimum_widths: Vec<f32> = (0..num_cols)
+            .map(|column| {
+                table
+                    .header
+                    .iter()
+                    .filter_map(|row| row.get(column))
+                    .map(|cell| unbreakable_text_width(ui, cell))
+                    .fold(40.0, f32::max)
+            })
+            .collect();
+        let desired_widths: Vec<f32> = (0..num_cols)
+            .map(|column| {
+                table_rows
+                    .iter()
+                    .filter_map(|(_, row)| row.get(column))
+                    .map(|cell| natural_text_width(ui, cell))
+                    .fold(40.0, f32::max)
+            })
+            .collect();
+        let (table_frame, baseline_widths, visible_column_budget) =
+            framed_table_widths(ui, &desired_widths, &minimum_widths, table_bound);
+        let layout_key = table_layout_key(
+            ui,
+            &desired_widths,
+            &minimum_widths,
+            line_h,
+            html_table_digest(&table_rows),
+            0,
+            1.0,
+        );
+        let (initial_widths, height_layout_changed) = cached_height_aware_widths(
+            ui,
+            id,
+            layout_key,
+            &baseline_widths,
+            &desired_widths,
+            &minimum_widths,
+            visible_column_budget,
+            table_rows.len(),
+            |column, width| {
+                table_rows
+                    .iter()
+                    .map(|(_, row)| {
+                        row.get(column).map_or(0.0, |cell| {
+                            wrapped_text_height(ui, cell, width - 16.0, line_h) + 8.0
+                        })
+                    })
+                    .collect()
+            },
+        );
+        // Column widths persist across pane-width changes (see the markdown
+        // table notes), with the same separator-drag caps.
+        let usable_bound_now = (table_bound
+            - table_frame.total_margin().sum().x
+            - table_frame.stroke.width * 2.0)
+            .max(0.0);
+        let last_widths = ui
+            .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")));
+        let initial_widths = last_widths.clone().unwrap_or(initial_widths);
+        let column_caps = last_widths.map(|widths| {
+            let total: f32 = widths.iter().sum();
+            (0..initial_widths.len())
+                .map(|column| {
+                    let others = total - widths.get(column).copied().unwrap_or(0.0);
+                    let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
+                    // The cap limits growth only: on a shrink the column
+                    // keeps its last width (stickiness wins, the overflow
+                    // scrolls), so `at_most` must not shrink it back.
+                    (usable_bound_now - others)
+                        .max(widths.get(column).copied().unwrap_or(0.0))
+                        .max(minimum)
+                })
+                .collect::<Vec<f32>>()
+        });
         // Same reading-column escape as markdown tables (#64): carve out a
-        // scope wider than the prose allocation, anchored at the cursor.
+        // scope wider than the prose allocation, anchored at the cursor — but
+        // never wider than what is visible (see the markdown-table carve-out
+        // for why the bound is `max_rect`, not `clip_rect`).
         let mut table_scope_rect = ui.cursor();
-        table_scope_rect.max.x = table_scope_rect.min.x + table_bound;
+        table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
+            .min(ui.max_rect().right())
+            .max(table_scope_rect.min.x);
         table_scope_rect.max.y = ui.max_rect().bottom();
-        let scroll_out = ui
+        let _ = ui
             .scope_builder(egui::UiBuilder::new().max_rect(table_scope_rect), |ui| {
                 let mut scroll_out = egui::ScrollArea::horizontal()
                     .id_salt(id.with("_scroll"))
@@ -2238,9 +3723,10 @@ impl CommonMarkViewerInternal {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        let builder = egui_extras::TableBuilder::new(ui)
-                            .id_salt(id)
+                    table_frame.show(ui, |ui| {
+                        let reset_column_widths = height_layout_changed;
+                        let mut builder = egui_extras::TableBuilder::new(ui)
+                            .id_salt(id.with("_wrapped"))
                             .striped(true)
                             .resizable(true)
                             .vscroll(false)
@@ -2248,11 +3734,23 @@ impl CommonMarkViewerInternal {
                             // outer ScrollArea still handles wide-table overflow.
                             .auto_shrink([true, true])
                             .min_scrolled_height(0.0)
-                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                            .columns(
-                                egui_extras::Column::auto().resizable(true).at_least(40.0),
-                                num_cols,
-                            );
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Min));
+                        for (column, width) in initial_widths.into_iter().enumerate() {
+                            let mut column_width = egui_extras::Column::initial(width)
+                                .resizable(true)
+                                .clip(true)
+                                .at_least(minimum_widths[column]);
+                            if let Some(max) =
+                                column_caps.as_ref().and_then(|caps| caps.get(column))
+                            {
+                                column_width = column_width.at_most(*max);
+                            }
+                            builder = builder.column(column_width);
+                        }
+
+                        if reset_column_widths {
+                            builder.reset();
+                        }
 
                         let render_cell_strong = |ui: &mut Ui, cell: &str| {
                             egui::Frame::NONE
@@ -2262,82 +3760,50 @@ impl CommonMarkViewerInternal {
                                 });
                         };
 
-                        if let Some(first_header) = table.header.first() {
-                            builder
-                                .header(header_h, |mut row| {
-                                    for cell in first_header {
-                                        row.col(|ui| render_cell_strong(ui, cell));
-                                    }
-                                })
-                                .body(|mut body| {
-                                    // Extra header rows after the first render as bold
-                                    // body rows (TableBuilder has only one native header row).
-                                    for (idx, extra) in table.header.iter().skip(1).enumerate() {
-                                        let h = extra_header_heights
-                                            .get(idx)
-                                            .copied()
-                                            .unwrap_or(cell_h);
-                                        body.row(h, |mut row_ui| {
-                                            for cell in extra {
-                                                row_ui.col(|ui| render_cell_strong(ui, cell));
-                                            }
-                                        });
-                                    }
-                                    for (row_idx, row) in table.rows.iter().enumerate() {
-                                        let h = body_heights
-                                            .get(row_idx)
-                                            .copied()
-                                            .unwrap_or(cell_h);
-                                        body.row(h, |mut row_ui| {
-                                            for cell in row {
-                                                row_ui.col(|ui| {
-                                                    egui::Frame::NONE
-                                                        .inner_margin(egui::Margin::symmetric(
-                                                            8, 4,
-                                                        ))
-                                                        .show(ui, |ui| {
-                                                            let rich_text = self
-                                                                .text_style
-                                                                .to_richtext_with_options(
-                                                                    ui,
-                                                                    cell,
-                                                                    options,
-                                                                );
-                                                            ui.label(rich_text);
-                                                        });
+                        builder.body(|mut body| {
+                            let widths = body.widths().to_vec();
+                            let heights: Vec<f32> = {
+                                let measure_ui = body.ui_mut();
+                                table_rows
+                                    .iter()
+                                    .map(|(_, row)| {
+                                        row.iter()
+                                            .enumerate()
+                                            .map(|(column, cell)| {
+                                                wrapped_text_height(
+                                                    measure_ui,
+                                                    cell,
+                                                    widths.get(column).copied().unwrap_or(40.0)
+                                                        - 16.0,
+                                                    line_h,
+                                                ) + 8.0
+                                            })
+                                            .fold(cell_h, f32::max)
+                                    })
+                                    .collect()
+                            };
+                            store_table_column_widths(body.ui_mut(), id, &widths);
+                            body.heterogeneous_rows(heights.into_iter(), |mut row_ui| {
+                                let (is_header, row) = table_rows[row_ui.index()];
+                                for cell in row {
+                                    row_ui.col(|ui| {
+                                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                        if is_header {
+                                            render_cell_strong(ui, cell);
+                                        } else {
+                                            egui::Frame::NONE
+                                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                                .show(ui, |ui| {
+                                                    let rich_text = self
+                                                        .text_style
+                                                        .to_richtext_with_options(ui, cell, options);
+                                                    ui.label(rich_text);
                                                 });
-                                            }
-                                        });
-                                    }
-                                });
-                        } else {
-                            builder.body(|mut body| {
-                                for (row_idx, row) in table.rows.iter().enumerate() {
-                                    let h = body_heights
-                                        .get(row_idx)
-                                        .copied()
-                                        .unwrap_or(cell_h);
-                                    body.row(h, |mut row_ui| {
-                                        for cell in row {
-                                            row_ui.col(|ui| {
-                                                egui::Frame::NONE
-                                                    .inner_margin(egui::Margin::symmetric(8, 4))
-                                                    .show(ui, |ui| {
-                                                        let rich_text = self
-                                                            .text_style
-                                                            .to_richtext_with_options(
-                                                                ui,
-                                                                cell,
-                                                                options,
-                                                            );
-                                                        ui.label(rich_text);
-                                                    });
-                                            });
                                         }
                                     });
                                 }
                             });
-                        }
+                        });
                     });
                 });
             });
@@ -2351,6 +3817,63 @@ impl CommonMarkViewerInternal {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frontmatter_splits_top_level_key_value_pairs() {
+        let pairs = parse_frontmatter_pairs(
+            "title: My Document\nauthor: Jane Doe\ndate: 2026-08-30\n",
+        );
+        assert_eq!(
+            pairs,
+            vec![
+                ("title".to_owned(), "My Document".to_owned()),
+                ("author".to_owned(), "Jane Doe".to_owned()),
+                ("date".to_owned(), "2026-08-30".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn frontmatter_keeps_a_value_containing_a_colon_intact() {
+        // Only the *first* colon separates; a URL must not be truncated.
+        let pairs = parse_frontmatter_pairs("url: https://example.com/path?a=1\n");
+        assert_eq!(
+            pairs,
+            vec![("url".to_owned(), "https://example.com/path?a=1".to_owned())]
+        );
+    }
+
+    #[test]
+    fn frontmatter_folds_nested_lines_into_the_preceding_value() {
+        // Not a YAML parser by design: nested mappings and sequence items are
+        // folded into the parent value rather than dropped or mis-split into
+        // their own rows.
+        let pairs = parse_frontmatter_pairs("nested:\n  key: value\nlist:\n  - first\n  - second\n");
+        assert_eq!(
+            pairs,
+            vec![
+                ("nested".to_owned(), "key: value".to_owned()),
+                ("list".to_owned(), "- first - second".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn frontmatter_ignores_blank_lines_and_survives_leading_junk() {
+        let pairs = parse_frontmatter_pairs("\n\nstray\n\ntitle: X\n");
+        assert_eq!(
+            pairs,
+            vec![
+                (String::new(), "stray".to_owned()),
+                ("title".to_owned(), "X".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn frontmatter_of_only_blank_lines_yields_nothing_to_paint() {
+        assert!(parse_frontmatter_pairs("\n   \n").is_empty());
+    }
+
     use super::*;
     use pulldown_cmark::{Event, Options, Parser, Tag};
 
@@ -2406,6 +3929,1094 @@ mod tests {
             }
         }
         visible
+    }
+
+    #[test]
+    fn table_cells_measure_inline_code_with_the_monospace_font() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            let mut style = ui.style().as_ref().clone();
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
+            ui.set_style(style);
+            let cache = CommonMarkCache::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let code = "iiiiiiiiiiiiiiiiiiiiiiii";
+            let body_font = egui::TextStyle::Body.resolve(ui.style());
+            let mono_font = egui::FontId::new(body_font.size, egui::FontFamily::Monospace);
+            let body_width = ui
+                .painter()
+                .layout_no_wrap(code.to_owned(), body_font, egui::Color32::WHITE)
+                .size()
+                .x;
+            let mono_width = ui
+                .painter()
+                .layout_no_wrap(code.to_owned(), mono_font, egui::Color32::WHITE)
+                .size()
+                .x;
+            assert!(
+                mono_width > body_width,
+                "expected monospace code to be wider: body={body_width} mono={mono_width}"
+            );
+
+            // `wrapped_text_height` subtracts 8 px before layout. Choose a
+            // width where Body still fits but the rendered monospace code
+            // must wrap, exposing the old one-line row-height estimate.
+            let column_width = (body_width + mono_width) * 0.5 + 8.0;
+            let cell = vec![(Event::Code(code.into()), 0..code.len())];
+            let options = CommonMarkOptions::default();
+
+            let height =
+                table_cell_height(&cell, line_height, &cache, ui, column_width, &options);
+            assert!(height >= line_height * 2.0);
+            assert!(
+                height < line_height * 3.0,
+                "two visual lines should not reserve a third: {height}"
+            );
+        });
+        let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn table_body_line_height_respects_typography_configuration() {
+        use egui_commonmark_backend_extended::typography::Measurement;
+
+        egui::__run_test_ui(|ui| {
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let natural = ui
+                .text_style_height(&egui::TextStyle::Body)
+                .max(font.size);
+            let mut options = CommonMarkOptions::default();
+
+            assert!((body_line_height(ui, &options) - natural).abs() < 0.01);
+
+            options.typography.line_height = Some(Measurement::Multiplier(1.5));
+            assert!((body_line_height(ui, &options) - font.size * 1.5).abs() < 0.01);
+
+            options.typography.line_height = Some(Measurement::Pixels(27.0));
+            assert!((body_line_height(ui, &options) - 27.0).abs() < 0.01);
+
+            options.typography.line_height = Some(Measurement::Pixels(1.0));
+            let clamped = body_line_height(ui, &options);
+            assert!(
+                (clamped - natural).abs() < 0.01,
+                "configured={clamped} natural={natural}"
+            );
+        });
+    }
+
+    #[test]
+    fn table_cells_accumulate_rows_from_multiple_chunked_code_events() {
+        egui::__run_test_ui(|ui| {
+            let first = "a".repeat(60);
+            let second = "b".repeat(60);
+            let cell = vec![
+                (Event::Code(first.into()), 0..60),
+                (Event::Text(" between ".into()), 60..69),
+                (Event::Code(second.into()), 69..129),
+            ];
+
+            assert_eq!(cell_visual_lines(&cell, ui, 2_000.0), 4);
+        });
+    }
+
+    #[test]
+    fn table_cells_measure_short_code_with_the_width_left_by_text() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            let mut style = ui.style().as_ref().clone();
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
+            ui.set_style(style);
+            let plain = "iiiiiiiiiiii";
+            let code = "iiiiiiiiiiii";
+            let body_font = egui::TextStyle::Body.resolve(ui.style());
+            let code_font = egui::FontId::new(body_font.size, egui::FontFamily::Monospace);
+            let plain_width = ui
+                .painter()
+                .layout_no_wrap(plain.to_owned(), body_font.clone(), egui::Color32::WHITE)
+                .size()
+                .x;
+            let code_as_body_width = ui
+                .painter()
+                .layout_no_wrap(code.to_owned(), body_font, egui::Color32::WHITE)
+                .size()
+                .x;
+            let code_width = ui
+                .painter()
+                .layout_no_wrap(code.to_owned(), code_font, egui::Color32::WHITE)
+                .size()
+                .x;
+            assert!(
+                code_width > code_as_body_width,
+                "expected code to be wider: body={code_as_body_width} code={code_width}"
+            );
+
+            // Body-only estimation fits, and either run fits alone, but the
+            // real mixed-font line does not.
+            let body_total = plain_width + code_as_body_width;
+            let mixed_total = plain_width + code_width;
+            let column_width = (body_total + mixed_total) * 0.5 + 8.0;
+            let cell = vec![
+                (Event::Text(plain.into()), 0..plain.len()),
+                (Event::Code(code.into()), plain.len()..plain.len() + code.len()),
+            ];
+
+            assert_eq!(cell_visual_lines(&cell, ui, column_width), 2);
+        });
+        let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn table_cells_reserve_extra_height_for_inline_math() {
+        egui::__run_test_ui(|ui| {
+            let cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let cell = vec![(Event::InlineMath(r"\frac{a}{b}".into()), 0..11)];
+
+            assert!(
+                table_cell_height(&cell, line_height, &cache, ui, 120.0, &options)
+                    >= line_height * 2.0
+            );
+        });
+    }
+
+    #[test]
+    fn table_cell_reserves_height_for_an_image_of_known_size() {
+        // The size an image was last painted at is what its row must reserve.
+        egui::__run_test_ui(|ui| {
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+
+            let cell = vec![(
+                Event::Start(Tag::Image {
+                    link_type: pulldown_cmark::LinkType::Inline,
+                    dest_url: "chart.png".into(),
+                    title: "".into(),
+                    id: "".into(),
+                }),
+                0..10,
+            )];
+
+            let without = table_cell_height(&cell, line_height, &cache, ui, 120.0, &options);
+
+            let uri = crate::Image::new("chart.png", &options).uri;
+            cache.observe_image_size_for_test(&uri, egui::vec2(120.0, 400.0));
+            let with = table_cell_height(&cell, line_height, &cache, ui, 120.0, &options);
+
+            assert!(
+                with >= 400.0,
+                "row must reserve the painted image height, got {with}"
+            );
+            assert!(
+                with > without,
+                "a known image size must not shrink the reservation ({with} vs {without})"
+            );
+        });
+    }
+
+    #[test]
+    fn a_cached_image_size_does_not_leak_into_text_only_cells() {
+        // Guards the blast radius: seeding a known image size must change the
+        // height of cells that contain that image and nothing else.
+        egui::__run_test_ui(|ui| {
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let cell = vec![(Event::Text("plain".into()), 0..5)];
+
+            let before = table_cell_height(&cell, line_height, &cache, ui, 120.0, &options);
+
+            let uri = crate::Image::new("chart.png", &options).uri;
+            cache.observe_image_size_for_test(&uri, egui::vec2(120.0, 400.0));
+            let after = table_cell_height(&cell, line_height, &cache, ui, 120.0, &options);
+
+            assert_eq!(
+                before, after,
+                "a text-only cell must not change when some image's size becomes known"
+            );
+        });
+    }
+
+    #[test]
+    fn fitted_columns_leave_room_for_the_visible_table_frame() {
+        egui::__run_test_ui(|ui| {
+            let table_bound = 360.0;
+            let desired = [400.0, 500.0, 600.0];
+            let (frame, widths, column_budget) =
+                framed_table_widths(ui, &desired, &[40.0; 3], table_bound);
+            let column_space =
+                ui.spacing().item_spacing.x * desired.len().saturating_sub(1) as f32;
+            let visible_width =
+                widths.iter().sum::<f32>() + column_space + frame.total_margin().sum().x;
+
+            assert!((visible_width - table_bound).abs() < 0.01);
+            assert!((widths.iter().sum::<f32>() - column_budget).abs() < 0.01);
+        });
+    }
+
+    fn render_resizable_table_widths(
+        ctx: &egui::Context,
+        table_id: Id,
+        table_bound: f32,
+        initial_widths: &[f32],
+    ) -> Vec<f32> {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 240.0),
+            )),
+            ..Default::default()
+        });
+        let mut rendered_widths = Vec::new();
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.set_width(table_bound);
+            ui.set_max_width(table_bound);
+            let mut builder = egui_extras::TableBuilder::new(ui)
+                .id_salt(table_id.with("_wrapped"))
+                .resizable(true);
+            for width in initial_widths {
+                builder = builder.column(
+                    egui_extras::Column::initial(*width)
+                        .resizable(true)
+                        .at_least(40.0),
+                );
+            }
+            builder.body(|body| rendered_widths = body.widths().to_vec());
+            store_table_column_widths(ui, table_id, &rendered_widths);
+        });
+        let _ = ctx.end_pass();
+        rendered_widths
+    }
+
+    #[test]
+    fn resizable_table_widths_stick_across_bound_changes() {
+        let ctx = egui::Context::default();
+        let table_id = Id::new("responsive-table");
+        let initial = render_resizable_table_widths(&ctx, table_id, 180.0, &[60.0, 80.0]);
+        let same_bound = render_resizable_table_widths(&ctx, table_id, 180.0, &[90.0, 110.0]);
+        assert_eq!(same_bound, initial, "stable bounds must retain cached widths");
+
+        // Pane-width changes must never disturb the columns: widening leaves
+        // the layout alone (`auto_shrink` closes any gap), and shrinking lets
+        // the outer horizontal scroller absorb the overflow. A sidebar drag
+        // reflows the pane, not the table.
+        let wider = render_resizable_table_widths(&ctx, table_id, 360.0, &[120.0, 160.0]);
+        assert_eq!(wider, initial, "growing the bound must retain widths");
+        let narrower = render_resizable_table_widths(&ctx, table_id, 120.0, &[40.0, 60.0]);
+        assert_eq!(narrower, initial, "shrinking the bound must retain widths");
+    }
+
+    #[test]
+    fn fitted_table_columns_balance_fairness_and_content_demand() {
+        let widths = fit_column_widths(&[60.0, 500.0, 120.0], 360.0, &[40.0; 3]);
+
+        assert!((widths.iter().sum::<f32>() - 360.0).abs() < 0.1);
+        assert!(widths[1] > widths[2] && widths[2] > widths[0]);
+        assert!(widths.iter().all(|width| *width >= 40.0));
+    }
+
+    #[test]
+    fn fitted_table_columns_keep_minimum_for_horizontal_overflow() {
+        assert_eq!(
+            fit_column_widths(&[100.0, 200.0, 300.0], 100.0, &[40.0; 3]),
+            vec![40.0; 3]
+        );
+    }
+
+    #[test]
+    fn fitted_table_columns_respect_individual_header_floors() {
+        let minimums = [40.0, 72.0, 88.0];
+        let widths = fit_column_widths(&[100.0, 300.0, 240.0], 300.0, &minimums);
+
+        assert!((widths.iter().sum::<f32>() - 300.0).abs() < 0.1);
+        assert!(
+            widths
+                .iter()
+                .zip(minimums)
+                .all(|(width, minimum)| *width >= minimum)
+        );
+    }
+
+    #[test]
+    fn header_floors_overflow_instead_of_splitting_words() {
+        let minimums = [40.0, 92.0, 96.0];
+
+        assert_eq!(
+            fit_column_widths(&[100.0, 300.0, 240.0], 180.0, &minimums),
+            minimums
+        );
+    }
+
+    #[test]
+    fn header_floor_uses_the_widest_unicode_word() {
+        egui::__run_test_ui(|ui| {
+            let required = unbreakable_text_width(ui, "Required");
+            let allowed_types = unbreakable_text_width(ui, "Allowed Types");
+
+            assert_eq!(required, natural_text_width(ui, "Required").max(40.0));
+            assert_eq!(
+                allowed_types,
+                natural_text_width(ui, "Allowed")
+                    .max(natural_text_width(ui, "Types"))
+                    .max(40.0)
+            );
+        });
+    }
+
+    #[test]
+    fn fitted_table_columns_leave_compact_tables_at_natural_width() {
+        assert_eq!(
+            fit_column_widths(&[60.0, 80.0, 120.0], 360.0, &[40.0; 3]),
+            vec![60.0, 80.0, 120.0]
+        );
+    }
+
+    #[test]
+    fn fitted_table_columns_normalize_demands_below_the_minimum() {
+        let widths = fit_column_widths(&[10.0, 100.0], 120.0, &[40.0; 2]);
+
+        assert!((widths.iter().sum::<f32>() - 120.0).abs() < 0.1);
+        assert!(widths[0] >= 40.0 && widths[1] >= 40.0);
+        assert!(widths[1] > widths[0]);
+    }
+
+    #[test]
+    fn fitted_table_columns_weight_space_by_unmet_width() {
+        let widths = fit_column_widths(&[200.0, 400.0, 300.0], 600.0, &[40.0; 3]);
+
+        assert!((widths.iter().sum::<f32>() - 600.0).abs() < 0.1);
+        assert!(widths[1] > widths[2] && widths[2] > widths[0]);
+    }
+
+    #[test]
+    fn fitted_table_columns_are_continuous_across_equal_share() {
+        let below = fit_column_widths(&[200.0, 400.0, 300.0], 599.9, &[40.0; 3]);
+        let above = fit_column_widths(&[200.0, 400.0, 300.0], 600.1, &[40.0; 3]);
+
+        assert!(
+            below
+                .iter()
+                .zip(above)
+                .all(|(left, right)| (left - right).abs() < 0.2),
+            "column widths jumped across a 0.2 px resize: {below:?}"
+        );
+    }
+
+    #[test]
+    fn fitted_table_columns_keep_outlier_neighbors_ordered() {
+        let desired = [60.0, 70.0, 10_000.0];
+        let widths = fit_column_widths(&desired, 200.0, &[40.0; 3]);
+
+        assert!((widths.iter().sum::<f32>() - 200.0).abs() < 0.1);
+        assert!(widths[2] > widths[1] && widths[1] > widths[0]);
+        assert!(
+            widths
+                .iter()
+                .zip(desired)
+                .all(|(width, wanted)| *width >= 40.0 && *width <= wanted)
+        );
+    }
+
+    #[test]
+    fn fitted_table_columns_keep_total_with_extreme_outlier() {
+        let desired = [60.0, 70.0, 1.0e10];
+        let widths = fit_column_widths(&desired, 200.0, &[40.0; 3]);
+
+        assert!((widths.iter().sum::<f32>() - 200.0).abs() < 0.1);
+        assert!(widths[2] > widths[1] && widths[1] > widths[0]);
+    }
+
+    #[test]
+    fn fitted_table_columns_handle_a_single_column() {
+        assert_eq!(
+            fit_column_widths(&[500.0], 200.0, &[40.0]),
+            vec![200.0]
+        );
+    }
+
+    #[test]
+    fn fitted_table_columns_keep_equal_demands_equal() {
+        let widths = fit_column_widths(&[300.0, 300.0, 300.0], 600.0, &[40.0; 3]);
+
+        assert!((widths[0] - widths[1]).abs() < 0.01);
+        assert!((widths[1] - widths[2]).abs() < 0.01);
+    }
+
+    #[test]
+    fn height_aware_columns_move_space_to_reduce_wrapping() {
+        let baseline = [150.0, 150.0];
+        let desired = [200.0, 500.0];
+        let widths = optimize_fitted_widths(
+            &baseline,
+            &desired,
+            &[40.0; 2],
+            2,
+            |column, width| {
+                let logical_lengths = if column == 0 {
+                    [40.0, 60.0]
+                } else {
+                    [500.0, 700.0]
+                };
+                logical_lengths
+                    .map(|length| (length / width).ceil() * 20.0)
+                    .to_vec()
+            },
+        );
+
+        assert!(widths[0] < baseline[0]);
+        assert!(widths[1] > baseline[1]);
+        assert!(
+            (widths.iter().sum::<f32>() - baseline.iter().sum::<f32>()).abs() < 0.01
+        );
+        assert!(widths[0] >= 40.0 && widths[1] <= desired[1]);
+    }
+
+    #[test]
+    fn height_aware_columns_check_each_eight_pixel_step() {
+        let baseline = [100.0, 100.0];
+        let widths = optimize_fitted_widths(
+            &baseline,
+            &[100.0, 200.0],
+            &[40.0, 40.0],
+            1,
+            |column, width| {
+                let height = if column == 0 {
+                    if width < 76.0 { 100.0 } else { 20.0 }
+                } else if width < 124.0 {
+                    100.0
+                } else {
+                    20.0
+                };
+                vec![height]
+            },
+        );
+
+        assert_eq!(widths, [76.0, 124.0]);
+    }
+
+    #[test]
+    fn height_aware_columns_bound_expensive_cell_measurements() {
+        let measured_cells = std::cell::Cell::new(0usize);
+        let row_count = 1_000;
+        let baseline = [100.0, 100.0];
+        let widths = optimize_fitted_widths(
+            &baseline,
+            &[200.0, 300.0],
+            &[40.0, 40.0],
+            row_count,
+            |_, _| {
+                measured_cells.set(measured_cells.get() + row_count);
+                vec![20.0; row_count]
+            },
+        );
+
+        assert_eq!(widths, baseline);
+        assert!(measured_cells.get() <= 4_096);
+    }
+
+    #[test]
+    fn height_aware_columns_are_deterministic_when_scores_tie() {
+        let baseline = [100.0, 100.0, 100.0];
+        let desired = [300.0, 300.0, 300.0];
+        let measure = |_: usize, _: f32| vec![20.0, 20.0];
+
+        let first = optimize_fitted_widths(&baseline, &desired, &[40.0; 3], 2, measure);
+        let second = optimize_fitted_widths(&baseline, &desired, &[40.0; 3], 2, measure);
+
+        assert_eq!(first, baseline);
+        assert_eq!(second, baseline);
+    }
+
+    #[test]
+    fn height_aware_columns_skip_measurement_when_no_transfer_is_possible() {
+        let compact = optimize_fitted_widths(
+            &[80.0, 120.0],
+            &[80.0, 120.0],
+            &[40.0, 40.0],
+            2,
+            |_, _| panic!("compact natural widths do not need height optimization"),
+        );
+        let all_at_minimum = optimize_fitted_widths(
+            &[60.0, 80.0],
+            &[200.0, 300.0],
+            &[60.0, 80.0],
+            2,
+            |_, _| panic!("columns at their floors cannot donate width"),
+        );
+
+        assert_eq!(compact, [80.0, 120.0]);
+        assert_eq!(all_at_minimum, [60.0, 80.0]);
+    }
+
+    #[test]
+    fn dense_table_overflow_candidates_obey_all_caps() {
+        assert_eq!(overflow_candidates(600.0, 1_000.0), [0.0, 32.0, 64.0, 96.0, 128.0, 160.0]);
+        let proportional = overflow_candidates(200.0, 1_000.0);
+        assert_eq!(&proportional[..2], &[0.0, 32.0]);
+        assert!((proportional[2] - 60.0).abs() < 0.01);
+        assert_eq!(overflow_candidates(600.0, 645.0), [0.0, 32.0, 45.0]);
+    }
+
+    #[test]
+    fn dense_table_reproduces_a_bounded_overflow_knee() {
+        let minimums = [46.0; 13];
+        let mut desired = minimums;
+        desired[12] = 400.0;
+        let baseline = minimums;
+        let widths = optimize_table_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            500.0,
+            1,
+            |column, width| {
+                vec![if column == 12 && width >= 205.0 {
+                    20.0
+                } else if column == 12 {
+                    100.0
+                } else {
+                    20.0
+                }]
+            },
+        );
+
+        assert!((widths.iter().sum::<f32>() - (minimums.iter().sum::<f32>() + 160.0)).abs() < 0.1);
+        assert!(widths[12] >= 205.0);
+    }
+
+    #[test]
+    fn dense_table_selects_the_smallest_candidate_at_the_ninety_percent_knee() {
+        let candidate = |added, row_max_total, cell_total| {
+            (
+                added,
+                vec![added],
+                TableHeightScore {
+                    row_max_total,
+                    cell_total,
+                },
+            )
+        };
+        let candidates = [
+            candidate(0.0, 100.0, 200.0),
+            candidate(32.0, 80.0, 180.0),
+            candidate(64.0, 18.0, 160.0),
+            candidate(96.0, 10.0, 140.0),
+        ];
+
+        assert_eq!(select_overflow_knee(&candidates).unwrap().0, 64.0);
+    }
+
+    #[test]
+    fn dense_table_scores_every_candidate_through_a_dip_and_recovery() {
+        // This intentionally adversarial scorer encodes the selector contract,
+        // not a single cell's monotonic wrapping curve. Production totals can
+        // likewise regress when bounded Phase 1 reallocates multiple columns.
+        let minimums = [46.0; 13];
+        let mut desired = minimums;
+        desired[12] = 400.0;
+        let mut measured_receiver_widths = Vec::new();
+        let widths = optimize_table_widths(
+            &minimums,
+            &desired,
+            &minimums,
+            500.0,
+            1,
+            |column, width| {
+                if column != 12 {
+                    return vec![20.0];
+                }
+                measured_receiver_widths.push(width);
+                let added = width - 46.0;
+                let height = if added >= 159.0 {
+                    20.0
+                } else if added >= 127.0 {
+                    60.0
+                } else if added >= 95.0 {
+                    40.0
+                } else if added >= 63.0 {
+                    90.0
+                } else if added >= 31.0 {
+                    80.0
+                } else {
+                    100.0
+                };
+                vec![height]
+            },
+        );
+
+        for expected in [46.0, 78.0, 110.0, 142.0, 174.0, 206.0] {
+            assert!(
+                measured_receiver_widths
+                    .iter()
+                    .any(|width| (*width - expected).abs() < 0.1),
+                "candidate {expected} was not scored: {measured_receiver_widths:?}"
+            );
+        }
+        assert!((widths.iter().sum::<f32>() - (minimums.iter().sum::<f32>() + 160.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn dense_overflow_only_engages_below_the_header_floor_total() {
+        let minimums = [100.0, 100.0];
+        let desired = [100.0, 400.0];
+        let baseline = minimums;
+        let measure = |column: usize, width: f32| {
+            vec![if column == 0 || (column == 1 && width >= 150.0) {
+                20.0
+            } else {
+                100.0
+            }]
+        };
+
+        let fitting = optimize_table_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            200.0,
+            1,
+            measure,
+        );
+        let dense = optimize_table_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            199.0,
+            1,
+            measure,
+        );
+
+        assert_eq!(fitting, baseline);
+        assert!(dense.iter().sum::<f32>() > 200.0);
+    }
+
+    #[test]
+    fn dense_overflow_keeps_floors_when_extra_width_does_not_reduce_rows() {
+        let minimums = [80.0, 120.0];
+        let desired = [300.0, 400.0];
+        let widths = optimize_table_widths(
+            &minimums,
+            &desired,
+            &minimums,
+            180.0,
+            2,
+            |_, _| vec![20.0; 2],
+        );
+
+        assert_eq!(widths, minimums);
+    }
+
+    #[test]
+    fn dense_overflow_fails_closed_when_a_full_score_exceeds_the_budget() {
+        let minimums = [100.0; 5];
+        let desired = [300.0; 5];
+        let measured_cells = std::cell::Cell::new(0);
+        let widths = optimize_table_widths(
+            &minimums,
+            &desired,
+            &minimums,
+            400.0,
+            1_000,
+            |_, _| {
+                measured_cells.set(measured_cells.get() + 1_000);
+                vec![20.0; 1_000]
+            },
+        );
+
+        assert_eq!(widths, minimums);
+        assert!(measured_cells.get() <= 4_096);
+    }
+
+    #[test]
+    fn height_aware_columns_keep_baseline_without_a_row_height_reduction() {
+        let baseline = [100.0, 100.0];
+        let desired = [200.0, 200.0];
+        let minimums = [40.0, 40.0];
+        let widths = optimize_fitted_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            1,
+            |column, width| {
+                if column == 0 {
+                    vec![if width >= 108.0 { 20.0 } else { 40.0 }]
+                } else {
+                    vec![100.0]
+                }
+            },
+        );
+
+        assert_eq!(widths, baseline);
+    }
+
+    #[test]
+    fn height_aware_columns_cross_one_flat_step_to_reduce_tied_row_maxima() {
+        let baseline = [100.0, 100.0, 100.0];
+        let desired = [200.0, 200.0, 100.0];
+        let minimums = [40.0, 40.0, 40.0];
+        let widths = optimize_fitted_widths(
+            &baseline,
+            &desired,
+            &minimums,
+            1,
+            |column, width| {
+                let height = match column {
+                    0 | 1 if width >= 108.0 => 20.0,
+                    0 | 1 => 100.0,
+                    _ => 20.0,
+                };
+                vec![height]
+            },
+        );
+
+        assert!(widths[0] >= 108.0);
+        assert!(widths[1] >= 108.0);
+        assert!(widths[2] <= 84.0);
+        assert!((widths.iter().sum::<f32>() - baseline.iter().sum::<f32>()).abs() < 0.01);
+    }
+
+    #[test]
+    fn height_aware_cache_invalidates_only_when_its_layout_key_changes() {
+        egui::__run_test_ui(|ui| {
+            let id = egui::Id::new("height-aware-cache");
+            let baseline = [100.0, 100.0];
+            let desired = [200.0, 300.0];
+            let minimums = [40.0, 40.0];
+            let measurements = std::cell::Cell::new(0);
+            let measure = |_: usize, _: f32| {
+                measurements.set(measurements.get() + 1);
+                vec![20.0]
+            };
+
+            let (_, first_changed) = cached_height_aware_widths(
+                ui, id, 1, &baseline, &desired, &minimums, 200.0, 1, measure,
+            );
+            let after_first = measurements.get();
+            let (_, stable_changed) = cached_height_aware_widths(
+                ui, id, 1, &baseline, &desired, &minimums, 200.0, 1, measure,
+            );
+            let after_stable = measurements.get();
+            let (_, new_key_changed) = cached_height_aware_widths(
+                ui, id, 2, &baseline, &desired, &minimums, 200.0, 1, measure,
+            );
+
+            assert!(!first_changed);
+            assert!(!stable_changed);
+            assert!(new_key_changed);
+            assert!(after_first > 0);
+            assert_eq!(after_stable, after_first);
+            assert!(measurements.get() > after_stable);
+        });
+    }
+
+    #[test]
+    fn dense_overflow_cache_does_not_remeasure_a_stable_layout() {
+        egui::__run_test_ui(|ui| {
+            let id = egui::Id::new("dense-overflow-cache");
+            let minimums = [100.0, 100.0];
+            let desired = [200.0, 400.0];
+            let measurements = std::cell::Cell::new(0);
+            let measure = |column: usize, width: f32| {
+                measurements.set(measurements.get() + 1);
+                vec![if column == 0 || (column == 1 && width >= 150.0) {
+                    20.0
+                } else {
+                    100.0
+                }]
+            };
+            // The pane-width-derived budget is deliberately not part of the
+            // layout key (sidebar drags must not re-derive widths), so the
+            // same inputs at a different budget must hit the cache and keep
+            // the first contract instead of remeasuring.
+            let key = table_layout_key(ui, &desired, &minimums, 20.0, 7, 0, 1.0);
+
+            let (dense_widths, _) = cached_height_aware_widths(
+                ui,
+                id,
+                key,
+                &minimums,
+                &desired,
+                &minimums,
+                199.6,
+                1,
+                measure,
+            );
+            let after_first = measurements.get();
+            let (again_widths, changed) = cached_height_aware_widths(
+                ui,
+                id,
+                key,
+                &minimums,
+                &desired,
+                &minimums,
+                160.0,
+                1,
+                measure,
+            );
+
+            assert!(after_first > 0);
+            assert_eq!(measurements.get(), after_first, "cache hit remeasured");
+            assert!(!changed, "stable layout reported a layout change");
+            assert_eq!(dense_widths, again_widths);
+        });
+    }
+
+    #[test]
+    fn table_layout_key_tracks_measurement_inputs() {
+        egui::__run_test_ui(|ui| {
+            let desired = [100.0, 200.0];
+            let minimums = [40.0, 60.0];
+            let key = table_layout_key(ui, &desired, &minimums, 20.0, 7, 0, 1.0);
+
+            assert_ne!(
+                key,
+                table_layout_key(
+                    ui,
+                    &desired,
+                    &[40.0, 61.0],
+                    20.0,
+                    7,
+                    0,
+                    1.0,
+                )
+            );
+            assert_ne!(
+                key,
+                table_layout_key(ui, &desired, &minimums, 20.0, 7, 1, 1.0)
+            );
+            assert_ne!(
+                key,
+                table_layout_key(ui, &desired, &minimums, 20.0, 7, 0, 1.25)
+            );
+        });
+    }
+
+    #[test]
+    fn height_aware_columns_reduce_production_wrapped_row_height() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            let mut style = ui.style().as_ref().clone();
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Monospace, egui::FontId::monospace(16.0));
+            ui.set_style(style);
+            ui.set_width(360.0);
+            let cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = body_line_height(ui, &options);
+            let rows = [
+                [
+                    vec![(Event::Text("field".into()), 0..5)],
+                    vec![(Event::Text(
+                        "A long requirement whose prose should receive enough width to avoid excessive wrapped lines."
+                            .into(),
+                    ), 0..91)],
+                ],
+                [
+                    vec![(Event::Code("limitations".into()), 0..11)],
+                    vec![(Event::Text(
+                        "Record missing data, sampling bias, execution failures, and other interpretation limits."
+                            .into(),
+                    ), 0..88)],
+                ],
+            ];
+            // Natural-width collection is covered separately. Use explicit
+            // demands here so this test remains about the production height
+            // measurement path even under egui's minimal test font setup.
+            let desired = vec![120.0, 700.0];
+            let minimums = [40.0; 2];
+            let baseline = fit_column_widths(&desired, 340.0, &minimums);
+            let measure = |column: usize, width: f32| {
+                rows.iter()
+                    .map(|row| {
+                        table_cell_height(
+                            &row[column],
+                            line_height,
+                            &cache,
+                            ui,
+                            width,
+                            &options,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let optimized = optimize_fitted_widths(
+                &baseline,
+                &desired,
+                &minimums,
+                rows.len(),
+                measure,
+            );
+
+            let mut before_cache = HashMap::new();
+            let before = table_height_score(
+                &baseline,
+                rows.len(),
+                &mut before_cache,
+                usize::MAX,
+                &mut |column, width| {
+                    rows.iter()
+                        .map(|row| {
+                            table_cell_height(
+                                &row[column],
+                                line_height,
+                                &cache,
+                                ui,
+                                width,
+                                &options,
+                            )
+                        })
+                        .collect()
+                },
+            )
+            .unwrap();
+            let mut after_cache = HashMap::new();
+            let after = table_height_score(
+                &optimized,
+                rows.len(),
+                &mut after_cache,
+                usize::MAX,
+                &mut |column, width| {
+                    rows.iter()
+                        .map(|row| {
+                            table_cell_height(
+                                &row[column],
+                                line_height,
+                                &cache,
+                                ui,
+                                width,
+                                &options,
+                            )
+                        })
+                        .collect()
+                },
+            )
+            .unwrap();
+
+            assert!(
+                after.row_max_total < before.row_max_total,
+                "desired={desired:?} baseline={baseline:?} optimized={optimized:?} before={before:?} after={after:?}"
+            );
+            assert!((optimized.iter().sum::<f32>() - baseline.iter().sum::<f32>()).abs() < 0.01);
+        });
+        let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn scrollable_renderer_resumes_only_after_complete_blocks() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(600.0);
+            ui.set_height(300.0);
+            let markdown = concat!(
+                "# Heading\n\n",
+                "Paragraph before.\n\n",
+                "- outer\n  - nested\n  - nested two\n- second\n\n",
+                "> quoted\n> continuation\n\n",
+                "| a | b |\n|---|---|\n| one | two |\n\n",
+                "Final paragraph.\n",
+            );
+            let source_id = egui::Id::new("virtualization-regression");
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+
+            CommonMarkViewerInternal::new().show_scrollable(
+                source_id,
+                ui,
+                &mut cache,
+                &options,
+                markdown,
+                Some(1),
+                None,
+                false,
+                None,
+            );
+            let sc = scroll_cache(&mut cache, &source_id);
+            assert!(sc.page_size.is_some_and(|size| size.y > 0.0));
+            assert!(!sc.split_points.is_empty());
+            for (index, _, _) in &sc.split_points {
+                if let Some((event, _)) = sc.events.get(*index) {
+                    assert!(
+                        !matches!(event, Event::End(_)),
+                        "split resumed at an unmatched End event: {event:?}"
+                    );
+                }
+            }
+            let table_end_index = sc
+                .events
+                .iter()
+                .position(|(event, _)| matches!(event, Event::End(pulldown_cmark::TagEnd::Table)))
+                .expect("fixture contains a table end");
+            assert!(
+                sc.split_points
+                    .iter()
+                    .any(|(index, _, _)| *index == table_end_index + 1),
+                "atomic table must leave a safe resume point after its consumed End event"
+            );
+
+            CommonMarkViewerInternal::new().show_scrollable(
+                source_id,
+                ui,
+                &mut cache,
+                &options,
+                markdown,
+                Some(1),
+                None,
+                false,
+                None,
+            );
+        });
+    }
+
+    #[test]
+    fn registered_markdown_paths_are_detected_as_auto_links() {
+        let hooks = std::collections::HashMap::from([
+            ("docs/guide.md".to_string(), false),
+            ("#section".to_string(), false),
+        ]);
+        assert_eq!(
+            registered_auto_link_ranges("See docs/guide.md, then continue.", &hooks),
+            vec![(4..17, "docs/guide.md".to_string())]
+        );
+    }
+
+    #[test]
+    fn auto_link_detection_respects_filename_boundaries() {
+        let hooks = std::collections::HashMap::from([("guide.md".to_string(), false)]);
+        assert!(registered_auto_link_ranges("not-guide.md.backup", &hooks).is_empty());
+        assert_eq!(
+            registered_auto_link_ranges("(guide.md)", &hooks),
+            vec![(1..9, "guide.md".to_string())]
+        );
+    }
+
+    #[test]
+    fn inline_code_can_match_an_exact_registered_markdown_path() {
+        let hooks = std::collections::HashMap::from([
+            ("docs/guide.md".to_string(), false),
+            ("#section".to_string(), false),
+        ]);
+        assert_eq!(
+            registered_exact_auto_link("docs/guide.md", &hooks),
+            Some("docs/guide.md".to_string())
+        );
+        assert_eq!(registered_exact_auto_link("#section", &hooks), None);
+        assert_eq!(registered_exact_auto_link("guide.md", &hooks), None);
     }
 
     #[test]
@@ -2660,14 +5271,14 @@ mod tests {
     }
 
     #[test]
-    fn production_duplicate_shortcode_headings_use_raw_occurrence_keys() {
+    fn production_duplicate_shortcode_headings_use_source_keys() {
         // Run complete heading start/text/end production events twice against one cache.
         egui::__run_test_ui(|ui| {
             let mut renderer = CommonMarkViewerInternal::new();
             let mut cache = CommonMarkCache::default();
             let options = CommonMarkOptions::default();
 
-            for _ in 0..2 {
+            for source_start in [0, 20] {
                 renderer.start_tag(
                     ui,
                     Tag::Heading {
@@ -2676,6 +5287,7 @@ mod tests {
                         classes: Vec::new(),
                         attrs: Vec::new(),
                     },
+                    source_start,
                     &options,
                 );
                 renderer.event(
@@ -2695,11 +5307,99 @@ mod tests {
                 );
             }
 
-            assert!(cache.get_header_position("pin :pushpin:").is_some());
-            assert!(cache.get_header_position("pin :pushpin:#1").is_some());
-            assert!(cache.get_header_position("pin 📌").is_none());
-            assert!(cache.get_header_position("pin 📌#1").is_none());
+            assert!(cache.get_header_position("heading-source:0").is_some());
+            assert!(cache.get_header_position("heading-source:20").is_some());
         });
+    }
+
+    #[test]
+    fn sliced_heading_position_includes_the_slice_origin() {
+        assert_eq!(content_relative_y(50.0, -229.0, 0.0), 279.0);
+        assert_eq!(content_relative_y(120.0, 80.0, 1_976.0), 2_016.0);
+    }
+
+    #[test]
+    fn sliced_search_position_includes_origin_and_excludes_chrome() {
+        let mut cache = CommonMarkCache::default();
+
+        record_active_search_content_y(&mut cache, 120.0, 80.0, 1_976.0);
+
+        assert_eq!(cache.active_search_y(), Some(2_016.0));
+    }
+
+    #[test]
+    fn nested_navigation_positions_keep_the_root_render_origin() {
+        let markdown = concat!(
+            "Paragraph one.\n\n",
+            "Paragraph two.\n\n",
+            "Paragraph three.\n\n",
+            "Paragraph four.\n\n",
+            "> ## Nested heading\n",
+            "> quoted text\n\n",
+            "| Key | Value |\n",
+            "|---|---|\n",
+            "| row | ACTIVE_TABLE_MATCH |\n",
+        );
+        let active_start = markdown.find("ACTIVE_TABLE_MATCH").unwrap();
+        let active_range = active_start..active_start + "ACTIVE_TABLE_MATCH".len();
+        let heading_source_start = crate::parsers::latex_delimiters::parse_events(markdown, false, false)
+            .into_iter()
+            .find_map(|(event, range)| {
+                matches!(event, Event::Start(Tag::Heading { .. })).then_some(range.start)
+            })
+            .expect("fixture contains a nested heading");
+        let heading_key = crate::header_position_key(heading_source_start);
+        let mut cache = CommonMarkCache::default();
+        cache.set_search_ranges(vec![active_range.clone()]);
+        cache.set_active_search_range(Some(active_range));
+        let ctx = egui::Context::default();
+        let mut minimum_nested_y = 0.0;
+
+        ctx.begin_pass(Default::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            ui.set_width(400.0);
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            minimum_nested_y = line_height * 4.0;
+            CommonMarkViewerInternal::new().show(
+                ui,
+                &mut cache,
+                &CommonMarkOptions::default(),
+                markdown,
+                None,
+            );
+        });
+        let _ = ctx.end_pass();
+
+        assert!(
+            cache
+                .get_header_position(&heading_key)
+                .is_some_and(|y| y > minimum_nested_y),
+            "nested heading lost the preceding document height"
+        );
+        assert!(
+            cache
+                .active_search_y()
+                .is_some_and(|y| y > minimum_nested_y),
+            "table-cell search match lost the preceding document height"
+        );
+    }
+
+    #[test]
+    fn markdown_table_identity_uses_document_and_source_position() {
+        let document = Id::new("document-a");
+
+        assert_eq!(
+            markdown_table_id(document, 120),
+            markdown_table_id(document, 120)
+        );
+        assert_ne!(
+            markdown_table_id(document, 120),
+            markdown_table_id(document, 240)
+        );
+        assert_ne!(
+            markdown_table_id(document, 120),
+            markdown_table_id(Id::new("document-b"), 120)
+        );
     }
 
     #[test]

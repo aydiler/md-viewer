@@ -50,8 +50,12 @@
       <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/light-mode.png</image>
     </screenshot>
     <screenshot>
-      <caption>JSON syntax highlighting and outline navigation in light mode</caption>
-      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/syntax-highlighting-light.png</image>
+      <caption>LaTeX math rendered inline via typst</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/math-rendering.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>In-document search with inline highlights</caption>
+      <image>https://raw.githubusercontent.com/aydiler/md-viewer/main/screenshots/search.png</image>
     </screenshot>
     <screenshot>
       <caption>Tables with inline code and hyperlinks</caption>
@@ -80,6 +84,21 @@
   </provides>
 
   <releases>
+    <release version="0.2.0" date="2026-09-04">
+      <description>
+        <p>Rendering and table overhaul:</p>
+        <ul>
+          <li>Viewport-clipped rendering restored for long documents</li>
+          <li>Table columns sized from content, long cell text wraps instead of scrolling away</li>
+          <li>Tables follow the Full Width setting together with prose</li>
+          <li>YAML frontmatter renders as a key/value table</li>
+          <li>Formula size adjustable independently of UI zoom</li>
+          <li>Selection highlight and link colors customizable</li>
+          <li>Font fallback discovered from the platform instead of hardcoded family names</li>
+          <li>Local Markdown references, including bare and percent-encoded paths, open in the viewer</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.3" date="2026-05-15">
       <description>
         <p>Distribution improvements:</p>

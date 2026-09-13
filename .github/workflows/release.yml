@@ -42,6 +42,65 @@ jobs:
         # — use the local fork via [patch.crates-io] and are unaffected).
         run: bash scripts/check-fork-publishable.sh
 
+  check-crates-token:
+    # Deliberately its own job, gating `publish-crates` only.
+    #
+    # This check first lived in `validate`, which every other job needs — so a
+    # dead token blocked the snap, both AUR packages, the GitHub Release and
+    # the binaries as well. Losing four channels to one expired credential is
+    # worse than the silent crates.io gap the check exists to prevent.
+    #
+    # Here it still fails in about a second rather than twenty minutes in, and
+    # the run still goes red under an obvious name, but the other channels
+    # publish.
+    name: crates.io token is valid
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+        - name: crates.io token is present and well formed
+          # This job previously called `GET /api/v1/me` with the token in an
+          # `Authorization` header. That check could never pass. The endpoint is
+          # session-only, and crates.io answers *any* API token with
+          #
+          #   403 {"detail":"this action can only be performed on the crates.io website"}
+          #
+          # so a perfectly valid token failed the gate and `publish-crates` was
+          # skipped — manufacturing exactly the silent crates.io gap this job
+          # exists to prevent. It was added in #135 and never exercised against a
+          # working token, because the token was already dead when it landed.
+          #
+          # crates.io publishes no read-only endpoint that authenticates with an
+          # API token, so there is nothing to probe: the only proof of validity
+          # is a publish. What is left is a shape check, which still catches the
+          # two failure modes that actually occur — an unset secret and a paste
+          # that lost characters — in about a second, before anything is built.
+          #
+          # A genuinely revoked token now fails in `publish-crates`, which since
+          # #151 gates nothing else: the snap, both AUR packages and the GitHub
+          # Release publish regardless, and the run still goes red.
+          #
+          # Historical note: v0.1.16 and v0.1.17 really did fail with
+          # `403 Forbidden: authentication failed` — but from `cargo publish`,
+          # which is genuinely token-authenticated. That diagnosis stands; only
+          # the probe built to catch it was wrong.
+          env:
+            CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          run: |
+            if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+              echo "::notice::CARGO_REGISTRY_TOKEN is unset — crates.io publish will be skipped."
+              exit 0
+            fi
+            # Shape only. See the comment above for why there is nothing to probe.
+            if printf '%s' "${CARGO_REGISTRY_TOKEN}" | grep -qE '^cio[A-Za-z0-9]{32}$'; then
+              echo "CARGO_REGISTRY_TOKEN is present and well formed; validity is proven by publish-crates."
+            else
+              LEN=$(printf '%s' "${CARGO_REGISTRY_TOKEN}" | wc -c)
+              echo "::error::CARGO_REGISTRY_TOKEN is not the shape of a crates.io token (expected 'cio' followed by 32 alphanumerics, got ${LEN} characters). Re-copy it from https://crates.io/settings/tokens — a truncated paste looks exactly like this."
+              exit 1
+            fi
+
   build:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
@@ -101,7 +160,16 @@ jobs:
 
       - name: Generate changelog
         if: runner.os == 'Linux'
-        run: git-cliff --latest --strip header > RELEASE_NOTES.md
+        # From CHANGELOG.md, not `git-cliff --latest`. git-cliff parses
+        # conventional commits and this history does not conform: v0.1.17's
+        # release page carried eleven lines while its CHANGELOG entry was a page
+        # of prose. The Release page is the only changelog most users ever see —
+        # snap and AUR users never open the repository. Falls back to git-cliff
+        # when the tagged version has no section.
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          bash scripts/release-notes.sh "$VERSION" > RELEASE_NOTES.md
+          echo "release notes: $(wc -l < RELEASE_NOTES.md) lines"
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
@@ -138,7 +206,7 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [validate, build]
+    needs: [validate, build, check-crates-token]
     timeout-minutes: 20
     permissions:
       contents: read

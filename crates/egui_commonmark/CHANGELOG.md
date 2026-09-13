@@ -1,5 +1,41 @@
 # egui_commonmark changelog
 
+## Unreleased
+
+### Fixed
+- A stored scroll offset that starts its window beyond the measured content extent is clamped before viewport slice selection, so the frame paints the document tail instead of nothing. egui's `show_viewport` computes the viewport from the stored offset unclamped, and the scroll-overshoot clamp previously ran only after `show_viewport` returned — correcting the *next* frame, which made a document that shrank under a deep scroll (async image decode, font fallback) blank for exactly one frame (#140). The guard fires only when the offset outruns the content outright; near-bottom offsets stay untouched so normal end-of-document scrolling never fights the scrollbar allowance, and egui's own post-layout clamp remains. A regression test drives the critical frame in-process and asserts visible text in the document clip.
+- List markers sit on the item text's lowercase optical centre. The dot was ~1.7 px high at a 16 px body with a 1.5× line height, and the ordered marker's alignment was a coincidence of two compensating errors: the marker box resolved its line-height multiplier against `text_style_height` (the font's natural ≈1.2× height, so 27.6 px where the text's line box is 24 px), and the marker centred itself at its own box's `bottom − raw/2` — a tuned compensation for a box offset, not a derivation from text metrics. egui anchors a wrapping label's galley at the cursor's top edge and sizes its first row from the cursor's height at label time, so no marker position computed before the item text exists can be exact. `start_item` now reserves the marker's slot and paints it right before the item's first text is laid out, deriving the baseline from a reference galley laid out exactly as the label will be; the dot centres on `baseline − x-height/2` from the `x` glyph's own metrics, and the ordered number stays baseline-aligned via its own glyph metrics. Items whose first content is not text (task checkboxes, code blocks, nested lists) are covered by flush points at item start, item end and nested-item start. The immediate `bullet_point`/`bullet_point_hollow`/`number_point` entries keep their signatures for the proc-macro path, which has no render state to defer with.
+
+## 0.28.0
+
+### Added
+- `render_frontmatter` option: a leading YAML frontmatter block renders as a flat two-column key/value table instead of a raw blob (#128).
+- `math_scale` option: rendered formulas scale independently of the host's UI zoom; the math raster cache key includes the quantized size (#130).
+- `observed_image_size()` accessor on `CommonMarkCache`, so callers can size layout around images that have finished loading (#129).
+- Platform script fallback via Fontique: generic and ISO 15924 fallbacks are requested from CoreText, fontconfig and DirectWrite for the system locale, with per-face glyph coverage verified and true bold faces paired with each regular fallback. No family names are hardcoded (#106).
+- Fontconfig CJK fallback for the Typst math font collection, so CJK inside formulas renders real glyphs.
+- Process-wide math worker pool sized from `math_concurrency()`, replacing one OS thread per formula; queued jobs are bounded at 64 and retried on a later repaint.
+
+### Fixed
+- Viewport-clipped rendering is safe again for long documents: rendering resumes only after complete top-level blocks, split coordinates are document-relative, and the visible slice sits in an absolute child rectangle so skipped height cannot inflate the document extent (#93).
+- Viewport slices reproduce the bootstrap's layout exactly — same content column, a zero-height slice rect that grows with its content, and line state reset keyed off the slice's first event rather than event 0. Previously a document with a long table stopped scrolling at the table's end, painted blank below it, and shifted the table right.
+- A table reserves its own computed height. `egui_extras` reserves skipped-row height only once it reaches the first visible row, so a table entirely above the viewport reserved nothing and everything below it laid out too high.
+- Fitted table columns blend max-min fairness with proportional unmet content demand instead of capping every over-wide column to the same value, and reserve each column header's widest word as a floor so short labels are not split mid-word (#112).
+- Long table cell text wraps: columns are sized from natural content widths, wide columns are fitted into the available viewport while narrow ones are preserved, and heterogeneous row heights are recomputed from the current widths (#71).
+- Table rows reserve image height, using the observed size where known and a bounded estimate before load (#129).
+- `observe_image_size` marks layout dirty on the first write for a URI. `HashMap::insert` returns `None` for a new key, so the initial size was recorded without invalidating layout.
+- Markdown and HTML tables honour `table_max_width` in both directions; cached resizable column widths reset when the layout bound changes, while a stable bound preserves manual resizing.
+- Tall formulas no longer clip in table cells: Typst vector frames are expanded before rasterization to keep glyph ink outside the nominal bounds, and the measured inline height is cached.
+- Bare vertical bars inside LaTeX-style math pairs are protected before CommonMark table parsing, so `\(\operatorname{EW}[|\Delta OI|]\)` is no longer split into extra table cells.
+- Heading positions are keyed by source byte offset, keeping duplicate and emoji-shortcode headings distinct without depending on rendered title text.
+- Saturated math render queues are reported and retried on a prompt repaint instead of silently dropping the formula.
+- `commonmark_str!` resolves relative paths against the invoking crate's `CARGO_MANIFEST_DIR` first, and no longer bakes the proc-macro crate's own manifest path into every build.
+- MIME SVG rasters are capped at 64 MiB with single-pass LRU eviction; SVG options and system-font scanning are deferred to the first MIME SVG rendered.
+- Data URLs above 16 MiB are rejected before parsing, the decoded cache is bounded at 64 MiB including key memory, decoding uses two reusable workers behind a four-job queue, and cache keys share one `Arc<str>` with their job.
+
+### Changed
+- MSRV is Rust 1.89, required by the Typst 0.14.2 dependency graph.
+
 ## 0.27.0
 
 ### Added

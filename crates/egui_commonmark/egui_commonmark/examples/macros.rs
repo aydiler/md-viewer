@@ -5,7 +5,7 @@
 //! is system theme. `cargo r --example macro --features macros,better_syntax_highlighting -- dark`
 
 use eframe::egui;
-use egui_commonmark::*;
+use egui_commonmark_extended::*;
 
 struct App {
     cache: CommonMarkCache,

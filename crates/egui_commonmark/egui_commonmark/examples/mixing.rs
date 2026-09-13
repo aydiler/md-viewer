@@ -10,7 +10,7 @@ macro_rules! m {
         }
         #[cfg(not(feature = "macros"))]
         {
-            egui_commonmark::CommonMarkViewer::new().show($ui, &mut $cache, $a);
+            egui_commonmark_extended::CommonMarkViewer::new().show($ui, &mut $cache, $a);
         }
         )*
     };
@@ -25,7 +25,7 @@ const WINDOW_NAME: &str = "Mixed egui and markdown (normal version)";
 // Ensure that there are no newlines that should not be present when mixing markdown
 // and egui widgets.
 fn main() -> eframe::Result<()> {
-    let mut cache = egui_commonmark::CommonMarkCache::default();
+    let mut cache = egui_commonmark_extended::CommonMarkCache::default();
 
     eframe::run_simple_native(WINDOW_NAME, Default::default(), move |ctx, _frame| {
         egui::CentralPanel::default().show(ctx, |ui| {

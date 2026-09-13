@@ -2,7 +2,7 @@
 //! is system theme. `cargo r --example link_hooks -- dark`
 
 use eframe::egui;
-use egui_commonmark::*;
+use egui_commonmark_extended::*;
 
 struct App {
     cache: CommonMarkCache,

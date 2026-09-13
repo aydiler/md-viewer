@@ -4,19 +4,21 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, IsTerminal};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
 use egui_commonmark_extended::{
-    CommonMarkCache, CommonMarkViewer, EditBlockKind, EditRegionConfig, EditSessionConfig,
-    SessionBlock,
+    header_position_key, CommonMarkCache, CommonMarkViewer, EditBlockKind, EditRegionConfig,
+    EditSessionConfig, SessionBlock,
 };
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
@@ -24,7 +26,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 mod system_fonts;
-use system_fonts::setup_fonts;
+use system_fonts::{scan_pickable_font_families, setup_fonts, FontPreset, TextSizeClass};
 
 #[cfg(feature = "mcp")]
 use egui_mcp_bridge::{McpBridge, McpUiExt};
@@ -35,14 +37,12 @@ const APP_KEY: &str = "md-viewer-state";
 const RECENT_FILES_CAP: usize = 20;
 const RECENT_SHOWN: usize = 6;
 
-/// Compiled regex for parsing markdown headers (lazy, compiled once)
-static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.+)$").unwrap());
-
-/// Compiled regex for parsing markdown links (lazy, compiled once)
-static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
-
 const MAX_WATCHER_RETRIES: u32 = 3;
 const FLASH_DURATION_MS: u64 = 600;
+
+fn next_watcher_retry(current: u32) -> Option<u32> {
+    (current < MAX_WATCHER_RETRIES).then(|| current + 1)
+}
 
 // Optimal widths for initial window sizing (based on typography research)
 // Content: 600px optimal for 55-75 CPL readability
@@ -54,6 +54,10 @@ const EXPLORER_DEFAULT_WIDTH: f32 = 216.0; // 200 + 16 margins
 const OUTLINE_DEFAULT_WIDTH: f32 = 208.0; // 200 + 8 margins
 const PANEL_SEPARATORS: f32 = 16.0;
 const OPTIMAL_WINDOW_HEIGHT: f32 = 750.0;
+const SIDEBAR_MIN_WIDTH: f32 = 70.0;
+const SIDEBAR_RESIZE_GRAB_RADIUS: f32 = 3.0;
+const EXPLORER_RIGHT_RESIZE_GUTTER: i8 = 12;
+const CONTENT_RIGHT_RESIZE_GUTTER: i8 = 10;
 
 // Keyboard document scroll deltas are centralized so shortcut wiring and tests
 // share the same line/page behavior.
@@ -287,6 +291,290 @@ fn content_default_width(full_width_content: bool) -> Option<usize> {
     }
 }
 
+fn content_width_limit(full_width_content: bool, available_width: f32) -> usize {
+    let available_width = available_width.max(0.0) as usize;
+    content_default_width(full_width_content)
+        .map_or(available_width, |preferred| preferred.min(available_width))
+}
+
+/// Draw a visible affordance for a resizable sidebar's drag strip.
+///
+/// egui's `SidePanel` resize interaction paints nothing — the only hint is a
+/// cursor change on hover — and the strip (`±SIDEBAR_RESIZE_GRAB_RADIUS`
+/// around the panel border) sits over the content pane's edge, where users
+/// reach for table column separators and scrollbars. Pressing there grabs the
+/// sidebar resizer instead of the content, and the reflow reads as "the table
+/// slid behind the sidebar". A line that brightens on hover and while
+/// resizing makes the grab zone discoverable.
+fn paint_sidebar_resize_affordance(
+    ctx: &egui::Context,
+    boundary_x: f32,
+    y_range: egui::Rangef,
+    panel_id: egui::Id,
+) {
+    // egui reads this same response at the top of `SidePanel::show`, so one
+    // frame of latency is already inherent to hover feedback there.
+    let Some(resize_response) = ctx.read_response(panel_id.with("__resize")) else {
+        return;
+    };
+    let resizing = resize_response.dragged();
+    let hover = resize_response.hovered();
+    if !hover && !resizing {
+        return;
+    }
+    let visuals = &ctx.style().visuals;
+    let stroke = if resizing {
+        visuals.widgets.active.bg_stroke
+    } else {
+        visuals.widgets.hovered.bg_stroke
+    };
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new(panel_id).with("resize_affordance"),
+    ));
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(boundary_x - 1.0, y_range.min),
+            egui::pos2(boundary_x + 1.0, y_range.max),
+        ),
+        0.0,
+        stroke.color,
+    );
+}
+
+/// Check whether the desktop portal exposes the interface used by rfd's
+/// Linux folder picker. Calling rfd without this interface fails like a user
+/// cancellation, so checking first lets us distinguish that case and use a
+/// local fallback without opening a second dialog after a real cancellation.
+#[cfg(target_os = "linux")]
+fn portal_file_chooser_available() -> bool {
+    Command::new("gdbus")
+        .args([
+            "introspect",
+            "--session",
+            "--dest",
+            "org.freedesktop.portal.Desktop",
+            "--object-path",
+            "/org/freedesktop/portal/desktop",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|output| {
+            output.status.success() && portal_introspection_has_file_chooser(&output.stdout)
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn portal_introspection_has_file_chooser(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout).contains("org.freedesktop.portal.FileChooser")
+}
+
+#[cfg(target_os = "linux")]
+fn path_from_picker_output(stdout: Vec<u8>) -> Option<PathBuf> {
+    if stdout.is_empty() {
+        None
+    } else {
+        // Python writes os.fsencode(path), so preserve arbitrary Unix path
+        // bytes rather than requiring the selected directory to be UTF-8.
+        Some(PathBuf::from(OsString::from_vec(stdout)))
+    }
+}
+
+/// Use Python's Tk binding as a fallback file picker on Linux desktops where
+/// xdg-desktop-portal is not available.
+#[cfg(target_os = "linux")]
+fn pick_file_with_tkinter(initial_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    const SCRIPT: &str = r#"
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+root = tk.Tk()
+root.withdraw()
+try:
+    options = {
+        "title": "Open Markdown File",
+        "parent": root,
+        "filetypes": [
+            ("Markdown", ("*.md", "*.markdown")),
+            ("Text", "*.txt"),
+            ("All Files", "*"),
+        ],
+    }
+    if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+        options["initialdir"] = sys.argv[1]
+    selected = filedialog.askopenfilename(**options)
+    if selected:
+        sys.stdout.buffer.write(os.fsencode(selected))
+finally:
+    root.destroy()
+"#;
+
+    let mut command = Command::new("python3");
+    command
+        .arg("-c")
+        .arg(SCRIPT)
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+    if let Some(directory) = initial_dir.filter(|path| path.is_dir()) {
+        command.arg(directory);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Tkinter file picker could not start: {error}"))?;
+
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if details.is_empty() {
+            "Tkinter file picker exited with an error".to_string()
+        } else {
+            format!("Tkinter file picker failed: {details}")
+        });
+    }
+
+    let selected = path_from_picker_output(output.stdout);
+    if let Some(path) = &selected {
+        if !path.is_file() {
+            return Err(format!(
+                "File picker returned a file that does not exist: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(selected)
+}
+
+fn pick_file(initial_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .add_filter("Text", &["txt"])
+        .add_filter("All Files", &["*"]);
+    if let Some(directory) = initial_dir.filter(|path| path.is_dir()) {
+        dialog = dialog.set_directory(directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if portal_file_chooser_available() {
+            return Ok(dialog.pick_file());
+        }
+
+        log::info!("XDG Desktop Portal FileChooser is unavailable; using the Tkinter file picker");
+        pick_file_with_tkinter(initial_dir)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(dialog.pick_file())
+    }
+}
+
+/// Use Python's Tk binding as a fallback folder picker on Linux desktops where
+/// xdg-desktop-portal is not available. The initial directory is passed as a
+/// process argument, never interpolated into Python.
+#[cfg(target_os = "linux")]
+fn pick_folder_with_tkinter(initial_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    const SCRIPT: &str = r#"
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+root = tk.Tk()
+root.withdraw()
+try:
+    options = {"title": "Open Folder", "mustexist": True, "parent": root}
+    if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+        options["initialdir"] = sys.argv[1]
+    selected = filedialog.askdirectory(**options)
+    if selected:
+        sys.stdout.buffer.write(os.fsencode(selected))
+finally:
+    root.destroy()
+"#;
+
+    let mut command = Command::new("python3");
+    command
+        .arg("-c")
+        .arg(SCRIPT)
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+    if let Some(directory) = initial_dir.filter(|path| path.is_dir()) {
+        command.arg(directory);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Tkinter folder picker could not start: {error}"))?;
+
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if details.is_empty() {
+            "Tkinter folder picker exited with an error".to_string()
+        } else {
+            format!("Tkinter folder picker failed: {details}")
+        });
+    }
+
+    let selected = path_from_picker_output(output.stdout);
+    if let Some(path) = &selected {
+        if !path.is_dir() {
+            return Err(format!(
+                "Folder picker returned a directory that does not exist: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(selected)
+}
+
+fn pick_folder(initial_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(directory) = initial_dir.filter(|path| path.is_dir()) {
+        dialog = dialog.set_directory(directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if portal_file_chooser_available() {
+            return Ok(dialog.pick_folder());
+        }
+
+        log::info!(
+            "XDG Desktop Portal FileChooser is unavailable; using the Tkinter folder picker"
+        );
+        pick_folder_with_tkinter(initial_dir)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(dialog.pick_folder())
+    }
+}
+
+/// Display-zoom bounds and step, shared by keyboard, menu, and Ctrl+wheel
+/// zooming. Steps are multiplicative so the perceived change stays uniform
+/// across the whole range (like browsers and the lightbox already do).
+const ZOOM_MIN: f32 = 0.5;
+const ZOOM_MAX: f32 = 3.0;
+const ZOOM_STEP: f32 = 1.25;
+
+/// One multiplicative zoom step applied to `current`, clamped to the app's
+/// zoom bounds. Neutral, non-finite, or non-positive factors are no-ops —
+/// egui reports `zoom_delta() == 1.0` on frames without a zoom gesture.
+fn zoomed(current: f32, factor: f32) -> f32 {
+    if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 1e-3 {
+        return current.clamp(ZOOM_MIN, ZOOM_MAX);
+    }
+    (current * factor).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
 /// A recently opened file, for the welcome page's "Recent" list.
 #[derive(Serialize, Deserialize, Clone)]
 struct RecentEntry {
@@ -343,6 +631,26 @@ struct PersistedState {
     zoom_level: Option<f32>,
     show_outline: Option<bool>,
     full_width_content: Option<bool>,
+    math_scale: Option<f32>,
+    /// Selection/highlight background color override, stored as premultiplied
+    /// RGBA bytes (`Color32`'s canonical representation — see `Color32::r/g/b/a`
+    /// and `Color32::from_rgba_premultiplied`). `None` = current theme default.
+    highlight_color: Option<[u8; 4]>,
+    /// Hyperlink text color override, same premultiplied-RGBA encoding as
+    /// `highlight_color`. `None` = current theme default.
+    link_color: Option<[u8; 4]>,
+    /// Preferred document body/heading font family name. `None` means use the
+    /// auto-detected system sans-serif (see `system_fonts::setup_fonts`).
+    selected_font_family: Option<String>,
+    /// Disable egui's pixel-snapping for glyph positions (see
+    /// `TessellationOptions::round_text_to_pixels`). Off by default, matching
+    /// today's behavior; `Some(true)` trades a touch of sharpness for glyphs
+    /// that no longer look unevenly spaced at fractional zoom levels.
+    smooth_text_rendering: Option<bool>,
+    /// Which markdown viewer's font choices lead the font chains.
+    font_preset: Option<FontPreset>,
+    /// Shared text-size class; `None` keeps the Normal default.
+    text_size_class: Option<TextSizeClass>,
     open_tabs: Option<Vec<PathBuf>>,
     active_tab: Option<usize>,
     // File explorer state
@@ -350,21 +658,16 @@ struct PersistedState {
     explorer_root: Option<PathBuf>,
     expanded_dirs: Option<Vec<PathBuf>>,
     explorer_sort_order: Option<SortOrder>,
+    explorer_width: Option<f32>,
+    outline_width: Option<f32>,
     recent_files: Option<Vec<RecentEntry>>,
 }
 
-/// Build the composite cache key for a header position lookup. Combines the
-/// normalized (lowercased) title with the occurrence index so duplicate-titled
-/// headers map to distinct entries in `CommonMarkCache::header_positions`.
-/// Both the parser (which assigns `nth_with_same_text` to each `Header`) and
-/// the renderer (which records positions while painting) use this function so
-/// keys agree across the read/write boundary.
-pub fn header_position_key(normalized_title: &str, nth_with_same_text: usize) -> String {
-    if nth_with_same_text == 0 {
-        normalized_title.to_string()
-    } else {
-        format!("{normalized_title}#{nth_with_same_text}")
-    }
+fn restored_sidebar_width(width: Option<f32>, default: f32) -> f32 {
+    width
+        .filter(|width| width.is_finite())
+        .map(|width| width.max(SIDEBAR_MIN_WIDTH))
+        .unwrap_or(default)
 }
 
 /// Represents a markdown header for the outline
@@ -372,15 +675,9 @@ pub fn header_position_key(normalized_title: &str, nth_with_same_text: usize) ->
 struct Header {
     level: u8,
     title: String,
-    /// Pre-computed truncated display title for outline sidebar
-    display_title: String,
-    /// Pre-computed lowercase key for header position cache lookups
-    normalized_title: String,
-    /// Occurrence index among headers with the same `normalized_title`.
-    /// The first `## Installation` is 0, the second is 1, etc. Combined
-    /// with `normalized_title` into the composite cache key so duplicates
-    /// scroll to the correct (different) y positions.
-    nth_with_same_text: usize,
+    /// Byte offset of the heading's Start event. The renderer records the
+    /// position under the same source-stable key, independent of formatting.
+    source_start: usize,
     line_number: usize,
 }
 
@@ -468,7 +765,8 @@ struct SearchState {
 /// Action from file explorer interaction
 #[derive(Default)]
 struct ExplorerAction {
-    /// File to open in a new tab (left-click)
+    /// File selected with the primary mouse button. The caller decides whether
+    /// it replaces the active document or opens a tab from the Ctrl modifier.
     file_to_open: Option<PathBuf>,
     /// File to close (middle-click on open file)
     file_to_close: Option<PathBuf>,
@@ -503,13 +801,11 @@ enum FileTreeNode {
     File {
         path: PathBuf,
         name: String,
-        display_name: String,
         modified: Option<std::time::SystemTime>,
     },
     Directory {
         path: PathBuf,
         name: String,
-        display_name: String,
         modified: Option<std::time::SystemTime>,
         /// None = not yet loaded, Some = loaded (may be empty)
         children: Option<Vec<FileTreeNode>>,
@@ -536,6 +832,12 @@ impl FileTreeNode {
     }
 }
 
+struct ExplorerScanResult {
+    root: PathBuf,
+    sort_order: SortOrder,
+    tree: Vec<FileTreeNode>,
+}
+
 /// File explorer state
 #[derive(Default)]
 struct FileExplorer {
@@ -543,8 +845,8 @@ struct FileExplorer {
     tree: Vec<FileTreeNode>,
     expanded_dirs: HashSet<PathBuf>,
     sort_order: SortOrder,
-    /// Receiver for async directory scan results (GVFS paths scan in background)
-    pending_scan: Option<Receiver<Vec<FileTreeNode>>>,
+    /// Receiver for asynchronous root-directory scan results.
+    pending_scan: Option<Receiver<ExplorerScanResult>>,
 }
 
 impl FileExplorer {
@@ -570,20 +872,16 @@ impl FileExplorer {
             if entry_path.is_dir() {
                 // Show all directories - let users expand what they want
                 // (Avoids O(n×m) scanning during initial directory scan)
-                let display_name = truncate_display_name(&name, 22);
                 nodes.push(FileTreeNode::Directory {
                     path: entry_path,
                     name,
-                    display_name,
                     modified,
                     children: None, // Lazy - not loaded yet
                 });
             } else if Self::is_markdown_file(&entry_path) {
-                let display_name = truncate_display_name(&name, 25);
                 nodes.push(FileTreeNode::File {
                     path: entry_path,
                     name,
-                    display_name,
                     modified,
                 });
             }
@@ -638,8 +936,7 @@ impl FileExplorer {
             .unwrap_or(false)
     }
 
-    /// Set root directory and rescan (shallow).
-    /// For GVFS paths, scan runs in a background thread to avoid blocking the UI.
+    /// Set root directory and start a shallow background scan.
     fn set_root(&mut self, path: PathBuf) {
         // Convert empty path to current directory
         let path = if path.as_os_str().is_empty() {
@@ -648,61 +945,130 @@ impl FileExplorer {
             path
         };
         self.root = Some(path.clone());
-        if is_gvfs_path(&path) {
-            // Scan in background thread — tree populates when ready
-            let sort_order = self.sort_order;
-            let (tx, rx) = mpsc::channel();
-            std::thread::Builder::new()
-                .name("gvfs-scan".into())
-                .spawn(move || {
-                    let tree = Self::scan_directory_shallow(&path, sort_order);
-                    let _ = tx.send(tree);
-                })
-                .expect("failed to spawn GVFS scan thread");
-            self.pending_scan = Some(rx);
-        } else {
+        if !self.start_root_scan(path.clone(), "explorer-scan") {
             self.tree = Self::scan_directory_shallow(&path, self.sort_order);
+            Self::restore_expanded_children(&mut self.tree, &self.expanded_dirs, self.sort_order);
+        }
+    }
+
+    fn start_root_scan(&mut self, path: PathBuf, thread_name: &str) -> bool {
+        let sort_order = self.sort_order;
+        let expanded_dirs = self.expanded_dirs.clone();
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name(thread_name.to_owned())
+            .spawn(move || {
+                let mut tree = Self::scan_directory_shallow(&path, sort_order);
+                Self::restore_expanded_children(&mut tree, &expanded_dirs, sort_order);
+                let _ = tx.send(ExplorerScanResult {
+                    root: path,
+                    sort_order,
+                    tree,
+                });
+            });
+        if spawned.is_ok() {
+            self.pending_scan = Some(rx);
+            true
+        } else {
+            false
         }
     }
 
     /// Check if a background scan completed and apply results
     fn poll_pending_scan(&mut self) -> bool {
-        if let Some(rx) = &self.pending_scan {
-            if let Ok(tree) = rx.try_recv() {
-                self.tree = tree;
+        let received = self.pending_scan.as_ref().map(Receiver::try_recv);
+        let mut result = match received {
+            Some(Ok(result)) => result,
+            Some(Err(TryRecvError::Empty)) | None => return false,
+            Some(Err(TryRecvError::Disconnected)) => {
                 self.pending_scan = None;
-                return true;
+                return false;
             }
+        };
+        self.pending_scan = None;
+        if self.root.as_deref() != Some(result.root.as_path()) {
+            return false;
         }
-        false
+        if result.sort_order != self.sort_order {
+            Self::resort_tree_recursive(&mut result.tree, self.sort_order);
+        }
+        // Expansion can change while the worker is running. Reuse its snapshot
+        // and load any directories expanded after it started.
+        Self::restore_expanded_children(&mut result.tree, &self.expanded_dirs, self.sort_order);
+        self.tree = result.tree;
+        true
     }
 
-    /// Refresh the file tree (clears loaded state, rescans shallowly).
-    /// For GVFS paths, runs in background to avoid blocking the UI thread.
+    /// Refresh the file tree in the background.
     fn refresh(&mut self) {
         if let Some(root) = &self.root.clone() {
-            if is_gvfs_path(root) {
-                // Re-scan in background
-                let sort_order = self.sort_order;
-                let root = root.clone();
-                let (tx, rx) = mpsc::channel();
-                std::thread::Builder::new()
-                    .name("gvfs-refresh".into())
-                    .spawn(move || {
-                        let tree = Self::scan_directory_shallow(&root, sort_order);
-                        let _ = tx.send(tree);
-                    })
-                    .expect("failed to spawn GVFS refresh thread");
-                self.pending_scan = Some(rx);
+            if self.start_root_scan(root.clone(), "explorer-refresh") {
                 return;
             }
             self.tree = Self::scan_directory_shallow(root, self.sort_order);
-            // Re-load children for currently expanded directories
-            let expanded: Vec<PathBuf> = self.expanded_dirs.iter().cloned().collect();
-            for dir_path in expanded {
-                self.load_children(&dir_path);
+            Self::restore_expanded_children(&mut self.tree, &self.expanded_dirs, self.sort_order);
+        }
+    }
+
+    fn restore_expanded_children(
+        tree: &mut [FileTreeNode],
+        expanded_dirs: &HashSet<PathBuf>,
+        sort_order: SortOrder,
+    ) {
+        // Parents must be loaded before their expanded descendants can be
+        // found in the lazy tree.
+        let mut expanded: Vec<&PathBuf> = expanded_dirs.iter().collect();
+        expanded.sort_by_key(|path| path.components().count());
+        for path in expanded {
+            Self::load_children_in_tree(tree, path, sort_order);
+        }
+    }
+
+    /// Rescan only one changed directory while preserving the rest of the tree.
+    fn refresh_directory(&mut self, directory: &Path) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        if directory == root {
+            self.tree = Self::scan_directory_shallow(&root.clone(), self.sort_order);
+        } else {
+            let mut replacement = Some(Self::scan_directory_shallow(
+                &directory.to_path_buf(),
+                self.sort_order,
+            ));
+            if !Self::replace_directory_children(&mut self.tree, directory, &mut replacement) {
+                return;
             }
         }
+
+        // Restore expanded descendants from shallowest to deepest so their
+        // parents exist before lazy children are loaded.
+        let mut expanded: Vec<PathBuf> = self.expanded_dirs.iter().cloned().collect();
+        expanded.sort_by_key(|path| path.components().count());
+        for path in expanded {
+            self.load_children(&path);
+        }
+    }
+
+    fn replace_directory_children(
+        nodes: &mut [FileTreeNode],
+        directory: &Path,
+        replacement: &mut Option<Vec<FileTreeNode>>,
+    ) -> bool {
+        for node in nodes {
+            if let FileTreeNode::Directory { path, children, .. } = node {
+                if path == directory {
+                    *children = replacement.take();
+                    return true;
+                }
+                if let Some(children) = children {
+                    if Self::replace_directory_children(children, directory, replacement) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Load children for a specific directory (lazy loading)
@@ -948,12 +1314,12 @@ impl Tab {
             .unwrap_or_else(|| "file://".to_string())
     }
 
-    fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf) -> io::Result<Self> {
         // Canonicalize path for consistent comparison with watcher events
         let path = path.canonicalize().unwrap_or(path);
-        let content = fs::read_to_string(&path).unwrap_or_default();
+        let content = String::from_utf8_lossy(&fs::read(&path)?).into_owned();
         let parsed = parse_headers(&content);
-        let local_links = parse_local_links(&content);
+        let local_links = parse_local_links(&content, &path);
         let content_lines = content.lines().count();
         let base_uri = Self::compute_base_uri(&path);
 
@@ -964,7 +1330,7 @@ impl Tab {
 
         let synced_content_hash = hash_content(&content);
 
-        Self {
+        Ok(Self {
             id: egui::Id::new(&path),
             path,
             content,
@@ -1001,7 +1367,7 @@ impl Tab {
             close_after_save: false,
             pending_caret_byte: None,
             last_content_origin: None,
-        }
+        })
     }
 
     fn title(&self) -> String {
@@ -1025,46 +1391,10 @@ impl Tab {
         egui::Id::new(&self.path).with("source_editor")
     }
 
-    fn reload(&mut self) {
-        if !self.path.exists() {
-            return;
-        }
-
-        if let Ok(bytes) = fs::read(&self.path) {
-            let content = String::from_utf8_lossy(&bytes);
-            self.content_lines = content.lines().count();
-            self.content = content.into_owned();
-            self.cache = CommonMarkCache::default();
-            self.content_version = self.content_version.wrapping_add(1);
-            self.base_uri = Self::compute_base_uri(&self.path);
-
-            let parsed = parse_headers(&self.content);
-            self.document_title = parsed.document_title;
-            self.outline_headers = parsed.outline_headers;
-            self.collapsed_headers.clear();
-
-            self.local_links = parse_local_links(&self.content);
-            for link in &self.local_links {
-                self.cache.add_link_hook(link);
-            }
-
-            // Stale byte ranges; caller rebuilds if search bar is open
-            self.search_matches.clear();
-
-            // The buffer now matches disk exactly.
-            self.synced_content_hash = hash_content(&self.content);
-            self.dirty = false;
-            self.external_change_hash = None;
-            self.in_flight_save_hash = None;
-            self.derived_stale = false;
-            self.last_edit_at = None;
-
-            // PSE session state is derived from content; force re-seed.
-            self.session_buffers.clear();
-            self.session_kinds.clear();
-            self.session_last_blocks.clear();
-            self.session_dirty = false;
-        }
+    fn reload(&mut self) -> io::Result<()> {
+        let content = String::from_utf8_lossy(&fs::read(&self.path)?).into_owned();
+        self.apply_loaded_content(self.path.clone(), content, false);
+        Ok(())
     }
 
     /// Record a user modification of the buffer. Cheap on purpose: heavy
@@ -1232,7 +1562,7 @@ impl Tab {
         self.document_title = parsed.document_title;
         self.outline_headers = parsed.outline_headers;
 
-        self.local_links = parse_local_links(&self.content);
+        self.local_links = parse_local_links(&self.content, &self.path);
         for link in &self.local_links {
             self.cache.add_link_hook(link);
         }
@@ -1246,72 +1576,104 @@ impl Tab {
         self.search_matches = find_matches(&self.content, query);
     }
 
-    fn load_file(&mut self, path: &PathBuf) {
-        if !path.exists() {
-            return;
-        }
-
-        if let Ok(bytes) = fs::read(path) {
-            let content = String::from_utf8_lossy(&bytes);
-            self.content_lines = content.lines().count();
-            self.content = content.into_owned();
-            self.path = path.clone();
-            self.id = egui::Id::new(path);
-            self.cache = CommonMarkCache::default();
-            self.content_version = self.content_version.wrapping_add(1);
-            self.scroll_offset = 0.0;
-            self.pending_scroll_offset = None;
-            self.base_uri = Self::compute_base_uri(&self.path);
-
-            let parsed = parse_headers(&self.content);
-            self.document_title = parsed.document_title;
-            self.outline_headers = parsed.outline_headers;
-            self.collapsed_headers.clear();
-
-            self.local_links = parse_local_links(&self.content);
-            for link in &self.local_links {
-                self.cache.add_link_hook(link);
-            }
-
-            // Stale byte ranges; caller rebuilds if search bar is open
-            self.search_matches.clear();
-
-            // Fresh document from disk: buffer and disk agree.
-            self.synced_content_hash = hash_content(&self.content);
-            self.dirty = false;
-            self.external_change_hash = None;
-            self.in_flight_save_hash = None;
-            self.derived_stale = false;
-            self.last_edit_at = None;
-
-            // PSE session state is derived from content; force re-seed.
-            self.session_buffers.clear();
-            self.session_kinds.clear();
-            self.session_last_blocks.clear();
-            self.session_dirty = false;
-        }
+    fn load_file(&mut self, path: &Path) -> io::Result<()> {
+        let content = String::from_utf8_lossy(&fs::read(path)?).into_owned();
+        self.apply_loaded_content(path.to_path_buf(), content, true);
+        Ok(())
     }
 
-    fn navigate_to_link(&mut self, link: &str) {
-        if link.starts_with('#') {
-            return;
+    fn apply_loaded_content(&mut self, path: PathBuf, content: String, reset_scroll: bool) {
+        self.content_lines = content.lines().count();
+        self.content = content;
+        self.path = path;
+        self.id = egui::Id::new(&self.path);
+        self.cache = CommonMarkCache::default();
+        self.content_version = self.content_version.wrapping_add(1);
+        if reset_scroll {
+            self.scroll_offset = 0.0;
+            self.pending_scroll_offset = None;
+        }
+        self.base_uri = Self::compute_base_uri(&self.path);
+
+        let parsed = parse_headers(&self.content);
+        self.document_title = parsed.document_title;
+        self.outline_headers = parsed.outline_headers;
+        self.collapsed_headers.clear();
+
+        self.local_links = parse_local_links(&self.content, &self.path);
+        for link in &self.local_links {
+            self.cache.add_link_hook(link);
         }
 
-        let Some(current_dir) = self.path.parent() else {
-            return;
+        // Stale byte ranges; caller rebuilds if search bar is open.
+        self.search_matches.clear();
+
+        // The buffer now matches disk exactly.
+        self.synced_content_hash = hash_content(&self.content);
+        self.dirty = false;
+        self.external_change_hash = None;
+        self.in_flight_save_hash = None;
+        self.derived_stale = false;
+        self.last_edit_at = None;
+
+        // PSE session state is derived from content; force re-seed.
+        self.session_buffers.clear();
+        self.session_kinds.clear();
+        self.session_last_blocks.clear();
+        self.session_dirty = false;
+    }
+
+    fn navigate_to_link(&mut self, link: &str) -> io::Result<bool> {
+        // A same-document fragment scrolls this tab — no path resolution, no
+        // history entry, the same semantics as clicking the heading in the
+        // outline. Unmatched fragments do nothing rather than error: the
+        // document opened fine, the anchor simply does not exist.
+        if let Some(fragment) = link.strip_prefix('#') {
+            return Ok(apply_fragment_navigation(self, fragment));
+        }
+
+        // Share resolution and error handling with the ctrl+click path. These
+        // used to differ: #78 taught percent-decoding and `file://` handling
+        // to `resolve_local_link_path`, but this function still did a raw
+        // `join`, so a link with an encoded space opened in a new tab on
+        // ctrl+click and silently did nothing on a plain click.
+        let (destination, fragment) = split_link_fragment(link);
+        let Some(target_path) = self.resolve_link(destination)? else {
+            return Ok(false);
         };
 
-        let path_part = link.split('#').next().unwrap_or(link);
-        let target_path = current_dir.join(path_part);
-
-        let target_path = match target_path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        self.history_back.push(self.path.clone());
+        if target_path == self.path || !target_path.is_file() {
+            return Ok(false);
+        }
+        let previous_path = self.path.clone();
+        self.load_file(&target_path)?;
+        // `guide.md#section` opens the document *and* lands on the heading —
+        // the #141 decision that an anchor selects a place in the document,
+        // not just the document. Applied after `load_file`, whose
+        // `reset_scroll` would otherwise clear it.
+        if let Some(fragment) = &fragment {
+            apply_fragment_navigation(self, fragment);
+        }
+        self.history_back.push(previous_path);
         self.history_forward.clear();
-        self.load_file(&target_path);
+        Ok(true)
+    }
+
+    /// Replace this tab's document and record a browser-like history entry.
+    /// Returns whether navigation happened; failures leave history untouched.
+    fn navigate_to_path(&mut self, target_path: &Path) -> io::Result<bool> {
+        let Ok(target_path) = target_path.canonicalize() else {
+            return Ok(false);
+        };
+        if target_path == self.path || !target_path.is_file() {
+            return Ok(false);
+        }
+
+        let previous_path = self.path.clone();
+        self.load_file(&target_path)?;
+        self.history_back.push(previous_path);
+        self.history_forward.clear();
+        Ok(true)
     }
 
     fn check_link_hooks(&self) -> Option<String> {
@@ -1331,73 +1693,353 @@ impl Tab {
         !self.history_forward.is_empty()
     }
 
-    fn navigate_back(&mut self) {
-        if let Some(prev_path) = self.history_back.pop() {
-            self.history_forward.push(self.path.clone());
-            self.load_file(&prev_path);
-        }
+    fn navigate_back(&mut self) -> io::Result<bool> {
+        let Some(prev_path) = self.history_back.last().cloned() else {
+            return Ok(false);
+        };
+        let current_path = self.path.clone();
+        self.load_file(&prev_path)?;
+        self.history_back.pop();
+        self.history_forward.push(current_path);
+        Ok(true)
     }
 
-    fn navigate_forward(&mut self) {
-        if let Some(next_path) = self.history_forward.pop() {
-            self.history_back.push(self.path.clone());
-            self.load_file(&next_path);
-        }
+    fn navigate_forward(&mut self) -> io::Result<bool> {
+        let Some(next_path) = self.history_forward.last().cloned() else {
+            return Ok(false);
+        };
+        let current_path = self.path.clone();
+        self.load_file(&next_path)?;
+        self.history_forward.pop();
+        self.history_back.push(current_path);
+        Ok(true)
     }
 
-    fn resolve_link(&self, link: &str) -> Option<PathBuf> {
+    fn resolve_link(&self, link: &str) -> io::Result<Option<PathBuf>> {
         if link.starts_with('#') {
-            return None;
+            return Ok(None);
         }
 
-        let current_dir = self.path.parent()?;
-        let path_part = link.split('#').next().unwrap_or(link);
-        let target_path = current_dir.join(path_part);
-        target_path.canonicalize().ok()
+        let Some(current_dir) = self.path.parent() else {
+            return Ok(None);
+        };
+        // `?` rather than a discard: a destination that cannot be decoded is
+        // reported through the same error bar as a missing file (#181), instead
+        // of rendering as an internal link that does nothing when clicked.
+        let Some(target_path) = resolve_local_link_path(link, current_dir)? else {
+            return Ok(None);
+        };
+        target_path.canonicalize().map(Some)
     }
 }
 
-/// Parse local markdown file links and anchor links from content, skipping code blocks.
-fn parse_local_links(content: &str) -> Vec<String> {
-    let link_re = &*LINK_RE;
-    let mut links = Vec::new();
+/// Split a clicked destination into its file part and `#fragment`, if the
+/// fragment is non-empty. A trailing `#` with nothing after it is a link with
+/// no anchor, not a navigation request.
+fn split_link_fragment(link: &str) -> (&str, Option<&str>) {
+    match link.split_once('#') {
+        Some((path, fragment)) if !fragment.is_empty() => (path, Some(fragment)),
+        _ => (link, None),
+    }
+}
+
+/// GitHub-style anchor slug for a heading title: lowercased, whitespace runs
+/// become hyphens, and anything that is not a letter, number, hyphen or
+/// underscore is dropped. This is the convention most markdown sites use for
+/// `#fragment` anchors, so `#settings--config` matches a `Settings & Config`
+/// heading.
+fn slugify_heading(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                '\u{0}'
+            }
+        })
+        .filter(|c| *c != '\u{0}')
+        .collect()
+}
+
+/// Where a `#fragment` landed inside a document.
+enum FragmentTarget<'a> {
+    /// The document title (the first `h1`, which the outline excludes) — the
+    /// very top of the document.
+    DocumentTop,
+    Header(&'a Header),
+    Missing,
+}
+
+/// Resolve a `#fragment` against a document's headings using slug semantics:
+/// exact slug match, first heading wins. The document title is matched before
+/// the outline headers because it is the page's primary anchor.
+fn find_fragment_target<'a>(
+    document_title: Option<&str>,
+    headers: &'a [Header],
+    fragment: &str,
+) -> FragmentTarget<'a> {
+    let wanted = slugify_heading(fragment);
+    if wanted.is_empty() {
+        return FragmentTarget::Missing;
+    }
+    if let Some(title) = document_title {
+        if slugify_heading(title) == wanted {
+            return FragmentTarget::DocumentTop;
+        }
+    }
+    headers
+        .iter()
+        .find(|header| slugify_heading(&header.title) == wanted)
+        .map(FragmentTarget::Header)
+        .unwrap_or(FragmentTarget::Missing)
+}
+
+/// Point a tab at the heading a `#fragment` names, mirroring the outline-click
+/// flow: a cached heading position scrolls immediately, and a fresh document
+/// (no measured height, nothing cached) starts at the top and lets the
+/// post-render corrective pass snap to the recorded position once the
+/// bootstrap has painted. Returns whether the fragment named a heading.
+fn apply_fragment_navigation(tab: &mut Tab, fragment: &str) -> bool {
+    match find_fragment_target(
+        tab.document_title.as_deref(),
+        &tab.outline_headers,
+        fragment,
+    ) {
+        FragmentTarget::DocumentTop => {
+            tab.pending_scroll_offset = Some(0.0);
+            true
+        }
+        FragmentTarget::Header(header) => {
+            let key = header_position_key(header.source_start);
+            if let Some(y_pos) = tab.cache.get_header_position(&key) {
+                tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
+            } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
+                let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
+                    * tab.last_content_height;
+                tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
+                // The estimate only gets us near the target; one full paint
+                // records the exact position for the corrective pass.
+                tab.pending_header_click_key = Some(key);
+            } else {
+                tab.pending_header_click_key = Some(key);
+            }
+            true
+        }
+        FragmentTarget::Missing => false,
+    }
+}
+
+/// Handle a renderer link hook without coupling path resolution to the UI.
+///
+/// Plain click navigates the current tab, while Ctrl/Cmd+click returns a path
+/// and `#fragment` for the caller to open in a new tab. Both modes surface
+/// path-resolution errors consistently.
+fn handle_local_link_click(
+    tab: &mut Tab,
+    clicked_link: &str,
+    open_in_new_tab: bool,
+) -> (Option<(PathBuf, Option<String>)>, Option<String>) {
+    let result = if open_in_new_tab {
+        let (destination, fragment) = split_link_fragment(clicked_link);
+        tab.resolve_link(destination)
+            .map(|path| path.map(|p| (p, fragment.map(str::to_owned))))
+    } else {
+        tab.navigate_to_link(clicked_link)
+            .map(|_| None::<(PathBuf, Option<String>)>)
+    };
+
+    match result {
+        Ok(target) => (target, None),
+        Err(error) => (
+            None,
+            Some(format!("Unable to open {clicked_link}: {error}")),
+        ),
+    }
+}
+
+/// Parse explicit links plus bare local Markdown file references, skipping code blocks.
+fn parse_local_links(content: &str, document_path: &Path) -> Vec<String> {
+    let mut links = HashSet::new();
+    let document_dir = document_path.parent().unwrap_or_else(|| Path::new("."));
     let mut in_code_block = false;
 
-    for line in content.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code_block = !in_code_block;
-            continue;
-        }
-
-        if in_code_block {
-            continue;
-        }
-
-        for cap in link_re.captures_iter(line) {
-            let destination = &cap[2];
-            if is_local_markdown_link(destination) || destination.starts_with('#') {
-                links.push(destination.to_string());
+    // Let CommonMark decide which bytes are visible text. Event::Text excludes
+    // fenced/indented code and link destinations, while Event::Code preserves
+    // the viewer extension that makes an inline-code filename clickable.
+    for event in pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()) {
+        match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
+                in_code_block = true;
             }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                in_code_block = false;
+            }
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                let destination = dest_url.as_ref();
+                if is_local_markdown_link(destination) || destination.starts_with('#') {
+                    links.insert(destination.to_owned());
+                }
+            }
+            pulldown_cmark::Event::Code(code) => {
+                register_existing_markdown_path(&code, document_dir, &mut links);
+            }
+            pulldown_cmark::Event::Text(text) if !in_code_block => {
+                register_bare_markdown_paths(&text, document_dir, &mut links);
+            }
+            _ => {}
         }
     }
 
+    let mut links: Vec<_> = links.into_iter().collect();
+    links.sort();
     links
 }
 
-/// Check if a link destination points to a local markdown file
-fn is_local_markdown_link(destination: &str) -> bool {
-    if destination.starts_with("http://")
-        || destination.starts_with("https://")
-        || destination.starts_with("mailto:")
-        || destination.starts_with("tel:")
-        || destination.starts_with("ftp://")
-        || destination.starts_with('#')
-    {
-        return false;
+fn register_bare_markdown_paths(text: &str, document_dir: &Path, links: &mut HashSet<String>) {
+    for token in text.split_whitespace() {
+        let destination = token.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '*'
+                    | '_'
+                    | '"'
+                    | '\''
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | ','
+                    | '.'
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '，'
+                    | '。'
+                    | '；'
+                    | '：'
+                    | '！'
+                    | '？'
+                    | '（'
+                    | '）'
+                    | '【'
+                    | '】'
+                    | '《'
+                    | '》'
+            )
+        });
+        register_existing_markdown_path(destination, document_dir, links);
     }
+}
 
-    let path_part = destination.split('#').next().unwrap_or(destination);
-    let path = std::path::Path::new(path_part);
+fn register_existing_markdown_path(
+    destination: &str,
+    document_dir: &Path,
+    links: &mut HashSet<String>,
+) {
+    if !is_local_markdown_link(destination) {
+        return;
+    }
+    // A bare mention stays existence-gated, and an undecodable one is simply not
+    // registered: only an *explicit* Markdown link should be able to report a
+    // broken target, which is the boundary #181 drew.
+    if resolve_local_link_path(destination, document_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|path| path.is_file())
+    {
+        links.insert(destination.to_owned());
+    }
+}
+
+/// One classification of a destination's shape, used by *both* the gate that
+/// decides which destinations become clickable and the resolver that turns one
+/// into a path.
+///
+/// They used to classify separately and disagreed on four shapes, which #188
+/// pinned: a query string produced a path with `?v=2` in the file name while
+/// the gate rejected it; an unencoded `#` produced an extensionless path; an
+/// empty destination produced the directory itself; and a destination whose
+/// percent escapes are not UTF-8 passed the gate but resolved to nothing, so
+/// the link rendered as internal and a click did nothing at all — no
+/// navigation and no error. Sharing one classification is what makes those
+/// disagreements unrepresentable rather than merely fixed.
+enum DestinationShape<'a> {
+    /// A leading `#`: within the current document, no path involved.
+    Fragment,
+    /// Nothing this viewer opens from the filesystem — a non-`file` scheme, a
+    /// `file://` URI with a non-local authority, a protocol-relative URL, or a
+    /// destination with nothing left to name a file with.
+    External,
+    /// Names a local file. `raw` keeps the source spelling with fragment and
+    /// query removed, because the extension test has to run on what the author
+    /// wrote; `decoded` is `None` when the percent escapes are not UTF-8.
+    Local {
+        raw: &'a str,
+        decoded: Option<std::borrow::Cow<'a, str>>,
+    },
+}
+
+fn classify_destination(destination: &str) -> DestinationShape<'_> {
+    if destination.starts_with('#') {
+        return DestinationShape::Fragment;
+    }
+    // A protocol-relative URL carries no scheme, so the path branch below would
+    // read `//host/path` as an absolute filesystem path — the reinterpretation
+    // #141 point 8 forbids.
+    if destination.starts_with("//") {
+        return DestinationShape::External;
+    }
+    if let Some(scheme) = explicit_uri_scheme(destination) {
+        if !scheme.eq_ignore_ascii_case("file") {
+            return DestinationShape::External;
+        }
+        // `to_file_path` decodes the path and rejects a non-local authority.
+        let Some(path) = url::Url::parse(destination)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+        else {
+            return DestinationShape::External;
+        };
+        return match path.into_os_string().into_string() {
+            Ok(decoded) => DestinationShape::Local {
+                raw: destination,
+                decoded: Some(std::borrow::Cow::Owned(decoded)),
+            },
+            Err(_) => DestinationShape::Local {
+                raw: destination,
+                decoded: None,
+            },
+        };
+    }
+    // Fragment first, then query: `guide.md?v=2#s` names `guide.md`. Stripping
+    // the query is what stops `?v=2` becoming part of the file name.
+    let without_fragment = destination.split('#').next().unwrap_or(destination);
+    let raw = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    if raw.is_empty() {
+        // Nothing left to name a file with. The resolver used to answer with the
+        // containing directory here, which only stayed unreachable because
+        // `Tab::resolve_link` guarded a leading `#` separately.
+        return DestinationShape::External;
+    }
+    DestinationShape::Local {
+        raw,
+        decoded: percent_encoding::percent_decode_str(raw).decode_utf8().ok(),
+    }
+}
+
+fn has_markdown_extension(path: &Path) -> bool {
     path.extension()
         .map(|ext| {
             let ext = ext.to_string_lossy().to_lowercase();
@@ -1406,54 +2048,138 @@ fn is_local_markdown_link(destination: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Truncate a string for display, adding "..." if it exceeds max_len.
-/// Respects char boundaries for UTF-8 safety.
-fn truncate_display_name(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        let mut end = (max_len - 3).min(s.len());
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &s[..end])
-    } else {
-        s.to_string()
+/// Check if a link destination points to a local markdown file.
+///
+/// The extension test runs on the source spelling, not the decoded path: an
+/// author writing `bad%FF.md` plainly means a Markdown file, and it has to pass
+/// this gate for a click to be able to *report* that it cannot be opened.
+fn is_local_markdown_link(destination: &str) -> bool {
+    match classify_destination(destination) {
+        DestinationShape::Local { raw, .. } => has_markdown_extension(Path::new(raw)),
+        DestinationShape::Fragment | DestinationShape::External => false,
     }
 }
 
-/// Parse markdown headers from content, skipping code blocks.
+/// Return an RFC 3986 URI scheme when the destination explicitly contains one.
+///
+/// Markdown link destinations are URIs, so a colon after a valid scheme prefix
+/// is not a filesystem separator. On Windows, preserve drive-letter paths such
+/// as `C:\docs\guide.md` instead of classifying `C` as a URI scheme.
+fn explicit_uri_scheme(destination: &str) -> Option<&str> {
+    let colon = destination.find(':')?;
+    let scheme = &destination[..colon];
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|ch| ch.is_ascii_alphabetic())
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+    {
+        return None;
+    }
+
+    #[cfg(target_os = "windows")]
+    if scheme.len() == 1 {
+        return None;
+    }
+
+    Some(scheme)
+}
+
+/// Resolve a relative/absolute filesystem path or a `file:` URI against the
+/// directory containing the Markdown document.
+/// Turn a destination into a path to try.
+///
+/// `Ok(None)` means there is nothing to open — a fragment, or a destination
+/// this viewer treats as external. `Err` means the destination names a local
+/// file that cannot be turned into a path at all, which callers must surface
+/// rather than swallow: before #141 that case returned `None` like the others,
+/// so an internal-looking link did nothing whatsoever when clicked.
+fn resolve_local_link_path(destination: &str, document_dir: &Path) -> io::Result<Option<PathBuf>> {
+    match classify_destination(destination) {
+        DestinationShape::Fragment | DestinationShape::External => Ok(None),
+        DestinationShape::Local { raw, decoded: None } => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{raw} is not valid UTF-8 after percent-decoding"),
+        )),
+        DestinationShape::Local {
+            decoded: Some(decoded),
+            ..
+        } => {
+            let path = Path::new(decoded.as_ref());
+            Ok(Some(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                document_dir.join(path)
+            }))
+        }
+    }
+}
+
+/// Parse headings with the same CommonMark rules used by the renderer.
 fn parse_headers(content: &str) -> ParsedHeaders {
-    let re = &*HEADER_RE;
-    let mut all_headers: Vec<Header> = Vec::new();
-    let mut in_code_block = false;
+    use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
 
-    for (line_number, line) in content.lines().enumerate() {
-        if line.trim_start().starts_with("```") {
-            in_code_block = !in_code_block;
-            continue;
+    fn level_number(level: HeadingLevel) -> u8 {
+        match level {
+            HeadingLevel::H1 => 1,
+            HeadingLevel::H2 => 2,
+            HeadingLevel::H3 => 3,
+            HeadingLevel::H4 => 4,
+            HeadingLevel::H5 => 5,
+            HeadingLevel::H6 => 6,
         }
+    }
 
-        if in_code_block {
-            continue;
-        }
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(content.match_indices('\n').map(|(offset, _)| offset + 1))
+        .collect();
+    let mut all_headers = Vec::new();
+    let mut current: Option<(u8, usize, usize, String)> = None;
 
-        if let Some(caps) = re.captures(line) {
-            let title = caps[2].trim().to_string();
-            let normalized_title = title.to_lowercase();
-            let display_title = truncate_display_name(&title, 35);
-            // Count prior headers with the same normalized title so each
-            // duplicate gets a distinct composite cache key.
-            let nth_with_same_text = all_headers
-                .iter()
-                .filter(|h| h.normalized_title == normalized_title)
-                .count();
-            all_headers.push(Header {
-                level: caps[1].len() as u8,
-                title,
-                display_title,
-                normalized_title,
-                nth_with_same_text,
-                line_number,
-            });
+    for (event, range) in
+        pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                let line_number = line_starts
+                    .partition_point(|line_start| *line_start <= range.start)
+                    .saturating_sub(1);
+                current = Some((level_number(level), range.start, line_number, String::new()));
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((level, source_start, line_number, title)) = current.take() {
+                    let title = title.trim().to_owned();
+                    if !title.is_empty() {
+                        all_headers.push(Header {
+                            level,
+                            title,
+                            source_start,
+                            line_number,
+                        });
+                    }
+                }
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, _, _, title)) = current.as_mut() {
+                    title.push_str(&text);
+                }
+            }
+            Event::InlineMath(text) | Event::DisplayMath(text) => {
+                if let Some((_, _, _, title)) = current.as_mut() {
+                    title.push_str(&text);
+                }
+            }
+            Event::FootnoteReference(label) => {
+                if let Some((_, _, _, title)) = current.as_mut() {
+                    title.push('[');
+                    title.push_str(&label);
+                    title.push(']');
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, _, _, title)) = current.as_mut() {
+                    title.push(' ');
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1556,6 +2282,10 @@ fn find_matches(content: &str, query: &str) -> Vec<SearchMatch> {
     matches
 }
 
+fn take_search_correction_request(pending: &mut bool) -> bool {
+    std::mem::take(pending)
+}
+
 /// Check if header at `index` should be hidden because an ancestor is collapsed
 fn header_is_hidden(headers: &[Header], index: usize, collapsed: &HashSet<usize>) -> bool {
     if index == 0 || index >= headers.len() {
@@ -1610,6 +2340,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser, Debug)]
 #[command(name = "md-viewer")]
+#[command(version)]
 #[command(about = "A lightweight markdown viewer", long_about = None)]
 struct Args {
     /// Markdown file to open
@@ -1860,6 +2591,43 @@ struct MarkdownApp {
     zoom_level: f32,
     show_outline: bool,
     full_width_content: bool,
+    math_scale: f32,
+    // Selection/highlight background color override. `None` = theme default.
+    highlight_color: Option<egui::Color32>,
+    // Mirrors `last_applied_dark_mode`: only rebuild Visuals when this changes.
+    last_applied_highlight_color: Option<egui::Color32>,
+    // Hyperlink text color override. `None` = theme default.
+    link_color: Option<egui::Color32>,
+    last_applied_link_color: Option<egui::Color32>,
+    show_color_settings_dialog: bool,
+    // Document body/heading font. `None` = auto-detected system sans-serif.
+    selected_font_family: Option<String>,
+    // Body-font families the picker offers, scanned in a background thread:
+    // one canonical name per family, only families that can actually serve
+    // as the body font. Empty until the scan lands (the dialog shows a
+    // scanning note; "System Default" always works).
+    available_font_families: Vec<String>,
+    // Lowercased copy of `available_font_families`, precomputed once so the
+    // font-picker search filter doesn't re-lowercase every name on every
+    // frame it's open (see docs/EGUI_WORKFLOW.md: never allocate in the
+    // render loop what can be cached).
+    available_font_families_lower: Vec<String>,
+    // In-flight background scan producing `available_font_families`.
+    pending_font_family_scan: Option<Receiver<Vec<String>>>,
+    // Mirrors the font setup inputs (picked family, preset, size class): only
+    // reload fonts when this tuple changes.
+    last_applied_font_config: Option<(Option<String>, FontPreset, TextSizeClass)>,
+    show_font_dialog: bool,
+    // Transient UI-only search text for the font picker (not persisted).
+    font_filter: String,
+    // Disables egui's glyph pixel-snapping when true. Applied unconditionally
+    // every frame (see ctx.set_zoom_factor below) since it's a single write
+    // into egui's own memory, not worth a last-applied change-gate.
+    smooth_text_rendering: bool,
+    // Which markdown viewer's font choices lead the font chains.
+    font_preset: FontPreset,
+    // Shared text-size class across all presets.
+    text_size_class: TextSizeClass,
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
@@ -1879,6 +2647,8 @@ struct MarkdownApp {
     // File explorer state
     file_explorer: FileExplorer,
     show_explorer: bool,
+    explorer_width: f32,
+    outline_width: f32,
     // Flash effect for updated files (path -> start time)
     flashing_paths: HashMap<PathBuf, Instant>,
     // True if running on virtual display (e.g., Xvfb :99) - limits frame rate
@@ -1887,6 +2657,8 @@ struct MarkdownApp {
     egui_ctx: egui::Context,
     // Track state to avoid unconditional repaints
     last_applied_dark_mode: Option<bool>,
+    // Last zoom level handed to set_zoom_factor; skips redundant writes
+    last_applied_zoom_level: Option<f32>,
     last_window_title: String,
     title_dirty: bool,
     /// Cached set of open tab paths for file explorer highlighting (avoids per-frame syscalls)
@@ -1923,8 +2695,38 @@ struct MarkdownApp {
 
 impl MarkdownApp {
     fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>, watch: bool) -> Self {
-        // Setup fonts with system font fallbacks for Unicode support
-        setup_fonts(&cc.egui_ctx);
+        // Load persisted state (needed before font setup, which reads the
+        // persisted font family, preset, and text-size class).
+        let persisted: PersistedState = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, APP_KEY))
+            .unwrap_or_default();
+        let selected_font_family = persisted.selected_font_family;
+        let font_preset = persisted.font_preset.unwrap_or_default();
+        let text_size_class = persisted.text_size_class.unwrap_or_default();
+
+        // Setup fonts with system font fallbacks for Unicode support, led by
+        // the user's picked family (font picker) or the preset's emulated
+        // stack; the text-size class is shared by every preset.
+        setup_fonts(
+            &cc.egui_ctx,
+            selected_font_family.as_deref(),
+            font_preset,
+            text_size_class,
+        );
+
+        // Scan the picker's family list off the UI thread: probing every
+        // family's Latin coverage takes ~0.5s on a stock Arch system (see
+        // `scan_pickable_font_families`). Until the result lands, the font
+        // dialog shows "System Default" plus a scanning note.
+        let (font_family_tx, font_family_rx) = mpsc::channel();
+        let scan_spawned = std::thread::Builder::new()
+            .name("font-family-scan".to_owned())
+            .spawn(move || {
+                let _ = font_family_tx.send(scan_pickable_font_families());
+            })
+            .is_ok();
+        let pending_font_family_scan = scan_spawned.then_some(font_family_rx);
 
         // Clear stale egui widget data loaded from disk (scroll offsets, panel sizes, etc.)
         // We don't persist egui memory (see persist_egui_memory), but eframe always
@@ -1937,6 +2739,23 @@ impl MarkdownApp {
 
         // Set constant styles once at init (never changes at runtime)
         cc.egui_ctx.style_mut(|style| {
+            // Constant floating-scrollbar geometry (#139).
+            //
+            // egui's floating bar animates its width between `floating_width`
+            // (2) and `bar_width` (10) on hover. A dormant floating bar is
+            // hidden by `dormant_*_opacity: 0.0`, not by being thin, so that
+            // width governs the bar's *interact* rect and nothing visible.
+            // Beside a panel divider the growing and shrinking rect claims and
+            // releases the pointer on alternating frames, and at the one pixel
+            // just outside the resize handle the two never settle.
+            //
+            // Measured on Xvfb with the pointer held still: on `main` exactly
+            // one x out of 36 cycles through four states, in both the painted
+            // pixels and the cursor shape; with the width pinned, zero — and
+            // both builds produce an identical state map across x, so this
+            // removes the oscillation rather than moving it out of view.
+            // `scripts/hover-stability.sh` is that measurement.
+            style.spacing.scroll.floating_width = style.spacing.scroll.bar_width;
             style.url_in_tooltip = true;
             use egui::{FontId, TextStyle};
             style
@@ -1957,14 +2776,8 @@ impl MarkdownApp {
             style.scroll_animation.points_per_second = 1500.0;
 
             // Reduce resize grab radius to prevent overlap with adjacent scrollbars
-            style.interaction.resize_grab_radius_side = 2.0;
+            style.interaction.resize_grab_radius_side = SIDEBAR_RESIZE_GRAB_RADIUS;
         });
-
-        // Load persisted state
-        let persisted: PersistedState = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, APP_KEY))
-            .unwrap_or_default();
 
         let dark_mode = persisted
             .dark_mode
@@ -1972,18 +2785,42 @@ impl MarkdownApp {
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
         let full_width_content = persisted.full_width_content.unwrap_or(false);
+        let math_scale = persisted.math_scale.unwrap_or(1.0).clamp(1.0, 2.0);
+        let highlight_color = persisted
+            .highlight_color
+            .map(|[r, g, b, a]| egui::Color32::from_rgba_premultiplied(r, g, b, a));
+        let link_color = persisted
+            .link_color
+            .map(|[r, g, b, a]| egui::Color32::from_rgba_premultiplied(r, g, b, a));
+        let smooth_text_rendering = persisted.smooth_text_rendering.unwrap_or(false);
         let show_explorer = persisted.show_explorer.unwrap_or(true);
+        let explorer_width =
+            restored_sidebar_width(persisted.explorer_width, EXPLORER_DEFAULT_WIDTH);
+        let outline_width = restored_sidebar_width(persisted.outline_width, OUTLINE_DEFAULT_WIDTH);
 
         // Determine initial tabs
+        let mut startup_error = None;
         let initial_tabs: Vec<Tab> = if let Some(ref path) = file {
             // CLI argument takes priority
-            vec![Tab::new(path.clone())]
+            match Tab::new(path.clone()) {
+                Ok(tab) => vec![tab],
+                Err(error) => {
+                    startup_error = Some(format!("Unable to open {}: {error}", path.display()));
+                    Vec::new()
+                }
+            }
         } else if let Some(paths) = persisted.open_tabs {
             // Restore previous session tabs
             paths
                 .into_iter()
                 .filter(|p| p.exists())
-                .map(Tab::new)
+                .filter_map(|path| match Tab::new(path.clone()) {
+                    Ok(tab) => Some(tab),
+                    Err(error) => {
+                        log::warn!("Unable to restore {}: {error}", path.display());
+                        None
+                    }
+                })
                 .collect()
         } else {
             // No file and no saved session → start empty (welcome page).
@@ -2083,8 +2920,33 @@ impl MarkdownApp {
             zoom_level,
             show_outline,
             full_width_content,
+            math_scale,
+            // Frame 1 always rebuilds Visuals anyway (last_applied_dark_mode
+            // starts at None), so this just avoids a spurious second rebuild
+            // afterward if nothing further changes.
+            highlight_color,
+            last_applied_highlight_color: highlight_color,
+            link_color,
+            last_applied_link_color: link_color,
+            show_color_settings_dialog: false,
+            // Already applied above via setup_fonts(); last_applied starts in
+            // sync so update() doesn't redundantly reload fonts on frame 1.
+            last_applied_font_config: Some((
+                selected_font_family.clone(),
+                font_preset,
+                text_size_class,
+            )),
+            selected_font_family,
+            available_font_families: Vec::new(),
+            available_font_families_lower: Vec::new(),
+            pending_font_family_scan,
+            show_font_dialog: false,
+            font_filter: String::new(),
+            smooth_text_rendering,
+            font_preset,
+            text_size_class,
             watch_enabled: watch,
-            error_message: None,
+            error_message: startup_error,
             is_dragging: false,
             watcher: None,
             watcher_rx: None,
@@ -2094,10 +2956,13 @@ impl MarkdownApp {
             hovered_tab: None,
             file_explorer,
             show_explorer,
+            explorer_width,
+            outline_width,
             flashing_paths: HashMap::new(),
             is_virtual_display,
             egui_ctx: cc.egui_ctx.clone(),
             last_applied_dark_mode: None,
+            last_applied_zoom_level: None,
             last_window_title: String::new(),
             title_dirty: true,
             open_tab_paths: HashSet::new(),
@@ -2153,44 +3018,78 @@ impl MarkdownApp {
     }
 
     fn open_file_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown"])
-            .add_filter("Text", &["txt"])
-            .add_filter("All Files", &["*"])
-            .pick_file()
-        {
-            self.open_in_new_tab(path);
+        let initial_dir = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.path.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| self.file_explorer.root.clone());
+
+        match pick_file(initial_dir.as_deref()) {
+            Ok(Some(path)) => self.open_in_new_tab(path),
+            Ok(None) => {}
+            Err(error) => {
+                log::error!("Unable to open file picker: {error}");
+                self.error_message = Some(format!("Unable to open file picker: {error}"));
+            }
         }
     }
 
     /// Open a native folder picker and point the file explorer at the chosen
     /// directory (issue #28). The chosen root is persisted via `save()`.
     fn open_folder_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            self.file_explorer.set_root(path);
-            // Make sure the explorer is visible so the result is seen.
-            self.show_explorer = true;
-            // Rebuild the watcher so the new root is watched recursively
-            // (`update_watched_paths` only reconciles tab paths, not the root).
-            if self.watch_enabled {
-                self.start_watching();
+        match pick_folder(self.file_explorer.root.as_deref()) {
+            Ok(Some(path)) => {
+                self.file_explorer.set_root(path);
+                // Make sure the explorer is visible so the result is seen.
+                self.show_explorer = true;
+                // Rebuild the watcher so the new root is watched recursively
+                // (`update_watched_paths` only reconciles tab paths, not the root).
+                if self.watch_enabled {
+                    self.start_watching();
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::error!("Unable to open folder picker: {error}");
+                self.error_message = Some(format!("Unable to open folder picker: {error}"));
             }
         }
     }
 
     fn open_in_new_tab(&mut self, path: PathBuf) {
-        // Canonicalize for consistent comparison with existing tabs
+        self.open_in_new_tab_with_fragment(path, None);
+    }
+
+    /// Open a document in its own tab, optionally landing on the heading a
+    /// `#fragment` names. An already-open document is focused *and* scrolled
+    /// to the fragment — the tab-switch must not silently drop the anchor.
+    fn open_in_new_tab_with_fragment(&mut self, path: PathBuf, fragment: Option<String>) {
         let path = path.canonicalize().unwrap_or(path);
-        self.record_recent(&path);
         // Check if already open
         if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
             self.active_tab = idx;
             self.title_dirty = true;
+            if let Some(fragment) = &fragment {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    apply_fragment_navigation(tab, fragment);
+                }
+            }
             return;
         }
 
         // Add new tab
-        let tab = Tab::new(path);
+        let mut tab = match Tab::new(path.clone()) {
+            Ok(tab) => tab,
+            Err(error) => {
+                self.error_message = Some(format!("Unable to open {}: {error}", path.display()));
+                return;
+            }
+        };
+        if let Some(fragment) = &fragment {
+            apply_fragment_navigation(&mut tab, fragment);
+        }
+        self.record_recent(&path);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.title_dirty = true;
@@ -2199,6 +3098,42 @@ impl MarkdownApp {
         // Update watcher if enabled
         if self.watch_enabled {
             self.update_watched_paths();
+        }
+    }
+
+    fn navigate_active_tab_to(&mut self, path: &Path) {
+        if self.tabs.is_empty() {
+            self.open_in_new_tab(path.to_path_buf());
+            return;
+        }
+
+        let changed = self
+            .tabs
+            .get_mut(self.active_tab)
+            .is_some_and(|tab| tab.navigate_to_path(path).unwrap_or(false));
+        if !changed {
+            return;
+        }
+
+        let opened_path = self.tabs[self.active_tab].path.clone();
+        self.record_recent(&opened_path);
+        self.title_dirty = true;
+        self.refresh_open_tab_paths();
+        if self.watch_enabled {
+            self.update_watched_paths();
+        }
+    }
+
+    fn navigate_active_history(&mut self, go_back: bool) {
+        let result = self.tabs.get_mut(self.active_tab).map(|tab| {
+            if go_back {
+                tab.navigate_back()
+            } else {
+                tab.navigate_forward()
+            }
+        });
+        if let Some(Err(error)) = result {
+            self.error_message = Some(format!("Unable to navigate history: {error}"));
         }
     }
 
@@ -2400,7 +3335,12 @@ impl MarkdownApp {
         match resolution {
             Some(Resolution::ReloadFromDisk) => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                    tab.reload();
+                    if let Err(error) = tab.reload() {
+                        self.error_message = Some(format!(
+                            "Unable to reload {}: {error}",
+                            tab.path.display()
+                        ));
+                    }
                 }
             }
             Some(Resolution::KeepMine) => {
@@ -2566,7 +3506,14 @@ impl MarkdownApp {
         }
     }
 
+    /// Start watching because of a user action or configuration change.
     fn start_watching(&mut self) {
+        self.watcher_retry_count = 0;
+        self.start_watching_attempt();
+    }
+
+    /// Construct watchers without resetting the recovery-attempt counter.
+    fn start_watching_attempt(&mut self) {
         self.stop_watching();
 
         let tab_paths = self.get_open_tab_paths();
@@ -2701,20 +3648,24 @@ impl MarkdownApp {
             // Bridge thread: forward events and wake egui on demand
             let (bridge_tx, bridge_rx) = mpsc::channel();
             let ctx = self.egui_ctx.clone();
-            std::thread::Builder::new()
+            let bridge = std::thread::Builder::new()
                 .name("watcher-bridge".into())
                 .spawn(move || {
                     while let Ok(event) = debouncer_rx.recv() {
                         let _ = bridge_tx.send(event);
                         ctx.request_repaint();
                     }
-                })
-                .expect("failed to spawn watcher bridge thread");
+                });
+
+            if let Err(error) = bridge {
+                log::error!("Failed to spawn watcher bridge thread: {error}");
+                self.error_message = Some(format!("Failed to start file watcher bridge: {error}"));
+                return;
+            }
 
             self.watcher = Some(fw);
             self.watcher_rx = Some(bridge_rx);
             self.watch_enabled = true;
-            self.watcher_retry_count = 0;
         } else {
             log::error!("Failed to create any file watcher");
             self.error_message = Some("Failed to create file watcher".to_string());
@@ -2825,15 +3776,18 @@ impl MarkdownApp {
             // Attempt recovery if watching is enabled and there's something to watch
             // Check actual tabs and explorer root, not watched_paths (which may be empty after failure)
             let has_watchable = !self.tabs.is_empty() || self.file_explorer.root.is_some();
-            if self.watch_enabled && has_watchable && self.watcher_retry_count < MAX_WATCHER_RETRIES
-            {
-                log::info!(
-                    "Attempting to recover file watcher (attempt {})",
-                    self.watcher_retry_count + 1
-                );
-                self.watcher_retry_count += 1;
-                self.start_watching();
-                self.egui_ctx.request_repaint_after(Duration::from_secs(2));
+            if self.watch_enabled && has_watchable {
+                if let Some(attempt) = next_watcher_retry(self.watcher_retry_count) {
+                    self.watcher_retry_count = attempt;
+                    log::info!("Attempting to recover file watcher (attempt {attempt})");
+                    self.start_watching_attempt();
+                    self.egui_ctx.request_repaint_after(Duration::from_secs(2));
+                } else {
+                    self.error_message = Some(format!(
+                        "File watcher failed after {MAX_WATCHER_RETRIES} retries"
+                    ));
+                    self.watch_enabled = false;
+                }
             }
             return Vec::new();
         };
@@ -2856,13 +3810,10 @@ impl MarkdownApp {
                     self.watcher = None;
                     self.watcher_rx = None;
 
-                    if self.watcher_retry_count < MAX_WATCHER_RETRIES {
-                        self.watcher_retry_count += 1;
-                        log::info!(
-                            "Attempting watcher recovery (attempt {})",
-                            self.watcher_retry_count
-                        );
-                        self.start_watching();
+                    if let Some(attempt) = next_watcher_retry(self.watcher_retry_count) {
+                        self.watcher_retry_count = attempt;
+                        log::info!("Attempting watcher recovery (attempt {attempt})");
+                        self.start_watching_attempt();
                         self.egui_ctx.request_repaint_after(Duration::from_secs(2));
                     } else {
                         self.error_message = Some(format!(
@@ -2881,7 +3832,7 @@ impl MarkdownApp {
 
     fn reload_changed_tabs(&mut self, changed_paths: Vec<PathBuf>) {
         let now = Instant::now();
-        let mut refresh_tree = false;
+        let mut refresh_directories = HashSet::new();
         // If the active tab gets reloaded while the find bar is open, its
         // `search_matches` will be cleared by `Tab::reload`. Force a rebuild
         // on the next frame by invalidating the cache-validity shadow state.
@@ -2927,7 +3878,11 @@ impl MarkdownApp {
                     }
                     DiskChange::Reload => {
                         log::info!("Reloading tab: {:?}", path);
-                        tab.reload();
+                        if let Err(error) = tab.reload() {
+                            self.error_message =
+                                Some(format!("Unable to reload {}: {error}", path.display()));
+                            continue;
+                        }
                         relevant_change = true;
                         if Some(&tab.path) == active_path.as_ref() {
                             active_was_reloaded = true;
@@ -2947,7 +3902,9 @@ impl MarkdownApp {
                 if let Some(root) = &self.file_explorer.root {
                     // Check if the changed path is within the explorer root
                     if path.starts_with(root) {
-                        refresh_tree = true;
+                        if let Some(parent) = path.parent() {
+                            refresh_directories.insert(parent.to_path_buf());
+                        }
                     }
 
                     let mut current = path.parent();
@@ -2973,10 +3930,10 @@ impl MarkdownApp {
             }
         }
 
-        // Refresh the file explorer tree if any changes were within the explorer root
-        if refresh_tree {
-            log::info!("Refreshing file explorer tree");
-            self.file_explorer.refresh();
+        // Refresh only affected parents instead of rebuilding the entire tree.
+        for directory in refresh_directories {
+            log::debug!("Refreshing explorer directory: {:?}", directory);
+            self.file_explorer.refresh_directory(&directory);
         }
     }
 
@@ -3135,10 +4092,9 @@ impl MarkdownApp {
             100.0
         };
         tab.pending_scroll_offset = Some((estimated_y - margin).max(0.0));
-        // Grant the post-render corrective block one frame of permission to
-        // snap to the renderer-recorded `active_search_y`. The block clears
-        // the flag after it runs, so subsequent frames (e.g. user wheeling
-        // away from the match) won't re-trigger snap-back. See Tab field doc.
+        // Grant the next render one full-paint attempt to record an exact Y.
+        // The request is consumed before that render even when the source
+        // match has no visible glyph, so later frames return to clipping.
         tab.correct_active_search_pending = true;
     }
 
@@ -3297,12 +4253,19 @@ impl MarkdownApp {
                 ui.add_space(4.0);
             }
 
-            // New tab button
-            let new_tab_btn = ui.button("+").on_hover_text("New Tab (Ctrl+T)");
+            // Opening a file is what creates a new tab; there is no empty-tab state.
+            let new_tab_btn = ui
+                .button("+")
+                .on_hover_text("Open File in New Tab... (Ctrl+T)");
 
-            // Collect new tab button widget data for MCP
+            // Collect the open-file action for MCP.
             #[cfg(feature = "mcp")]
-            widget_data.push(("New Tab".to_string(), "button", new_tab_btn.rect, None));
+            widget_data.push((
+                "Open File in New Tab".to_string(),
+                "button",
+                new_tab_btn.rect,
+                None,
+            ));
 
             if new_tab_btn.clicked() {
                 self.open_file_dialog();
@@ -3359,11 +4322,10 @@ impl MarkdownApp {
 
         let is_dragging = ctx.input(|i| i.pointer.any_down());
 
-        egui::SidePanel::right("outline")
+        let panel = egui::SidePanel::right("outline")
             .resizable(true)
-            .default_width(200.0)
-            .min_width(120.0)
-            .max_width(400.0)
+            .default_width(self.outline_width)
+            .width_range(SIDEBAR_MIN_WIDTH..=f32::INFINITY)
             .frame(
                 egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                     left: 8,
@@ -3430,8 +4392,11 @@ impl MarkdownApp {
                 // rows from clipping into each other.
                 let row_height = ui.spacing().interact_size.y.max(20.0);
 
-                egui::ScrollArea::vertical()
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
                     .id_salt("outline")
                     .show_rows(ui, row_height, visible_indices.len(), |ui, row_range| {
                         let mut toggle_index: Option<usize> = None;
@@ -3491,8 +4456,10 @@ impl MarkdownApp {
                                     }
                                 }
 
-                                // Header title (pre-computed truncation)
-                                let response = ui.selectable_label(false, &header.display_title);
+                                let response = ui.add(
+                                    egui::Button::selectable(false, &header.title)
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                );
 
                                 // Collect header for MCP
                                 #[cfg(feature = "mcp")]
@@ -3518,6 +4485,14 @@ impl MarkdownApp {
                         }
                     });
             });
+        self.outline_width = panel.response.rect.width();
+        // Right panel: the draggable edge is its left border.
+        paint_sidebar_resize_affordance(
+            ctx,
+            panel.response.rect.left(),
+            panel.response.rect.y_range(),
+            egui::Id::new("outline"),
+        );
 
         // Register all collected widgets with MCP bridge
         #[cfg(feature = "mcp")]
@@ -3541,11 +4516,9 @@ impl MarkdownApp {
                         Some(byte_offset_of_line_start(&tab.content, header.line_number));
                     return;
                 }
-                // Composite key disambiguates duplicate-titled headers (e.g. two
-                // `## Installation` sections). Each occurrence has its own
-                // `nth_with_same_text` index assigned at parse time, and the
-                // renderer records positions under the same composite scheme.
-                let key = header_position_key(&header.normalized_title, header.nth_with_same_text);
+                // The renderer records the same source-stable key, so formatting
+                // and duplicate display titles cannot redirect the click.
+                let key = header_position_key(header.source_start);
                 // Try to get actual rendered position from cache first.
                 // With virtualization, the cache may hold a stale value from a
                 // partial render — record the key for the post-render
@@ -3557,11 +4530,10 @@ impl MarkdownApp {
                     let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
                         * tab.last_content_height;
                     tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
+                    // The estimate only gets us near the target. Request one
+                    // complete paint so the corrective pass can measure it.
+                    tab.pending_header_click_key = Some(key);
                 }
-                // Remember the click target — once the bootstrap full paint
-                // triggered by `pending_scroll_offset` populates the cache, the
-                // corrective step in `render_tab_content` snaps to the precise y.
-                tab.pending_header_click_key = Some(key);
             }
         }
     }
@@ -3699,8 +4671,15 @@ impl MarkdownApp {
         }
     }
 
-    fn render_tab_content(&mut self, ui: &mut egui::Ui, ctrl_held: bool) -> Option<PathBuf> {
-        let mut open_in_new_tab: Option<PathBuf> = None;
+    /// Render the active tab's content. Returns a path and optional
+    /// `#fragment` when the renderer hook requests it be opened in a new tab.
+    fn render_tab_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctrl_held: bool,
+    ) -> Option<(PathBuf, Option<String>)> {
+        let mut open_in_new_tab: Option<(PathBuf, Option<String>)> = None;
+        let mut navigation_error = None;
 
         // Snapshot search state before taking a mutable borrow on the active tab
         let search_is_open = self.search.is_open;
@@ -3729,13 +4708,19 @@ impl MarkdownApp {
             tab.cache.clear_search_ranges();
         }
 
+        // A search correction grants exactly one full-paint attempt. Some
+        // source matches (for example Markdown syntax markers) have no
+        // rendered glyph and therefore never record a Y; do not let those
+        // matches disable viewport clipping forever.
+        let correct_search_this_frame =
+            take_search_correction_request(&mut tab.correct_active_search_pending);
 
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
         egui::Frame::NONE
             .inner_margin(egui::Margin {
                 left: 8,
-                right: 3,
+                right: CONTENT_RIGHT_RESIZE_GUTTER,
                 ..Default::default()
             })
             .show(ui, |ui| {
@@ -3791,23 +4776,36 @@ impl MarkdownApp {
                 // version through builder methods. The returned ScrollAreaOutput
                 // exposes state.offset and inner_rect for the post-render
                 // selection-preserving wheel hack below.
+                let force_full_render =
+                    tab.pending_header_click_key.is_some() || correct_search_this_frame;
                 let pending = tab.pending_scroll_offset.take();
                 let default_width = content_default_width(self.full_width_content);
+                let content_width =
+                    content_width_limit(self.full_width_content, content_rect.width());
+                // Line heights follow the emulated viewer (GitHub 1.5/1.45,
+                // VS Code preview 1.6/1.36); the font preset owns the metrics.
+                let (preset_line_height, preset_code_line_height) = self.font_preset.line_heights();
                 let mut viewer = CommonMarkViewer::new()
                     .default_implicit_uri_scheme(&tab.base_uri)
                     .max_image_width(Some(800))
                     .default_width(default_width)
-                    // Tables are not bound by the reading column (#64): a wide
-                    // table spans the whole content pane and scrolls there,
-                    // while prose keeps the reading width.
-                    .table_max_width(Some(content_rect.width() as usize))
+                    // Full Width governs the complete document layout. With
+                    // the reading cap active, tables reflow within it; their
+                    // horizontal scroller still handles minimum-width or
+                    // user-resized overflow (#110).
+                    .table_max_width(Some(content_width))
                     .indentation_spaces(2)
                     .use_strong_font_family(true)
+                    // Frontmatter is metadata, not prose: show it as a
+                    // key/value table rather than a thematic break plus a
+                    // paragraph of raw `key: value` lines (#117).
+                    .render_frontmatter(true)
+                    .math_scale(self.math_scale)
                     .show_alt_text_on_hover(true)
                     .syntax_theme_dark("base16-ocean.dark")
                     .syntax_theme_light("base16-ocean.light")
-                    .line_height(1.5)
-                    .code_line_height(1.3)
+                    .line_height(preset_line_height)
+                    .code_line_height(preset_code_line_height)
                     .paragraph_spacing(2.0)
                     .heading_spacing_above(2.0)
                     .heading_spacing_below(0.75)
@@ -3820,21 +4818,23 @@ impl MarkdownApp {
                         blocks,
                     }));
                 }
-                let mut scroll_output = viewer.scroll_source(egui::scroll_area::ScrollSource {
-                    scroll_bar: true,
-                    drag: false,
-                    mouse_wheel: true,
-                })
-                .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+                let mut scroll_output = viewer
+                    .force_full_render(force_full_render)
+                    .scroll_source(egui::scroll_area::ScrollSource {
+                        scroll_bar: true,
+                        drag: false,
+                        mouse_wheel: true,
+                    })
+                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
 
                 // ---- PSE: fold per-block feedback into session buffers ----
                 if live_salt.is_some() {
                     // Drop any legacy single-editor feedback; sessions use
                     // take_session_feedback exclusively.
                     tab.cache.take_edit_feedback();
-                    for fb in tab.cache.take_session_feedback(
-                        &tab.source_editor_id().with("pse"),
-                    ) {
+                    for fb in
+                        tab.cache.take_session_feedback(&tab.source_editor_id().with("pse"))
+                    {
                         if fb.changed {
                             if let Some(buf) = tab.session_buffers.get_mut(fb.index) {
                                 if *buf != fb.text {
@@ -3871,7 +4871,7 @@ impl MarkdownApp {
                 // jump — without this gate the block would re-trigger every
                 // frame the active match is off-screen, fighting the user's
                 // wheel input and locking the view (issue #19).
-                if tab.correct_active_search_pending {
+                if correct_search_this_frame {
                     if let Some(actual_y) = tab.cache.active_search_y() {
                         let current_scroll = scroll_output.state.offset.y;
                         let viewport_top = current_scroll;
@@ -3889,9 +4889,6 @@ impl MarkdownApp {
                                 tab.pending_scroll_offset = Some(want_scroll);
                             }
                         }
-                        // Clear the one-shot regardless of which branch ran;
-                        // the corrective block has now had its chance to snap.
-                        tab.correct_active_search_pending = false;
                     }
                 }
 
@@ -3943,15 +4940,12 @@ impl MarkdownApp {
 
         // Check for clicked links
         if let Some(clicked_link) = tab.check_link_hooks() {
-            if ctrl_held {
-                // Open in new tab
-                if let Some(target_path) = tab.resolve_link(&clicked_link) {
-                    open_in_new_tab = Some(target_path);
-                }
-            } else {
-                // Navigate in current tab
-                tab.navigate_to_link(&clicked_link);
-            }
+            (open_in_new_tab, navigation_error) =
+                handle_local_link_click(tab, &clicked_link, ctrl_held);
+        }
+
+        if let Some(error) = navigation_error {
+            self.error_message = Some(error);
         }
 
         open_in_new_tab
@@ -3966,15 +4960,14 @@ impl MarkdownApp {
             return action;
         }
 
-        egui::SidePanel::left("file_explorer")
+        let panel = egui::SidePanel::left("file_explorer")
             .resizable(true)
-            .default_width(200.0)
-            .min_width(150.0)
-            .max_width(300.0)
+            .default_width(self.explorer_width)
+            .width_range(SIDEBAR_MIN_WIDTH..=f32::INFINITY)
             .frame(
                 egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                     left: 8,
-                    right: 8,
+                    right: EXPLORER_RIGHT_RESIZE_GUTTER,
                     top: 8,
                     bottom: 8,
                 }),
@@ -4078,7 +5071,7 @@ impl MarkdownApp {
                 let open_paths = self.open_tab_paths.clone();
 
                 // File tree inside ScrollArea
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .id_salt("file_explorer")
                     .show(ui, |ui| {
@@ -4105,6 +5098,14 @@ impl MarkdownApp {
                     self.reconcile_explorer_watches();
                 }
             });
+        self.explorer_width = panel.response.rect.width();
+        // Left panel: the draggable edge is its right border.
+        paint_sidebar_resize_affordance(
+            ctx,
+            panel.response.rect.right(),
+            panel.response.rect.y_range(),
+            egui::Id::new("file_explorer"),
+        );
 
         action
     }
@@ -4140,12 +5141,7 @@ impl MarkdownApp {
         let indent = depth * 16;
 
         match node {
-            FileTreeNode::File {
-                path,
-                name,
-                display_name,
-                ..
-            } => {
+            FileTreeNode::File { path, name, .. } => {
                 // Calculate flash intensity for this file
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -4160,12 +5156,15 @@ impl MarkdownApp {
                     // Highlight if file is open in a tab
                     let is_open = open_paths.contains(path);
                     let text = if is_open {
-                        egui::RichText::new(display_name.as_str()).strong()
+                        egui::RichText::new(name.as_str()).strong()
                     } else {
-                        egui::RichText::new(display_name.as_str())
+                        egui::RichText::new(name.as_str())
                     };
 
-                    let response = ui.selectable_label(is_open, text);
+                    let response = ui.add(
+                        egui::Button::selectable(is_open, text)
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
                     #[cfg(feature = "mcp")]
                     {
                         let state_value = if is_open { "open" } else { "" };
@@ -4177,10 +5176,6 @@ impl MarkdownApp {
                         );
                     }
 
-                    // Show full name on hover if truncated
-                    if display_name.len() != name.len() {
-                        response.clone().on_hover_text(name);
-                    }
                     if response.clicked() {
                         action.file_to_open = Some(path.clone());
                     }
@@ -4221,12 +5216,7 @@ impl MarkdownApp {
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
                 }
             }
-            FileTreeNode::Directory {
-                path,
-                name,
-                display_name,
-                ..
-            } => {
+            FileTreeNode::Directory { path, name, .. } => {
                 // Calculate flash intensity for this directory
                 let flash_intensity = self.get_flash_intensity(path);
                 let dark_mode = self.dark_mode;
@@ -4258,7 +5248,8 @@ impl MarkdownApp {
                     ui.label(folder_icon);
 
                     let response = ui.add(
-                        egui::Label::new(display_name.as_str())
+                        egui::Label::new(name.as_str())
+                            .extend()
                             .selectable(false)
                             .sense(egui::Sense::click()),
                     );
@@ -4271,11 +5262,6 @@ impl MarkdownApp {
                             &response,
                             Some(state_value),
                         );
-                    }
-
-                    // Show full name on hover if truncated
-                    if display_name.len() != name.len() {
-                        response.clone().on_hover_text(name);
                     }
 
                     // Click directory name to toggle expansion
@@ -4328,6 +5314,265 @@ impl MarkdownApp {
         }
 
         action
+    }
+
+    fn render_color_settings(&mut self, ctx: &egui::Context) {
+        if !self.show_color_settings_dialog {
+            return;
+        }
+
+        let mut open = true;
+        // Set inside the window closure, applied after `.show()` returns —
+        // same one-shot-flag pattern the font/tab-close deferred actions use
+        // elsewhere in this file. Each row is independently resettable, so
+        // each gets its own flag.
+        let mut new_highlight_color: Option<Option<egui::Color32>> = None;
+        let mut new_link_color: Option<Option<egui::Color32>> = None;
+
+        egui::Window::new("Colors")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Highlight Color:");
+                    // Read the currently *effective* color (override or
+                    // theme default — update() already applied Visuals for
+                    // this frame) rather than re-deriving egui's own
+                    // dark/light selection defaults by hand.
+                    let mut color = ui.visuals().selection.bg_fill;
+                    let color_btn = ui.color_edit_button_srgba(&mut color);
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Colors Dialog: Highlight Color",
+                        "color",
+                        &color_btn,
+                        None,
+                    );
+                    if color_btn.changed() {
+                        new_highlight_color = Some(Some(color));
+                    }
+
+                    let reset_btn =
+                        ui.add_enabled(self.highlight_color.is_some(), egui::Button::new("Reset"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Colors Dialog: Highlight Color Reset",
+                        "button",
+                        &reset_btn,
+                        None,
+                    );
+                    if reset_btn.clicked() {
+                        new_highlight_color = Some(None);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Link Color:");
+                    let mut color = ui.visuals().hyperlink_color;
+                    let color_btn = ui.color_edit_button_srgba(&mut color);
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Colors Dialog: Link Color",
+                        "color",
+                        &color_btn,
+                        None,
+                    );
+                    if color_btn.changed() {
+                        new_link_color = Some(Some(color));
+                    }
+
+                    let reset_btn =
+                        ui.add_enabled(self.link_color.is_some(), egui::Button::new("Reset"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Colors Dialog: Link Color Reset",
+                        "button",
+                        &reset_btn,
+                        None,
+                    );
+                    if reset_btn.clicked() {
+                        new_link_color = Some(None);
+                    }
+                });
+            });
+
+        self.show_color_settings_dialog = open;
+        if let Some(color) = new_highlight_color {
+            self.highlight_color = color;
+        }
+        if let Some(color) = new_link_color {
+            self.link_color = color;
+        }
+    }
+
+    fn render_font_settings(&mut self, ctx: &egui::Context) {
+        if !self.show_font_dialog {
+            return;
+        }
+
+        let mut open = true;
+        // Set inside the window closure, applied after `.show()` returns —
+        // the list rows borrow `available_font_families` while the closure
+        // runs, so a picked name can't mutate `self` in place.
+        let mut new_selection: Option<Option<String>> = None;
+
+        // Single font dialog: preset, text size, and family picker in one
+        // place. Handlers only mutate state — the `last_applied_font_config`
+        // diff gate in update() rebuilds the font chains once per change.
+        egui::Window::new("Fonts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                // Markdown font presets. Missing preset faces degrade to the
+                // app's own fallback chain.
+                ui.label("Preset");
+                ui.horizontal_wrapped(|ui| {
+                    for preset in FontPreset::ALL {
+                        let active = self.font_preset == preset;
+                        let preset_btn = ui
+                            .selectable_label(active, preset.label())
+                            .on_hover_text(preset.description());
+                        #[cfg(feature = "mcp")]
+                        self.mcp_bridge.register_widget(
+                            &format!("Font Dialog: Preset: {}", preset.label()),
+                            "button",
+                            &preset_btn,
+                            Some(if active { "selected" } else { "" }),
+                        );
+                        if preset_btn.clicked() && !active {
+                            self.font_preset = preset;
+                        }
+                    }
+                });
+                if self.selected_font_family.is_some() {
+                    ui.small(
+                        "A picked family leads the body chain; presets still \
+                         set the code font and line heights.",
+                    );
+                }
+
+                // Shared text-size classes: one scale for every preset.
+                ui.add_space(2.0);
+                ui.label("Text Size");
+                ui.horizontal_wrapped(|ui| {
+                    for size in TextSizeClass::ALL {
+                        let active = self.text_size_class == size;
+                        let size_btn = ui
+                            .selectable_label(active, size.label())
+                            .on_hover_text("Base text size; headings and code scale with it");
+                        #[cfg(feature = "mcp")]
+                        self.mcp_bridge.register_widget(
+                            &format!("Font Dialog: Size: {}", size.label()),
+                            "button",
+                            &size_btn,
+                            Some(if active { "selected" } else { "" }),
+                        );
+                        if size_btn.clicked() && !active {
+                            self.text_size_class = size;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.label("Family");
+
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    let filter_edit = ui.text_edit_singleline(&mut self.font_filter);
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Font Dialog: Search",
+                        "textbox",
+                        &filter_edit,
+                        None,
+                    );
+                    #[cfg(not(feature = "mcp"))]
+                    let _ = filter_edit;
+                });
+
+                // One canonical name per body-capable family, scanned once in
+                // the background at startup. While the scan is running, only
+                // "System Default" is offered.
+                if self.available_font_families.is_empty() && self.pending_font_family_scan.is_some()
+                {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Scanning installed fonts…");
+                    });
+                }
+
+                // Only the empty-filter (common) case avoids allocating: it
+                // reuses `available_font_families` directly. A non-empty
+                // filter needs one Vec<usize> of matching indices, built from
+                // the precomputed lowercase names (no per-name allocation).
+                let filter = self.font_filter.to_ascii_lowercase();
+                let filtered_indices: Option<Vec<usize>> = if filter.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.available_font_families_lower
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, lower)| lower.contains(&filter))
+                            .map(|(i, _)| i)
+                            .collect(),
+                    )
+                };
+                let match_count = filtered_indices
+                    .as_ref()
+                    .map_or(self.available_font_families.len(), Vec::len);
+
+                let row_height = ui.spacing().interact_size.y;
+                // auto_shrink_x = false: egui's default (TRUE) shrinks the
+                // area to its widest row, which paints the floating scrollbar
+                // mid-dialog instead of at the window's right edge.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(300.0)
+                    .show_rows(
+                    ui,
+                    row_height,
+                    match_count + 1, // + 1 for the pinned "System Default" row
+                    |ui, rows| {
+                        for row in rows {
+                            if row == 0 {
+                                let default_selected = self.selected_font_family.is_none();
+                                let default_btn =
+                                    ui.selectable_label(default_selected, "System Default");
+                                #[cfg(feature = "mcp")]
+                                self.mcp_bridge.register_widget(
+                                    "Font Dialog: System Default",
+                                    "button",
+                                    &default_btn,
+                                    Some(if default_selected { "selected" } else { "" }),
+                                );
+                                if default_btn.clicked() {
+                                    new_selection = Some(None);
+                                }
+                                continue;
+                            }
+                            let font_index = filtered_indices
+                                .as_ref()
+                                .map_or(row - 1, |indices| indices[row - 1]);
+                            let name = &self.available_font_families[font_index];
+                            let is_selected =
+                                self.selected_font_family.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(is_selected, name).clicked() {
+                                new_selection = Some(Some(name.clone()));
+                            }
+                        }
+                    },
+                );
+            });
+
+        self.show_font_dialog = open;
+        if let Some(choice) = new_selection {
+            self.selected_font_family = choice;
+        }
     }
 
     fn render_lightbox(&mut self, ctx: &egui::Context) {
@@ -4590,12 +5835,21 @@ impl eframe::App for MarkdownApp {
             zoom_level: Some(self.zoom_level),
             show_outline: Some(self.show_outline),
             full_width_content: Some(self.full_width_content),
+            math_scale: Some(self.math_scale),
+            highlight_color: self.highlight_color.map(|c| [c.r(), c.g(), c.b(), c.a()]),
+            link_color: self.link_color.map(|c| [c.r(), c.g(), c.b(), c.a()]),
+            selected_font_family: self.selected_font_family.clone(),
+            smooth_text_rendering: Some(self.smooth_text_rendering),
+            font_preset: Some(self.font_preset),
+            text_size_class: Some(self.text_size_class),
             open_tabs: Some(self.get_open_tab_paths()),
             active_tab: Some(self.active_tab),
             show_explorer: Some(self.show_explorer),
             explorer_root: self.file_explorer.root.clone(),
             expanded_dirs: Some(self.file_explorer.expanded_dirs.iter().cloned().collect()),
             explorer_sort_order: Some(self.file_explorer.sort_order),
+            explorer_width: Some(self.explorer_width),
+            outline_width: Some(self.outline_width),
             recent_files: Some(self.recent_files.clone()),
         };
         eframe::set_value(storage, APP_KEY, &state);
@@ -4648,10 +5902,10 @@ impl eframe::App for MarkdownApp {
             self.title_dirty = true;
         }
 
-        // Poll for async GVFS directory scan completion
+        // Poll for asynchronous Explorer root scan completion.
         if self.file_explorer.pending_scan.is_some() {
             if self.file_explorer.poll_pending_scan() {
-                log::info!("GVFS directory scan completed");
+                log::info!("Explorer directory scan completed");
             }
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -4675,10 +5929,15 @@ impl eframe::App for MarkdownApp {
             std::thread::sleep(Duration::from_millis(16)); // ~60 FPS cap
         }
 
-        // Apply theme settings only when dark_mode changes
-        if self.last_applied_dark_mode != Some(self.dark_mode) {
+        // Apply theme settings when dark_mode or a color override changes
+        if self.last_applied_dark_mode != Some(self.dark_mode)
+            || self.last_applied_highlight_color != self.highlight_color
+            || self.last_applied_link_color != self.link_color
+        {
             self.last_applied_dark_mode = Some(self.dark_mode);
-            let visuals = if self.dark_mode {
+            self.last_applied_highlight_color = self.highlight_color;
+            self.last_applied_link_color = self.link_color;
+            let mut visuals = if self.dark_mode {
                 let mut v = egui::Visuals::dark();
                 v.panel_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
                 v.window_fill = egui::Color32::from_rgb(0x12, 0x12, 0x12);
@@ -4693,10 +5952,80 @@ impl eframe::App for MarkdownApp {
                 v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
                 v
             };
+            if let Some(color) = self.highlight_color {
+                visuals.selection.bg_fill = color;
+            }
+            if let Some(color) = self.link_color {
+                visuals.hyperlink_color = color;
+            }
             ctx.set_visuals(visuals);
         }
 
-        ctx.set_zoom_factor(self.zoom_level);
+        // Collect the background font-family scan (async phase: poll the
+        // channel, never block the UI thread). Fills the picker's family
+        // list once, then drops the channel.
+        if self.pending_font_family_scan.is_some() {
+            let received = self
+                .pending_font_family_scan
+                .as_ref()
+                .map(Receiver::try_recv);
+            match received {
+                Some(Ok(names)) => {
+                    self.available_font_families_lower = names
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect();
+                    self.available_font_families = names;
+                    self.pending_font_family_scan = None;
+                    // The list may have landed while the font dialog was
+                    // already open; repaint so it appears without input.
+                    self.egui_ctx.request_repaint();
+                }
+                Some(Err(TryRecvError::Empty)) | None => {}
+                Some(Err(TryRecvError::Disconnected)) => {
+                    // Sender dropped without sending (thread spawn raced or
+                    // panicked) — stop polling, keep whatever list we have.
+                    self.pending_font_family_scan = None;
+                }
+            }
+        }
+
+        // Reload fonts only when the selected family, preset, or size class
+        // actually changes — rescanning the system font collection on every
+        // frame would be expensive and is unnecessary (see
+        // docs/EGUI_WORKFLOW.md).
+        let font_config = (
+            self.selected_font_family.clone(),
+            self.font_preset,
+            self.text_size_class,
+        );
+        if self.last_applied_font_config.as_ref() != Some(&font_config) {
+            self.last_applied_font_config = Some(font_config.clone());
+            setup_fonts(
+                ctx,
+                self.selected_font_family.as_deref(),
+                self.font_preset,
+                self.text_size_class,
+            );
+        }
+
+        // Apply display zoom only when it actually changed: set_zoom_factor
+        // is not free (it can invalidate glyph caches), and the value only
+        // moves on user input or state restore.
+        if self.last_applied_zoom_level != Some(self.zoom_level) {
+            ctx.set_zoom_factor(self.zoom_level);
+            self.last_applied_zoom_level = Some(self.zoom_level);
+        }
+
+        // Disabling pixel-snapping lets glyphs render at their exact
+        // sub-pixel position instead of each being individually rounded to
+        // the physical pixel grid — the rounding is what makes text look
+        // unevenly spaced/jagged at the fractional effective pixel ratios
+        // this app's zoom levels commonly produce. Trivial cost (one write
+        // into egui's own memory), so no last-applied change-gate needed.
+        ctx.tessellation_options_mut(|opts| {
+            opts.round_text_to_pixels = !self.smooth_text_rendering;
+        });
 
         // Update window title only when dirty
         if self.title_dirty {
@@ -4715,7 +6044,8 @@ impl eframe::App for MarkdownApp {
         let mut toggle_outline = false;
         let mut toggle_explorer = false;
         let mut quit_app = false;
-        let mut zoom_delta: f32 = 0.0;
+        let mut zoom_factor_request: Option<f32> = None;
+        let mut zoom_reset = false;
         let mut go_back = false;
         let mut go_forward = false;
         let mut close_tab = false;
@@ -4731,37 +6061,37 @@ impl eframe::App for MarkdownApp {
         let mut save_active = false;
         let mut toggle_source_mode = false;
 
-        // Ctrl+/- zoom: applies to lightbox when open, document otherwise
+        // Ctrl+/- zoom: applies to lightbox when open, document otherwise.
+        // Steps are multiplicative (×1.25) like browsers and the lightbox.
         ctx.input(|i| {
             if i.modifiers.ctrl
                 && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
             {
-                zoom_delta = 0.1;
+                zoom_factor_request = Some(ZOOM_STEP);
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) {
-                zoom_delta = -0.1;
+                zoom_factor_request = Some(1.0 / ZOOM_STEP);
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Num0) {
-                if self.lightbox.is_some() {
-                    // Reset lightbox zoom
-                    zoom_delta = 0.0;
-                    if let Some(lb) = &mut self.lightbox {
-                        lb.zoom = 1.0;
-                    }
+                if let Some(lightbox) = &mut self.lightbox {
+                    // Reset lightbox zoom only; the document has its own reset.
+                    lightbox.zoom = 1.0;
                 } else {
-                    zoom_delta = 1.0 - self.zoom_level;
+                    zoom_reset = true;
                 }
             }
         });
 
         // Apply zoom to lightbox or document
-        if zoom_delta != 0.0 {
-            if let Some(lb) = &mut self.lightbox {
-                let factor = if zoom_delta > 0.0 { 1.25 } else { 1.0 / 1.25 };
-                lb.zoom = (lb.zoom * factor).clamp(0.1, 10.0);
+        if let Some(factor) = zoom_factor_request {
+            if let Some(lightbox) = &mut self.lightbox {
+                lightbox.zoom = (lightbox.zoom * factor).clamp(0.1, 10.0);
             } else {
-                self.zoom_level = (self.zoom_level + zoom_delta).clamp(0.5, 3.0);
+                self.zoom_level = zoomed(self.zoom_level, factor);
             }
+        }
+        if zoom_reset && self.lightbox.is_none() {
+            self.zoom_level = 1.0;
         }
 
         if self.lightbox.is_none() {
@@ -4782,7 +6112,7 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
                     close_tab = true;
                 }
-                // Ctrl+T: New tab (open file dialog)
+                // Ctrl+T: Open a file in a new tab
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::T) {
                     new_tab = true;
                 }
@@ -4839,28 +6169,22 @@ impl eframe::App for MarkdownApp {
                 }
                 // Esc (Live mode, block active, find bar closed): stop
                 // editing the active block, return to the rendered view.
-                if i.key_pressed(egui::Key::Escape)
-                    && !self.search.is_open
-                {
-                    let deactivate = self
-                        .tabs
-                        .get(self.active_tab)
-                        .is_some_and(|t| t.edit_mode == EditMode::Live && t.active_edit_byte.is_some());
+                if i.key_pressed(egui::Key::Escape) && !self.search.is_open {
+                    let deactivate = self.tabs.get(self.active_tab).is_some_and(|t| {
+                        t.edit_mode == EditMode::Live && t.active_edit_byte.is_some()
+                    });
                     if deactivate {
                         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                             tab.active_edit_byte = None;
                         }
                     }
                 }
-                // Ctrl + scroll wheel for zoom
-                if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
-                    self.zoom_level = (self.zoom_level
-                        + if i.raw_scroll_delta.y > 0.0 {
-                            0.1
-                        } else {
-                            -0.1
-                        })
-                    .clamp(0.5, 3.0);
+                // Ctrl + scroll wheel / pinch to zoom (multiplicative, like
+                // browsers). The lightbox captures wheel input itself in
+                // raw_input_hook, so this only runs for the document.
+                let wheel_zoom_factor = i.zoom_delta();
+                if wheel_zoom_factor != 1.0 {
+                    self.zoom_level = zoomed(self.zoom_level, wheel_zoom_factor);
                 }
                 // F5: Toggle file watching
                 if i.key_pressed(egui::Key::F5) {
@@ -4977,14 +6301,10 @@ impl eframe::App for MarkdownApp {
             self.focus_tab(idx);
         }
         if go_back {
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                tab.navigate_back();
-            }
+            self.navigate_active_history(true);
         }
         if go_forward {
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                tab.navigate_forward();
-            }
+            self.navigate_active_history(false);
         }
 
         // Search bar actions (Ctrl+F open, Enter/Shift+Enter cycle, Esc close)
@@ -5041,7 +6361,7 @@ impl eframe::App for MarkdownApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui
-                        .add(egui::Button::new("New Tab...").shortcut_text("Ctrl+T"))
+                        .add(egui::Button::new("Open File in New Tab...").shortcut_text("Ctrl+T"))
                         .clicked()
                     {
                         self.open_file_dialog();
@@ -5152,9 +6472,7 @@ impl eframe::App for MarkdownApp {
                         .add_enabled(can_back, egui::Button::new("← Back").shortcut_text("Alt+←"))
                         .clicked()
                     {
-                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                            tab.navigate_back();
-                        }
+                        self.navigate_active_history(true);
                         ui.close();
                     }
 
@@ -5170,9 +6488,7 @@ impl eframe::App for MarkdownApp {
                         )
                         .clicked()
                     {
-                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                            tab.navigate_forward();
-                        }
+                        self.navigate_active_history(false);
                         ui.close();
                     }
                 });
@@ -5320,6 +6636,56 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    let highlight_btn = ui.add(egui::Button::new("Colors…"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Colors",
+                        "button",
+                        &highlight_btn,
+                        None,
+                    );
+                    if highlight_btn.clicked() {
+                        self.show_color_settings_dialog = true;
+                        ui.close();
+                    }
+
+                    // Single font entry point: opens the Fonts dialog, which
+                    // holds the preset, the text size, and the family picker.
+                    let fonts_btn = ui.add(egui::Button::new("Fonts…"));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Fonts",
+                        "button",
+                        &fonts_btn,
+                        self.selected_font_family.as_deref(),
+                    );
+                    if fonts_btn.clicked() {
+                        self.show_font_dialog = true;
+                        ui.close();
+                    }
+
+                    let smooth_text_text = if self.smooth_text_rendering {
+                        "✓ Smooth Text Rendering"
+                    } else {
+                        "Smooth Text Rendering"
+                    };
+                    let smooth_text_btn = ui.add(egui::Button::new(smooth_text_text));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Smooth Text Rendering",
+                        "button",
+                        &smooth_text_btn,
+                        Some(if self.smooth_text_rendering {
+                            "on"
+                        } else {
+                            "off"
+                        }),
+                    );
+                    if smooth_text_btn.clicked() {
+                        self.smooth_text_rendering = !self.smooth_text_rendering;
+                        ui.close();
+                    }
+
                     ui.separator();
 
                     let zoom_in_btn = ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"));
@@ -5331,7 +6697,7 @@ impl eframe::App for MarkdownApp {
                         None,
                     );
                     if zoom_in_btn.clicked() {
-                        self.zoom_level = (self.zoom_level + 0.1).min(3.0);
+                        self.zoom_level = zoomed(self.zoom_level, ZOOM_STEP);
                         ui.close();
                     }
                     let zoom_out_btn =
@@ -5344,7 +6710,7 @@ impl eframe::App for MarkdownApp {
                         None,
                     );
                     if zoom_out_btn.clicked() {
-                        self.zoom_level = (self.zoom_level - 0.1).max(0.5);
+                        self.zoom_level = zoomed(self.zoom_level, 1.0 / ZOOM_STEP);
                         ui.close();
                     }
                     let reset_zoom_btn =
@@ -5360,6 +6726,38 @@ impl eframe::App for MarkdownApp {
                         self.zoom_level = 1.0;
                         ui.close();
                     }
+
+                    ui.separator();
+                    // Distinct from zoom: zoom scales the whole UI, leaving
+                    // formulas and prose in the same ratio. This changes only
+                    // the formulas, relative to the text around them.
+                    ui.menu_button("Formula Size", |ui| {
+                        for (label, scale) in [
+                            ("100%", 1.0f32),
+                            ("110%", 1.1),
+                            ("125%", 1.25),
+                            ("150%", 1.5),
+                        ] {
+                            let selected = (self.math_scale - scale).abs() < 0.001;
+                            let text = if selected {
+                                format!("✓ {label}")
+                            } else {
+                                format!("   {label}")
+                            };
+                            let btn = ui.add(egui::Button::new(text));
+                            #[cfg(feature = "mcp")]
+                            self.mcp_bridge.register_widget(
+                                &format!("Menu: View → Formula Size → {label}"),
+                                "button",
+                                &btn,
+                                Some(if selected { "selected" } else { "unselected" }),
+                            );
+                            if btn.clicked() {
+                                self.math_scale = scale;
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 #[cfg(feature = "mcp")]
                 self.mcp_bridge
@@ -5435,14 +6833,10 @@ impl eframe::App for MarkdownApp {
 
         // Handle navigation button clicks (must be after menu bar UI)
         if go_back {
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                tab.navigate_back();
-            }
+            self.navigate_active_history(true);
         }
         if go_forward {
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                tab.navigate_forward();
-            }
+            self.navigate_active_history(false);
         }
 
         // Show error message if any
@@ -5499,9 +6893,14 @@ impl eframe::App for MarkdownApp {
         // File explorer (left sidebar)
         let explorer_action = self.render_file_explorer(ctx);
 
-        // Open file from explorer (left-click)
+        // Explorer matches document links: primary click replaces the active
+        // document, while Ctrl/Cmd+click opens (or focuses) a separate tab.
         if let Some(path) = explorer_action.file_to_open {
-            self.open_in_new_tab(path);
+            if ctrl_held {
+                self.open_in_new_tab(path);
+            } else {
+                self.navigate_active_tab_to(&path);
+            }
         }
 
         // Close tab from explorer (middle-click on open file)
@@ -5515,16 +6914,31 @@ impl eframe::App for MarkdownApp {
         self.render_outline(ctx);
 
         // Main content area
-        let mut open_in_new_tab: Option<PathBuf> = None;
+        let mut open_in_new_tab: Option<(PathBuf, Option<String>)> = None;
+        let path_before_render = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
                 open_in_new_tab = self.render_tab_content(ui, ctrl_held);
             });
 
+        // A primary-clicked document link navigates inside Tab while it is
+        // rendered. Synchronize the app-level state that depends on tab paths.
+        let path_after_render = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
+        if path_after_render != path_before_render {
+            if let Some(path) = path_after_render {
+                self.record_recent(&path);
+            }
+            self.title_dirty = true;
+            self.refresh_open_tab_paths();
+            if self.watch_enabled {
+                self.update_watched_paths();
+            }
+        }
+
         // Open link in new tab if requested
-        if let Some(path) = open_in_new_tab {
-            self.open_in_new_tab(path);
+        if let Some((path, fragment)) = open_in_new_tab {
+            self.open_in_new_tab_with_fragment(path, fragment);
         }
 
         // Check if a mermaid diagram was clicked → open lightbox
@@ -5554,6 +6968,11 @@ impl eframe::App for MarkdownApp {
 
         // Lightbox overlay for enlarged diagrams or images
         self.render_lightbox(ctx);
+
+        // Highlight color picker window
+        self.render_color_settings(ctx);
+        // Document font picker window
+        self.render_font_settings(ctx);
 
         // Drag and drop overlay
         if self.is_dragging {
@@ -5587,6 +7006,76 @@ impl eframe::App for MarkdownApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In-memory stand-in for eframe's key/value storage so persistence
+    /// roundtrips run through the same RON encode/decode path as the app.
+    struct MemoryStorage(HashMap<String, String>);
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn font_preset_survives_a_persistence_roundtrip() {
+        let mut storage = MemoryStorage(HashMap::new());
+        let app_state = PersistedState {
+            font_preset: Some(FontPreset::Vscode),
+            text_size_class: Some(TextSizeClass::Large),
+            ..PersistedState::default()
+        };
+        eframe::set_value(&mut storage, APP_KEY, &app_state);
+
+        let restored: PersistedState = eframe::get_value(&storage, APP_KEY).expect("state decodes");
+
+        assert_eq!(restored.font_preset, Some(FontPreset::Vscode));
+        assert_eq!(restored.text_size_class, Some(TextSizeClass::Large));
+
+        // Absent field (older state files) falls back to the default preset.
+        let legacy: PersistedState = eframe::get_value(
+            &MemoryStorage(HashMap::from([(
+                APP_KEY.to_owned(),
+                "(dark_mode: Some(true))".to_owned(),
+            )])),
+            APP_KEY,
+        )
+        .expect("legacy state decodes");
+        assert_eq!(legacy.font_preset, None);
+        assert_eq!(legacy.font_preset.unwrap_or_default(), FontPreset::Current);
+        assert_eq!(legacy.text_size_class, None);
+        assert_eq!(
+            legacy.text_size_class.unwrap_or_default(),
+            TextSizeClass::Normal
+        );
+    }
+
+    #[test]
+    fn document_zoom_steps_are_multiplicative_and_clamped() {
+        assert_eq!(zoomed(1.0, ZOOM_STEP), 1.25);
+        assert!((zoomed(1.25, 1.0 / ZOOM_STEP) - 1.0).abs() < 1e-6);
+
+        // Same bounds the additive path clamped to before.
+        assert_eq!(zoomed(2.9, ZOOM_STEP), ZOOM_MAX);
+        assert_eq!(zoomed(0.6, 1.0 / ZOOM_STEP), ZOOM_MIN);
+
+        // Neutral and degenerate factors are no-ops (egui reports 1.0 on
+        // frames without a zoom gesture; guards against divide-by-style bugs).
+        assert_eq!(zoomed(1.7, 1.0), 1.7);
+        assert_eq!(zoomed(1.7, 0.0), 1.7);
+        assert_eq!(zoomed(1.7, -2.0), 1.7);
+    }
+
+    #[test]
+    fn zoom_bounds_match_the_persisted_value_clamp() {
+        // PersistedState load clamps with the same constants.
+        let persisted_level = 7.5_f32.clamp(ZOOM_MIN, ZOOM_MAX);
+        assert_eq!(persisted_level, ZOOM_MAX);
+    }
 
     #[test]
     fn push_recent_dedupes_and_moves_to_front() {
@@ -5721,6 +7210,17 @@ mod tests {
     }
 
     #[test]
+    fn version_flag_reports_crate_version() {
+        use clap::CommandFactory;
+
+        let version = Args::command()
+            .get_version()
+            .expect("--version should be wired up")
+            .to_string();
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
     fn capped_content_width_uses_optimal_width() {
         assert_eq!(content_default_width(false), Some(600));
     }
@@ -5728,6 +7228,52 @@ mod tests {
     #[test]
     fn full_width_content_uses_available_width() {
         assert_eq!(content_default_width(true), None);
+    }
+
+    #[test]
+    fn capped_content_applies_the_same_limit_to_tables() {
+        assert_eq!(content_width_limit(false, 900.0), 600);
+        assert_eq!(content_width_limit(false, 480.0), 480);
+    }
+
+    #[test]
+    fn full_width_tables_use_the_available_content_width() {
+        assert_eq!(content_width_limit(true, 900.0), 900);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portal_introspection_detects_file_chooser_interface() {
+        let output = br#"interface org.freedesktop.portal.FileChooser {"#;
+        assert!(portal_introspection_has_file_chooser(output));
+        assert!(!portal_introspection_has_file_chooser(
+            b"interface org.freedesktop.portal.OpenURI {"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_folder_picker_output_means_cancelled() {
+        assert_eq!(path_from_picker_output(Vec::new()), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn folder_picker_output_preserves_path_bytes() {
+        let bytes = b"/tmp/example folder".to_vec();
+        assert_eq!(
+            path_from_picker_output(bytes),
+            Some(PathBuf::from("/tmp/example folder"))
+        );
+    }
+
+    #[test]
+    fn search_correction_request_is_consumed_even_without_a_rendered_match() {
+        let mut pending = true;
+
+        assert!(take_search_correction_request(&mut pending));
+        assert!(!pending);
+        assert!(!take_search_correction_request(&mut pending));
     }
 
     #[test]
@@ -5876,21 +7422,419 @@ mod tests {
         assert_eq!(matches[0].byte_end, 11);
     }
 
+    /// Characterization table for issue #141: one place that says what a
+    /// Markdown destination resolves to.
+    ///
+    /// #188 landed this as a *baseline*, with rows marked `#141-N` recording
+    /// behavior that contradicted the semantics the issue proposes. Those rows
+    /// are the ones this change flips, and the markers now name what was
+    /// decided rather than what was merely observed.
     #[test]
-    fn shortcode_heading_parser_keeps_raw_identity_and_duplicate_index() {
-        let parsed = parse_headers("# Doc\n\n## Pin :pushpin:\n\n## Pin :pushpin:\n");
+    #[cfg(unix)]
+    fn local_destination_resolution_is_characterized_for_every_uri_shape() {
+        let dir = Path::new("/base/doc");
+        // (destination, is_local_markdown_link, resolve_local_link_path)
+        // Err(()) = reports rather than resolving; Ok(None) = nothing to open.
+        // One row: the destination, whether the gate accepts it, and what the
+        // resolver answers.
+        type Row<'a> = (&'a str, bool, Result<Option<&'a str>, ()>);
+        let table: &[Row<'_>] = &[
+            // 1. relative destinations resolve against the containing document
+            ("guide.md", true, Ok(Some("/base/doc/guide.md"))),
+            ("sub/guide.md", true, Ok(Some("/base/doc/sub/guide.md"))),
+            ("../up.md", true, Ok(Some("/base/doc/../up.md"))),
+            // 2. a fragment selects the document; the anchor is dropped
+            ("guide.md#section", true, Ok(Some("/base/doc/guide.md"))),
+            // #141-2 DECIDED: a query string is stripped like a fragment, and
+            // the gate agrees because it tests the extension of the stripped
+            // spelling. Before, the gate rejected `md?v=2` while the resolver
+            // put `?v=2` into the file name.
+            ("guide.md?v=2", true, Ok(Some("/base/doc/guide.md"))),
+            ("guide.md?v=2#s", true, Ok(Some("/base/doc/guide.md"))),
+            // 3. percent escapes are decoded exactly once
+            ("a%20b.md", true, Ok(Some("/base/doc/a b.md"))),
+            ("100%25.md", true, Ok(Some("/base/doc/100%.md"))),
+            ("bad%zz.md", true, Ok(Some("/base/doc/bad%zz.md"))),
+            // an unencoded `#` delimits a fragment, `%23` is a literal
+            // character — a relative destination and a file:// URI agree on
+            // both, which RFC 3986 requires
+            ("a%23b.md", true, Ok(Some("/base/doc/a#b.md"))),
+            (
+                "file:///base/doc/a%23b.md",
+                true,
+                Ok(Some("/base/doc/a#b.md")),
+            ),
+            // `a#b.md` names the file `a` with fragment `b.md`, so it is
+            // correctly not a Markdown link and correctly resolves to `a`
+            ("a#b.md", false, Ok(Some("/base/doc/a"))),
+            // #141-5 DECIDED: a destination that does not decode to UTF-8 is
+            // reported instead of resolving to nothing. It still passes the
+            // gate, because passing is what makes the error reachable.
+            ("bad%FF.md", true, Err(())),
+            // 4. platform paths
+            ("/abs/guide.md", true, Ok(Some("/abs/guide.md"))),
+            ("file:///tmp/guide.md", true, Ok(Some("/tmp/guide.md"))),
+            (
+                "file://localhost/tmp/guide.md",
+                true,
+                Ok(Some("/tmp/guide.md")),
+            ),
+            ("file://server/share/guide.md", false, Ok(None)),
+            ("C:/tmp/guide.md", false, Ok(None)),
+            // 8. other schemes stay external and are never reinterpreted
+            ("https://example.com/guide.md", false, Ok(None)),
+            ("http://example.com/guide.md", false, Ok(None)),
+            ("data:text/plain,x", false, Ok(None)),
+            ("mailto:a@b.c", false, Ok(None)),
+            ("weird+scheme:guide.md", false, Ok(None)),
+            // #141-8 DECIDED: a protocol-relative URL is external. It carries
+            // no scheme, so it used to be read as an absolute filesystem path
+            // and was even classified as a local Markdown link.
+            ("//evil.com/guide.md", false, Ok(None)),
+            // #141 DECIDED: nothing left to name a file with is external,
+            // rather than resolving to the containing directory.
+            ("#section", false, Ok(None)),
+            ("", false, Ok(None)),
+            ("?v=2", false, Ok(None)),
+        ];
+
+        for (destination, expect_local, expect_resolved) in table {
+            assert_eq!(
+                is_local_markdown_link(destination),
+                *expect_local,
+                "is_local_markdown_link({destination:?})"
+            );
+            let resolved = resolve_local_link_path(destination, dir)
+                .map(|path| path.map(|p| p.display().to_string()))
+                .map_err(|_| ());
+            assert_eq!(
+                resolved,
+                expect_resolved.map(|p| p.map(str::to_owned)),
+                "resolve_local_link_path({destination:?})"
+            );
+        }
+    }
+
+    /// The invariant that closes the dead-click class: whatever the gate lets
+    /// through must be something the resolver either turns into a path or
+    /// complains about. It must never answer "nothing to open", because such a
+    /// destination renders as an internal link and then does nothing at all
+    /// when clicked — the state #188 pinned for `bad%FF.md`.
+    ///
+    /// This replaces #188's `…disagree_on_four_shapes`, which asserted the two
+    /// functions *did* disagree and told its reader to drop the row once #141
+    /// decided. They now share one `classify_destination`, so the disagreement
+    /// is unrepresentable rather than merely fixed.
+    #[test]
+    #[cfg(unix)]
+    fn nothing_the_gate_accepts_can_resolve_to_silence() {
+        let dir = Path::new("/base/doc");
+        for destination in [
+            "guide.md",
+            "guide.md?v=2",
+            "guide.md#section",
+            "a%20b.md",
+            "100%25.md",
+            "bad%zz.md",
+            "bad%FF.md",
+            "/abs/guide.md",
+            "file:///tmp/guide.md",
+            "file://localhost/tmp/guide.md",
+            "a%23b.md",
+            "",
+            "#section",
+            "//evil.com/guide.md",
+        ] {
+            if !is_local_markdown_link(destination) {
+                continue;
+            }
+            match resolve_local_link_path(destination, dir) {
+                Ok(Some(_)) | Err(_) => {}
+                Ok(None) => panic!(
+                    "{destination:?} passes the gate but resolves to nothing: it \
+                     would render as an internal link and do nothing on click"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn shared_resolver_keeps_absolute_paths_and_literal_percent_names() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-edges-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let home = root.join("home.md");
+        let abs = root.join("absolute.md");
+        // `%` not followed by two hex digits is not an escape and must survive.
+        let literal = root.join("100%done.md");
+        fs::write(&home, "# Home").unwrap();
+        fs::write(&abs, "# Abs").unwrap();
+        fs::write(&literal, "# Literal").unwrap();
+
+        let mut tab = Tab::new(home.clone()).unwrap();
+
+        let abs_link = abs.to_string_lossy().to_string();
+        assert!(tab.navigate_to_link(&abs_link).unwrap(), "absolute path");
+        assert_eq!(tab.path, abs.canonicalize().unwrap());
+
+        assert!(
+            tab.navigate_to_link("100%done.md").unwrap(),
+            "literal percent"
+        );
+        assert_eq!(tab.path, literal.canonicalize().unwrap());
+
+        // an anchor-only destination is still not a path
+        assert!(!tab.navigate_to_link("#section").unwrap());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn plain_click_and_ctrl_click_resolve_the_same_link_identically() {
+        // #141: `resolve_link` (ctrl+click) and `navigate_to_link` (plain click)
+        // must resolve a destination identically. #78 taught percent-decoding
+        // and `file://` to the former only, so an encoded space opened in a new
+        // tab on ctrl+click and silently did nothing on a plain click.
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-baseline-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let spaced = root.join("docs with spaces");
+        fs::create_dir_all(&spaced).unwrap();
+        let home = root.join("home.md");
+        let guide = spaced.join("guide.md");
+        fs::write(&home, "# Home").unwrap();
+        fs::write(&guide, "# Guide").unwrap();
+
+        let mut tab = Tab::new(home.clone()).unwrap();
+        let encoded = "docs%20with%20spaces/guide.md";
+
+        // ctrl+click path: decodes, resolves
+        assert_eq!(
+            tab.resolve_link(encoded).unwrap(),
+            Some(guide.canonicalize().unwrap()),
+            "resolve_link should decode percent escapes"
+        );
+
+        // plain-click path must reach the same file
+        assert!(
+            tab.navigate_to_link(encoded).unwrap(),
+            "navigate_to_link must decode percent escapes too"
+        );
+        assert_eq!(tab.path, guide.canonicalize().unwrap());
+        assert!(tab.navigate_to_path(&home).unwrap());
+
+        // same divergence for file:// destinations
+        let uri = format!("file://{}", guide.canonicalize().unwrap().display());
+        assert_eq!(
+            tab.resolve_link(&uri).unwrap(),
+            Some(guide.canonicalize().unwrap()),
+            "resolve_link should accept file:// URIs"
+        );
+        assert!(
+            tab.navigate_to_link(&uri).unwrap(),
+            "navigate_to_link must accept file:// URIs too"
+        );
+        assert_eq!(tab.path, guide.canonicalize().unwrap());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn slugify_heading_matches_github_anchor_conventions() {
+        let cases = [
+            ("Hello World", "hello-world"),
+            ("Settings & Config", "settings--config"),
+            ("C++ & Rust?", "c--rust"),
+            ("42. The Meta", "42-the-meta"),
+            // Each space becomes its own hyphen; existing hyphens are kept.
+            ("A -- B_c", "a----b_c"),
+            ("Ünïcode Tïtle", "ünïcode-tïtle"),
+        ];
+        for (title, expected) in cases {
+            assert_eq!(
+                slugify_heading(title),
+                expected,
+                "slug of {title:?} must match the GitHub anchor convention"
+            );
+        }
+    }
+
+    #[test]
+    fn find_fragment_target_prefers_document_title_then_outline_order() {
+        let headers = vec![
+            Header {
+                level: 2,
+                title: "Installation".to_owned(),
+                source_start: 10,
+                line_number: 4,
+            },
+            Header {
+                level: 2,
+                title: "Settings & Config".to_owned(),
+                source_start: 90,
+                line_number: 20,
+            },
+        ];
+
+        // Slug semantics: case, punctuation and spacing differences all
+        // collapse to the same anchor.
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "installation"),
+            FragmentTarget::Header(_)
+        ));
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "settings--config"),
+            FragmentTarget::Header(_)
+        ));
+
+        // The first h1 is excluded from the outline but is still the page's
+        // primary anchor; it navigates to the top.
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "my-manual"),
+            FragmentTarget::DocumentTop
+        ));
+
+        // An unmatched or empty fragment is a no-op, not an error.
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "no-such-section"),
+            FragmentTarget::Missing
+        ));
+        assert!(matches!(
+            find_fragment_target(Some("My Manual"), &headers, "#"),
+            FragmentTarget::Missing
+        ));
+    }
+
+    #[test]
+    fn same_document_fragment_scrolls_without_touching_history() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-same-doc-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("single.md");
+        fs::write(&document, "# Title\n\ntext\n\n## A Section\n\ntext\n").unwrap();
+
+        let mut tab = Tab::new(document.clone()).unwrap();
+        let original_path = tab.path.clone();
+
+        assert!(
+            tab.navigate_to_link("#a-section").unwrap(),
+            "a matching same-document fragment must navigate"
+        );
+        assert_eq!(
+            tab.path, original_path,
+            "same-document navigation stays put"
+        );
+        assert!(tab.history_back.is_empty(), "no history entry for a scroll");
+        assert!(
+            tab.pending_header_click_key.is_some() || tab.pending_scroll_offset.is_some(),
+            "the click must schedule the scroll"
+        );
+
+        // An unmatched fragment does nothing at all — no navigation, and the
+        // scroll scheduled by the earlier match is left alone.
+        let key_before = tab.pending_header_click_key.clone();
+        assert!(!tab.navigate_to_link("#no-such-anchor").unwrap());
+        assert_eq!(tab.pending_header_click_key, key_before);
+        assert_eq!(tab.path, original_path);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cross_document_fragment_opens_and_lands_on_heading() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-141-cross-doc-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let home = root.join("home.md");
+        let guide = root.join("guide.md");
+        fs::write(&home, "# Home\n\n[Setup](guide.md#setup)\n").unwrap();
+        fs::write(&guide, "# Guide\n\nintro\n\n## Setup\n\nsteps\n").unwrap();
+
+        let mut tab = Tab::new(home.clone()).unwrap();
+        assert!(tab.navigate_to_link("guide.md#setup").unwrap());
+        assert_eq!(tab.path, guide.canonicalize().unwrap());
+        assert!(
+            tab.pending_header_click_key.is_some(),
+            "a fresh document has no cached heading positions, so the \
+             corrective pass must be armed to land on the heading"
+        );
+
+        // ctrl+click carries the fragment through to the new-tab request.
+        let (new_tab, error_message) = handle_local_link_click(&mut tab, "guide.md#setup", true);
+        assert!(error_message.is_none());
+        let (path, fragment) = new_tab.expect("ctrl+click resolves to a path");
+        assert_eq!(path, guide.canonicalize().unwrap());
+        assert_eq!(fragment.as_deref(), Some("setup"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tab_history_changes_only_after_successful_loads() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-history-safety-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&first, "# First").unwrap();
+        fs::write(&second, "# Second").unwrap();
+
+        let mut tab = Tab::new(first.clone()).unwrap();
+        assert!(tab.navigate_to_link("second.md").unwrap());
+        assert_eq!(tab.path, second.canonicalize().unwrap());
+        assert!(tab.can_go_back());
+
+        fs::remove_file(&first).unwrap();
+        assert!(tab.navigate_back().is_err());
+        assert_eq!(tab.path, second.canonicalize().unwrap());
+        assert!(tab.can_go_back());
+        assert!(!tab.can_go_forward());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_new_tab_returns_an_error() {
+        let missing = std::env::temp_dir().join(format!(
+            "md-viewer-missing-{}-{}.md",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        assert!(Tab::new(missing).is_err());
+    }
+
+    #[test]
+    fn heading_parser_keeps_raw_shortcode_and_source_identity() {
+        let markdown = "# Doc\n\n## Pin :pushpin:\n\n## Pin :pushpin:\n";
+        let parsed = parse_headers(markdown);
+
         assert_eq!(parsed.outline_headers.len(), 3);
         assert_eq!(parsed.outline_headers[1].title, "Pin :pushpin:");
-        assert_eq!(parsed.outline_headers[1].normalized_title, "pin :pushpin:");
-        assert_eq!(parsed.outline_headers[1].nth_with_same_text, 0);
-        assert_eq!(parsed.outline_headers[2].normalized_title, "pin :pushpin:");
-        assert_eq!(parsed.outline_headers[2].nth_with_same_text, 1);
         assert_eq!(
-            header_position_key(
-                &parsed.outline_headers[2].normalized_title,
-                parsed.outline_headers[2].nth_with_same_text,
-            ),
-            "pin :pushpin:#1"
+            parsed.outline_headers[1].source_start,
+            markdown.find("## Pin").unwrap()
+        );
+        assert_eq!(
+            parsed.outline_headers[2].source_start,
+            markdown.rfind("## Pin").unwrap()
+        );
+        assert_eq!(
+            header_position_key(parsed.outline_headers[1].source_start),
+            "heading-source:7"
         );
     }
 
@@ -5898,10 +7842,269 @@ mod tests {
     fn unknown_shortcode_heading_stays_raw() {
         let parsed = parse_headers("# Doc\n\n## Pin :not_a_gemoji:\n");
         assert_eq!(parsed.outline_headers[1].title, "Pin :not_a_gemoji:");
-        assert_eq!(
-            parsed.outline_headers[1].normalized_title,
-            "pin :not_a_gemoji:"
+    }
+
+    #[test]
+    fn heading_parser_uses_commonmark_for_formatting_links_and_setext() {
+        let markdown = concat!(
+            "# **Bold** and `code` [link](guide.md)\n\n",
+            "Setext title\n---\n\n",
+            "~~~markdown\n# Hidden heading\n~~~\n",
         );
+        let parsed = parse_headers(markdown);
+
+        assert_eq!(parsed.outline_headers.len(), 2);
+        assert_eq!(parsed.outline_headers[0].title, "Bold and code link");
+        assert_eq!(parsed.outline_headers[0].level, 1);
+        assert_eq!(parsed.outline_headers[1].title, "Setext title");
+        assert_eq!(parsed.outline_headers[1].level, 2);
+        assert_eq!(
+            parsed.outline_headers[1].source_start,
+            markdown.find("Setext").unwrap()
+        );
+    }
+
+    #[test]
+    fn bare_existing_markdown_path_is_registered_as_local_link() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-auto-link-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let document = root.join("index.md");
+        fs::write(&document, "See docs/guide.md for details.").unwrap();
+        fs::write(root.join("docs/guide.md"), "# Guide").unwrap();
+
+        let links = parse_local_links("See docs/guide.md for details.", &document);
+        assert_eq!(links, vec!["docs/guide.md"]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inline_code_markdown_path_can_touch_chinese_prose_and_punctuation() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-inline-link-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(root.join("github/research/docs")).unwrap();
+        let document = root.join("index.md");
+        fs::write(&document, "# Index").unwrap();
+        fs::write(root.join("github/research/docs/audit.md"), "# Audit").unwrap();
+
+        let content = "触发文档：`github/research/docs/audit.md`：详细说明";
+        assert_eq!(
+            parse_local_links(content, &document),
+            vec!["github/research/docs/audit.md"]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nonexistent_bare_markdown_path_is_not_registered() {
+        let document = std::env::temp_dir().join("md-viewer-auto-link-missing/index.md");
+        assert!(parse_local_links("See missing.md for details.", &document).is_empty());
+    }
+
+    #[test]
+    fn missing_explicit_link_surfaces_errors_without_changing_tab_or_history() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-missing-link-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("index.md");
+        fs::write(&document, "[Missing](missing.md)").unwrap();
+
+        assert_eq!(
+            parse_local_links("[Missing](missing.md)", &document),
+            ["missing.md"]
+        );
+
+        let mut tab = Tab::new(document.clone()).unwrap();
+        let original_path = tab.path.clone();
+        let canonicalize_error = root.join("missing.md").canonicalize().unwrap_err();
+        let expected_error = format!("Unable to open missing.md: {canonicalize_error}");
+
+        // Ctrl+click resolves before asking the app to create a new tab. This
+        // is the same helper whose error result is assigned to the error bar.
+        let (new_tab, error_message) = handle_local_link_click(&mut tab, "missing.md", true);
+        assert!(new_tab.is_none());
+        assert_eq!(error_message, Some(expected_error.clone()));
+        assert_eq!(tab.path, original_path);
+        assert!(tab.history_back.is_empty());
+        assert!(tab.history_forward.is_empty());
+
+        // Plain click goes through the same production result handler and
+        // leaves the current tab intact.
+        let (new_tab, error_message) = handle_local_link_click(&mut tab, "missing.md", false);
+        assert!(new_tab.is_none());
+        assert_eq!(error_message, Some(expected_error));
+        assert_eq!(tab.path, original_path);
+        assert!(tab.history_back.is_empty());
+        assert!(tab.history_forward.is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fenced_and_indented_code_never_register_bare_markdown_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-fenced-link-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("index.md");
+        fs::write(&document, "# Index").unwrap();
+        fs::write(root.join("guide.md"), "# Guide").unwrap();
+
+        let code_blocks = concat!(
+            "~~~text\nguide.md\n~~~\n\n",
+            "````text\nguide.md\n````\n\n",
+            "    guide.md\n",
+        );
+        assert!(parse_local_links(code_blocks, &document).is_empty());
+        assert_eq!(parse_local_links("`guide.md`", &document), ["guide.md"]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_file_uris_are_classified_as_local_links() {
+        let document_dir = Path::new("/tmp/docs");
+        for destination in [
+            "data:text/plain,x.md",
+            "javascript:void(0)/x.md",
+            "unknownscheme://host/a.md",
+            "mailto:guide.md",
+        ] {
+            assert!(!is_local_markdown_link(destination), "{destination}");
+            assert_eq!(
+                resolve_local_link_path(destination, document_dir).unwrap(),
+                None,
+                "{destination}"
+            );
+        }
+
+        assert!(is_local_markdown_link("guide.md"));
+        assert!(is_local_markdown_link("docs%20with%20spaces/guide.md"));
+        assert_eq!(
+            resolve_local_link_path("100%done.md", document_dir).unwrap(),
+            Some(document_dir.join("100%done.md"))
+        );
+
+        let file_path = std::env::temp_dir().join("md-viewer-link-scheme-guide.md");
+        let file_uri = url::Url::from_file_path(&file_path).unwrap().to_string();
+        assert!(is_local_markdown_link(&file_uri));
+        assert_eq!(
+            resolve_local_link_path(&file_uri, document_dir).unwrap(),
+            Some(file_path)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_prefixes_are_not_treated_as_uri_schemes() {
+        assert_eq!(explicit_uri_scheme(r"C:\docs\guide.md"), None);
+        assert_eq!(explicit_uri_scheme("D:/docs/guide.md"), None);
+        assert!(is_local_markdown_link(r"C:\docs\guide.md"));
+        assert!(is_local_markdown_link("D:/docs/guide.md"));
+    }
+
+    #[test]
+    fn explicit_non_file_schemes_are_not_registered_as_link_hooks() {
+        let document = Path::new("/tmp/index.md");
+        let content = concat!(
+            "[data](data:text/plain,x.md) ",
+            "[script](javascript:void(0)/x.md) ",
+            "[unknown](unknownscheme://host/a.md)",
+        );
+
+        assert!(parse_local_links(content, document).is_empty());
+    }
+
+    #[test]
+    fn absolute_path_and_file_uri_are_registered_as_local_links() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-auto-link-uri-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(root.join("docs with spaces")).unwrap();
+        let document = root.join("index.md");
+        let absolute_target = root.join("guide.md");
+        let uri_target = root.join("docs with spaces/guide.md");
+        fs::write(&document, "# Index").unwrap();
+        fs::write(&absolute_target, "# Absolute guide").unwrap();
+        fs::write(&uri_target, "# URI guide").unwrap();
+
+        let absolute = absolute_target.to_string_lossy();
+        let file_uri = url::Url::from_file_path(&uri_target).unwrap().to_string();
+        let content = format!("`{absolute}` and `{file_uri}`");
+        let links = parse_local_links(&content, &document);
+
+        assert_eq!(links, vec![absolute.to_string(), file_uri]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commonmark_reference_with_encoded_path_is_registered() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-reference-link-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(root.join("docs with spaces")).unwrap();
+        let document = root.join("index.md");
+        fs::write(&document, "# Index").unwrap();
+        fs::write(root.join("docs with spaces/guide(1).md"), "# Guide").unwrap();
+
+        let content =
+            "Read [the guide][guide].\n\n[guide]: docs%20with%20spaces/guide(1).md \"Title\"";
+        assert_eq!(
+            parse_local_links(content, &document),
+            vec!["docs%20with%20spaces/guide(1).md"]
+        );
+        assert!(
+            resolve_local_link_path("docs%20with%20spaces/guide(1).md", &root)
+                .unwrap()
+                .is_some_and(|path| path.is_file())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tab_path_navigation_tracks_back_and_forward_history() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-navigation-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&first, "# First").unwrap();
+        fs::write(&second, "# Second").unwrap();
+
+        let mut tab = Tab::new(first.canonicalize().unwrap()).unwrap();
+        assert!(tab.navigate_to_path(&second).unwrap());
+        assert_eq!(tab.path, second.canonicalize().unwrap());
+        assert!(tab.can_go_back());
+        assert!(!tab.can_go_forward());
+
+        tab.navigate_back().unwrap();
+        assert_eq!(tab.path, first.canonicalize().unwrap());
+        assert!(tab.can_go_forward());
+
+        tab.navigate_forward().unwrap();
+        assert_eq!(tab.path, second.canonicalize().unwrap());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6082,5 +8285,126 @@ mod tests {
             block_kind_of("Just a paragraph.\n"),
             EditBlockKind::Paragraph
         );
+    }
+
+    #[test]
+    fn watcher_retry_sequence_stops_at_configured_limit() {
+        assert_eq!(next_watcher_retry(0), Some(1));
+        assert_eq!(next_watcher_retry(1), Some(2));
+        assert_eq!(next_watcher_retry(2), Some(3));
+        assert_eq!(next_watcher_retry(3), None);
+        assert_eq!(next_watcher_retry(u32::MAX), None);
+    }
+    #[test]
+    fn asynchronous_explorer_result_restores_expanded_children() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-explorer-refresh-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let expanded = root.join("docs");
+        fs::create_dir_all(&expanded).unwrap();
+        fs::write(expanded.join("guide.md"), "# Guide").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(ExplorerScanResult {
+            root: root.clone(),
+            sort_order: SortOrder::NameAsc,
+            tree: FileExplorer::scan_directory_shallow(&root, SortOrder::NameAsc),
+        })
+        .unwrap();
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            expanded_dirs: HashSet::from([expanded.clone()]),
+            pending_scan: Some(rx),
+            ..Default::default()
+        };
+
+        assert!(explorer.poll_pending_scan());
+        assert!(explorer
+            .get_children(&expanded)
+            .is_some_and(|children| children.iter().any(|node| node.name() == "guide.md")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_root_scan_runs_asynchronously_and_restores_expansion() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-local-explorer-scan-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let expanded = root.join("docs");
+        fs::create_dir_all(&expanded).unwrap();
+        fs::write(expanded.join("guide.md"), "# Guide").unwrap();
+
+        let mut explorer = FileExplorer {
+            expanded_dirs: HashSet::from([expanded.clone()]),
+            ..Default::default()
+        };
+        explorer.set_root(root.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while explorer.pending_scan.is_some() && Instant::now() < deadline {
+            explorer.poll_pending_scan();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(explorer.pending_scan.is_none());
+        assert!(explorer
+            .get_children(&expanded)
+            .is_some_and(|children| children.iter().any(|node| node.name() == "guide.md")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn targeted_explorer_refresh_preserves_unrelated_subtrees() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-targeted-refresh-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let docs = root.join("docs");
+        let notes = root.join("notes");
+        fs::create_dir_all(&docs).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(docs.join("old.md"), "# Old").unwrap();
+        fs::write(notes.join("keep.md"), "# Keep").unwrap();
+
+        let mut explorer = FileExplorer::default();
+        explorer.set_root(root.clone());
+        // set_root scans asynchronously since #84: drain the pending scan
+        // before interacting with the tree.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while explorer.pending_scan.is_some() && Instant::now() < deadline {
+            explorer.poll_pending_scan();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        explorer.toggle_expanded(&docs);
+        explorer.toggle_expanded(&notes);
+        fs::write(docs.join("new.md"), "# New").unwrap();
+
+        explorer.refresh_directory(&docs);
+
+        assert!(explorer
+            .get_children(&docs)
+            .is_some_and(|children| children.iter().any(|node| node.name() == "new.md")));
+        assert!(explorer
+            .get_children(&notes)
+            .is_some_and(|children| children.iter().any(|node| node.name() == "keep.md")));
+        assert!(explorer.is_expanded(&docs));
+        assert!(explorer.is_expanded(&notes));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_sidebar_widths_are_sanitized() {
+        assert_eq!(restored_sidebar_width(Some(320.0), 200.0), 320.0);
+        assert_eq!(restored_sidebar_width(Some(20.0), 200.0), SIDEBAR_MIN_WIDTH);
+        assert_eq!(restored_sidebar_width(Some(f32::NAN), 200.0), 200.0);
+        assert_eq!(restored_sidebar_width(Some(f32::INFINITY), 200.0), 200.0);
+        assert_eq!(restored_sidebar_width(None, 200.0), 200.0);
     }
 }

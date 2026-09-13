@@ -211,12 +211,23 @@ The repo currently ships a **placeholder** icon at `data/io.github.aydiler.md-vi
 
 - [ ] Update version in `Cargo.toml` (`version = "X.Y.Z"`)
 - [ ] Update version in `snap/snapcraft.yaml` (`version: 'X.Y.Z'`) — `version-sync` CI check enforces parity
+- [ ] If the vendored renderer changed, bump `[workspace.package] version` in
+      `crates/egui_commonmark/Cargo.toml` and every reference to it — the
+      `Vendored fork is publishable to crates.io` release step fails otherwise
+- [ ] Bump `Cargo.lock` **surgically**, anchored on `name = "md-viewer"`. Never `sed`
+      the version line: the fork lockfile carries `glam` in sixteen versions and a
+      substitution rewrites unrelated crates
 - [ ] Append a `<release>` entry to `data/io.github.aydiler.md-viewer.metainfo.xml`
-- [ ] Generate changelog: `git-cliff -o CHANGELOG.md`
+- [ ] Write the `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md` **by hand**.
+      Do **not** run `git-cliff -o CHANGELOG.md` — this history is not
+      conventional-commit shaped, and `-o` replaces the hand-written prose
+      with a sparse file that drops whole versions (see `docs/LESSONS.md`)
 - [ ] Commit: `git commit -am "Release X.Y.Z"`
 - [ ] Tag: `git tag vX.Y.Z && git push origin main vX.Y.Z`
 - [ ] Watch `release.yml`. Expected outputs:
-  - 4 prebuilt binaries (Linux x86_64, macOS x86_64, macOS arm64, Windows x86_64) + matching `.sha256`
+  - 3 prebuilt binaries (Linux x86_64, macOS arm64, Windows x86_64) + matching `.sha256`.
+    Intel Mac was dropped from the matrix — its runner pool queued for 24+ minutes
+    on v0.1.3; those users build via `cargo install`
   - GitHub Release with `RELEASE_NOTES.md` body
   - crates.io publish (gated on `CARGO_REGISTRY_TOKEN`; idempotent on re-tag)
   - Snap Store stable channel publish

@@ -77,6 +77,7 @@ mod generator;
 use generator::*;
 
 use quote::quote_spanned;
+use std::path::{Path, PathBuf};
 use syn::parse::{Parse, ParseStream, Result};
 use syn::{Expr, LitStr, Token, parse_macro_input};
 
@@ -118,6 +119,26 @@ fn commonmark_impl(ui: Expr, cache: Expr, text: String) -> proc_macro2::TokenStr
     stream
 }
 
+fn markdown_path_candidates(
+    path: &Path,
+    manifest_dir: Option<&Path>,
+    current_dir: &Path,
+) -> Vec<PathBuf> {
+    if path.is_absolute() {
+        return vec![path.to_owned()];
+    }
+
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(manifest_dir) = manifest_dir {
+        candidates.push(manifest_dir.join(path));
+    }
+    let current_dir_path = current_dir.join(path);
+    if !candidates.contains(&current_dir_path) {
+        candidates.push(current_dir_path);
+    }
+    candidates
+}
+
 #[proc_macro]
 pub fn commonmark(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let Parameters {
@@ -137,20 +158,34 @@ pub fn commonmark_str(input: proc_macro::TokenStream) -> proc_macro::TokenStream
         markdown,
     } = parse_macro_input!(input as Parameters);
 
-    let path = markdown.value();
-    #[cfg(feature = "nightly")]
-    {
-        // Tell rust to track the file so that the macro will regenerate when the
-        // file changes
-        proc_macro::tracked_path::path(&path);
-    }
-
-    let Ok(md) = std::fs::read_to_string(path) else {
+    let path = PathBuf::from(markdown.value());
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let current_dir = std::env::current_dir().unwrap_or_default();
+    let Some((resolved_path, md)) = markdown_path_candidates(
+        &path,
+        manifest_dir.as_deref(),
+        &current_dir,
+    )
+    .into_iter()
+    .find_map(|candidate| {
+        std::fs::read_to_string(&candidate)
+            .ok()
+            .map(|markdown| (candidate, markdown))
+    })
+    else {
         return quote_spanned!(markdown.span()=>
             compile_error!("Could not find markdown file");
         )
         .into();
     };
+
+    #[cfg(feature = "nightly")]
+    {
+        // Track the resolved file so changes do not depend on rustc's cwd.
+        proc_macro::tracked_path::path(&resolved_path.to_string_lossy());
+    }
+    #[cfg(not(feature = "nightly"))]
+    let _ = resolved_path;
 
     commonmark_impl(ui, cache, md).into()
 }
@@ -202,4 +237,49 @@ fn tests() {
     let t = trybuild::TestCases::new();
     t.pass("tests/pass/*.rs");
     t.compile_fail("tests/fail/*.rs");
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::markdown_path_candidates;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn relative_paths_prefer_the_invoking_manifest() {
+        assert_eq!(
+            markdown_path_candidates(
+                Path::new("docs/readme.md"),
+                Some(Path::new("/consumer")),
+                Path::new("/workspace"),
+            ),
+            vec![
+                PathBuf::from("/consumer/docs/readme.md"),
+                PathBuf::from("/workspace/docs/readme.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn absolute_paths_do_not_gain_relative_prefixes() {
+        assert_eq!(
+            markdown_path_candidates(
+                Path::new("/docs/readme.md"),
+                Some(Path::new("/consumer")),
+                Path::new("/workspace"),
+            ),
+            vec![PathBuf::from("/docs/readme.md")]
+        );
+    }
+
+    #[test]
+    fn identical_manifest_and_current_directories_are_deduplicated() {
+        assert_eq!(
+            markdown_path_candidates(
+                Path::new("docs/readme.md"),
+                Some(Path::new("/workspace")),
+                Path::new("/workspace"),
+            ),
+            vec![PathBuf::from("/workspace/docs/readme.md")]
+        );
+    }
 }

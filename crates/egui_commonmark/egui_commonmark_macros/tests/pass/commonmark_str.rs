@@ -8,7 +8,7 @@ fn main() {
         let _response: egui::InnerResponse<()> = commonmark_str!(
             ui,
             &mut cache,
-            "../../../../egui_commonmark_macros_extended/tests/file.md"
+            "../../../../egui_commonmark_macros/tests/file.md"
         );
     });
 }

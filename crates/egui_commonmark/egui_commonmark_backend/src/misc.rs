@@ -5,13 +5,19 @@ use std::collections::HashMap;
 use std::ops::Range;
 #[cfg(feature = "math")]
 use std::collections::HashSet;
-#[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid"))]
+#[cfg(any(
+    feature = "better_syntax_highlighting",
+    feature = "mermaid",
+    feature = "math"
+))]
 use std::sync::Arc;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 #[cfg(any(feature = "mermaid", feature = "math"))]
 use std::sync::mpsc;
+#[cfg(feature = "math")]
+use std::sync::Mutex as StdMutex;
 
 use crate::pulldown::ScrollableCache;
 
@@ -83,6 +89,19 @@ pub struct CommonMarkOptions<'f> {
     /// [`top_level_block_spans`] to hit-test clicks into byte ranges for
     /// click-to-edit activation.
     pub record_block_layout: bool,
+    /// Opt into parsing a leading `---` block as YAML frontmatter and rendering
+    /// it as a key/value table. Off by default: enabling it changes how a
+    /// document that starts with `---` is *parsed*, not just painted, so it
+    /// must not silently alter existing consumers' output.
+    pub render_frontmatter: bool,
+    /// Size of rendered formulas, as a multiple of the resolved Body font size.
+    ///
+    /// `1.0` renders math at the same point size as body text. Math glyphs and
+    /// dense fractions read as perceptually smaller than prose at equal point
+    /// size, so a value slightly above 1.0 is often more legible. Application
+    /// zoom is not a substitute: it scales the whole UI, leaving the formula
+    /// and its surrounding text in the same ratio.
+    pub math_scale: f32,
 }
 
 /// Configuration for the inline editor painted by the live-preview mode.
@@ -213,6 +232,8 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             .field("edit_region", &self.edit_region)
             .field("edit_session", &self.edit_session)
             .field("record_block_layout", &self.record_block_layout)
+            .field("render_frontmatter", &self.render_frontmatter)
+            .field("math_scale", &self.math_scale)
             .finish()
     }
 }
@@ -240,6 +261,8 @@ impl Default for CommonMarkOptions<'_> {
             edit_region: None,
             edit_session: None,
             record_block_layout: false,
+            render_frontmatter: false,
+            math_scale: 1.0,
         }
     }
 }
@@ -269,6 +292,12 @@ impl CommonMarkOptions<'_> {
 
 /// Font family name used for Markdown strong text when the app registers a bold face.
 pub const STRONG_FONT_FAMILY: &str = "MarkdownStrong";
+
+/// Stable cache key for a heading position, derived from its source byte offset.
+/// This does not depend on formatting, emoji expansion, or duplicate titles.
+pub fn header_position_key(source_start: usize) -> String {
+    format!("heading-source:{source_start}")
+}
 
 #[derive(Default, Clone)]
 pub struct Style {
@@ -511,12 +540,180 @@ mod tests {
                 false,
                 egui::Color32::BLACK,
                 egui::Color32::WHITE,
+                16.0,
             )
             .unwrap_or_else(|error| panic!("failed to render {latex:?}: {error}"));
 
             assert!(rendered.size.x > 0.0);
             assert!(rendered.size.y > 0.0);
         }
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn math_cache_key_includes_exact_colors() {
+        let base = math_cache_hash(
+            "x + y",
+            false,
+            egui::Color32::BLACK,
+            egui::Color32::WHITE,
+            16.0,
+        );
+        assert_ne!(
+            base,
+            math_cache_hash(
+                "x + y",
+                false,
+                egui::Color32::DARK_GRAY,
+                egui::Color32::WHITE,
+                16.0,
+            )
+        );
+        assert_ne!(
+            base,
+            math_cache_hash(
+                "x + y",
+                false,
+                egui::Color32::BLACK,
+                egui::Color32::LIGHT_GRAY,
+                16.0,
+            )
+        );
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn math_cache_key_includes_the_point_size() {
+        // Without this, the first rendered size is served for every later
+        // scale and changing the setting appears to do nothing.
+        let at = |pt| math_cache_hash("x + y", true, egui::Color32::BLACK, egui::Color32::WHITE, pt);
+        assert_ne!(at(16.0), at(20.0));
+        assert_ne!(at(16.0), at(16.5));
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn math_cache_key_absorbs_sub_hundredth_size_jitter() {
+        // The size derives from a resolved font height, which fluctuates in the
+        // last float digits between frames. Re-keying on that would recompile
+        // every formula through typst on every paint.
+        let at = |pt| math_cache_hash("x + y", true, egui::Color32::BLACK, egui::Color32::WHITE, pt);
+        assert_eq!(at(16.0), at(16.0001));
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn math_worker_returns_rendered_formula() {
+        let math_job_tx = start_math_workers(1, 1);
+        let (result_tx, result_rx) = mpsc::channel();
+        assert_eq!(
+            enqueue_math_job(
+                &math_job_tx,
+                MathJob {
+                    hash: 42,
+                    latex: "x + y".to_owned(),
+                    is_inline: true,
+                    fg: egui::Color32::BLACK,
+                    bg: egui::Color32::WHITE,
+                    size_pt: 16.0,
+                    result_tx,
+                },
+            ),
+            MathEnqueueStatus::Queued
+        );
+
+        let result = result_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("math worker should return a result");
+        assert_eq!(result.hash, 42);
+        assert!(result.result.is_ok());
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn full_math_queue_is_reported_for_retry() {
+        let (math_job_tx, _math_job_rx) = mpsc::sync_channel(1);
+        let new_job = |hash| {
+            let (result_tx, _result_rx) = mpsc::channel();
+            MathJob {
+                hash,
+                latex: "x + y".to_owned(),
+                is_inline: true,
+                fg: egui::Color32::BLACK,
+                bg: egui::Color32::WHITE,
+                size_pt: 16.0,
+                result_tx,
+            }
+        };
+
+        assert_eq!(
+            enqueue_math_job(&math_job_tx, new_job(1)),
+            MathEnqueueStatus::Queued
+        );
+        assert_eq!(
+            enqueue_math_job(&math_job_tx, new_job(2)),
+            MathEnqueueStatus::Full
+        );
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn cjk_text_in_math_uses_real_glyphs_when_system_fallback_exists() {
+        if !MATH_FONTS
+            .iter()
+            .any(|font| font.ttf().glyph_index('在').is_some())
+        {
+            return;
+        }
+
+        let render = |latex| {
+            render_math_formula(
+                latex,
+                true,
+                egui::Color32::BLACK,
+                egui::Color32::WHITE,
+                16.0,
+            )
+            .unwrap()
+            .image
+        };
+        let first = render(r"\text{在}");
+        let second = render(r"\text{中}");
+
+        assert_ne!(
+            first.pixels, second.pixels,
+            "different CJK characters must not render as the same missing-glyph box"
+        );
+    }
+    #[cfg(feature = "math")]
+    #[test]
+    fn inline_fraction_raster_keeps_vertical_ink_margin() {
+        let bg = egui::Color32::BLACK;
+        let rendered = render_math_formula(
+            r"-\frac15\sum_{l=1}^5 P_{a,l}",
+            true,
+            egui::Color32::WHITE,
+            bg,
+            16.0,
+        )
+        .unwrap();
+        let [width, height] = rendered.image.size;
+        let ink_rows: Vec<usize> = (0..height)
+            .filter(|y| {
+                rendered.image.pixels[y * width..(y + 1) * width]
+                    .iter()
+                    .any(|pixel| *pixel != bg)
+            })
+            .collect();
+        let top = *ink_rows.first().expect("formula has ink");
+        let bottom = *ink_rows.last().expect("formula has ink");
+
+        assert!(top >= 3, "top ink margin too small: {top}px");
+        assert!(
+            height - 1 - bottom >= 3,
+            "bottom ink margin too small: {}px",
+            height - 1 - bottom
+        );
     }
 
     #[test]
@@ -576,7 +773,7 @@ impl Link {
         // Apply underline and hyperlink color to all sections for better visibility
         let link_color = ui.visuals().hyperlink_color;
         for section in &mut layout_job.sections {
-            section.format.underline = egui::Stroke::new(1.0, link_color);
+            section.format.underline = egui::Stroke::new(1.0_f32, link_color);
             section.format.color = link_color;
             // Remove extra line height to bring underline closer to text
             section.format.line_height = None;
@@ -590,6 +787,30 @@ impl Link {
         );
 
         let is_hook = cache.link_hooks().contains_key(&destination);
+
+        // Right-click copies the destination (issue #169). Clicking a link
+        // hands it to the desktop's URL handler, which may open a browser
+        // instance without the reader's session — so the address has to be
+        // obtainable without following it.
+        //
+        // Both link kinds get the item, and both copy `destination` exactly as
+        // the document spells it. For an external link that is the URL. For a
+        // link this viewer resolves itself, the source spelling is the honest
+        // answer: the resolved path depends on which document is open, so
+        // copying it would hand out something the author never wrote and that
+        // means nothing pasted elsewhere.
+        //
+        // The label is deliberately the browser wording, since that is where
+        // the gesture is learned.
+        {
+            let destination = destination.clone();
+            response.context_menu(|ui| {
+                if ui.button("Copy Link Address").clicked() {
+                    ui.ctx().copy_text(destination.clone());
+                    ui.close();
+                }
+            });
+        }
 
         if response.clicked() || response.middle_clicked() {
             if is_hook {
@@ -641,6 +862,7 @@ impl Image {
                 .max_width(options.max_width(ui))
                 .sense(egui::Sense::click()),
         );
+        cache.observe_image_size(&self.uri, response.rect.size());
 
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -845,7 +1067,9 @@ impl CodeBlock {
         let hash = hasher.finish();
 
         // Poll for completed background renders
+        let mut received_any = false;
         while let Ok(result) = cache.mermaid_rx.try_recv() {
+            received_any = true;
             // Clear the rendering slot if this result is from the active thread
             if cache.mermaid_rendering == Some(result.hash) {
                 cache.mermaid_rendering = None;
@@ -869,6 +1093,10 @@ impl CodeBlock {
                     cache.mermaid_states.insert(result.hash, MermaidState::Error(err));
                 }
             }
+        }
+        if received_any {
+            cache.mark_layout_changed();
+            ui.ctx().request_repaint();
         }
 
         // First encounter: insert as Rendering placeholder, spawn only if slot is free
@@ -1283,6 +1511,73 @@ struct MathRendered {
     baseline_ratio: f32,
 }
 
+#[cfg(feature = "math")]
+struct MathJob {
+    hash: u64,
+    latex: String,
+    is_inline: bool,
+    fg: egui::Color32,
+    bg: egui::Color32,
+    /// Resolved point size. Travels with the job because the worker thread has
+    /// no `Ui` to ask, and must match the size that produced `hash`.
+    size_pt: f32,
+    result_tx: mpsc::Sender<MathRenderResult>,
+}
+
+#[cfg(feature = "math")]
+#[derive(Debug, Eq, PartialEq)]
+enum MathEnqueueStatus {
+    Queued,
+    Full,
+    Disconnected,
+}
+
+#[cfg(feature = "math")]
+fn start_math_workers(worker_count: usize, queue_capacity: usize) -> mpsc::SyncSender<MathJob> {
+    let (tx, rx) = mpsc::sync_channel::<MathJob>(queue_capacity);
+    let rx = Arc::new(StdMutex::new(rx));
+    for worker in 0..worker_count {
+        let rx = Arc::clone(&rx);
+        if std::thread::Builder::new()
+            .name(format!("markdown-math-{worker}"))
+            .spawn(move || loop {
+                let job = match rx.lock() {
+                    Ok(receiver) => match receiver.recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    },
+                    Err(_) => break,
+                };
+                let result =
+                    render_math_formula(&job.latex, job.is_inline, job.fg, job.bg, job.size_pt);
+                let _ = job.result_tx.send(MathRenderResult {
+                    hash: job.hash,
+                    result,
+                });
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    tx
+}
+
+#[cfg(feature = "math")]
+fn enqueue_math_job(sender: &mpsc::SyncSender<MathJob>, job: MathJob) -> MathEnqueueStatus {
+    match sender.try_send(job) {
+        Ok(()) => MathEnqueueStatus::Queued,
+        Err(mpsc::TrySendError::Full(_)) => MathEnqueueStatus::Full,
+        Err(mpsc::TrySendError::Disconnected(_)) => MathEnqueueStatus::Disconnected,
+    }
+}
+
+/// Shared bounded worker pool. Formula compilation is CPU-heavy, so creating
+/// a fresh OS thread for every formula adds avoidable latency and memory use.
+#[cfg(feature = "math")]
+static MATH_JOB_TX: LazyLock<mpsc::SyncSender<MathJob>> =
+    LazyLock::new(|| start_math_workers(math_concurrency(), 64));
+
 /// Typst preamble defining mitex helper functions needed to compile mitex output.
 /// These map mitex's custom function names to standard Typst math functions.
 #[cfg(feature = "math")]
@@ -1351,12 +1646,38 @@ static MATH_FONTS: LazyLock<Vec<typst::text::Font>> = LazyLock::new(|| {
     searcher
         .include_system_fonts(false)
         .include_embedded_fonts(true);
-    searcher
+    let mut fonts: Vec<_> = searcher
         .search()
         .fonts
         .iter()
         .filter_map(|slot| slot.get())
-        .collect()
+        .collect();
+
+    // `\text{...}` inside formulas can contain CJK prose. Typst's embedded
+    // math fonts cover Latin and mathematical glyphs but not CJK, which would
+    // otherwise render as identical tofu boxes. Ask fontconfig for one generic
+    // Chinese sans-serif fallback and load only that file. This keeps startup
+    // fast and portable across Linux distributions without hard-coding a Noto,
+    // Source Han, WenQuanYi, or distro-specific font path/name.
+    let fallback_path = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}\n", "sans-serif:lang=zh-cn"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+        });
+    if let Some(path) = fallback_path {
+        if let Ok(data) = std::fs::read(path) {
+            fonts.extend(typst::text::Font::iter(typst::foundations::Bytes::new(data)));
+        }
+    }
+
+    fonts
 });
 
 /// Number of formulas to render (and fonts to load) concurrently. typst
@@ -1448,9 +1769,11 @@ fn render_math_formula(
     is_inline: bool,
     fg: egui::Color32,
     bg: egui::Color32,
+    size_pt: f32,
 ) -> Result<MathRendered, String> {
     // 0. Decode common HTML entities that OCR/conversion tools may leave in math
     let latex = latex
+        .replace("&#124;", "|")
         .replace("&#x26;", "&")
         .replace("&#38;", "&")
         .replace("&#x3C;", "<")
@@ -1470,8 +1793,6 @@ fn render_math_formula(
     // spacing, so a baked-in x-margin would double the gap around short symbols
     // (`$w$`, `$z$`) and read as "weird spacing". Keep a little vertical margin
     // so glyph extents (e.g. accents, descenders) aren't clipped.
-    let margin = if is_inline { "(x: 0pt, y: 2pt)" } else { "(x: 8pt, y: 6pt)" };
-
     // Inline vs display style. Whitespace inside `$ … $` makes typst render a
     // *block* equation (displaystyle: bigger operators, centered, no inline
     // baseline). `$…$` with no surrounding whitespace is *inline* (textstyle:
@@ -1485,12 +1806,12 @@ fn render_math_formula(
 
     let source = format!(
         r#"{preamble}
-#set page(width: auto, height: auto, margin: {margin}, fill: none)
-#set text(size: 16pt, fill: black)
+#set page(width: auto, height: auto, margin: 0pt, fill: none)
+#set text(size: {size_pt}pt, fill: black)
 {equation}"#,
         preamble = MITEX_PREAMBLE,
-        margin = margin,
         equation = equation,
+        size_pt = size_pt,
     );
 
     // 3. Compile with typst. Reuse the embedded fonts (see MATH_FONTS) instead
@@ -1503,13 +1824,39 @@ fn render_math_formula(
     let result = engine.compile::<typst::layout::PagedDocument>();
     let doc = result.output.map_err(|e| format!("typst: {e}"))?;
 
-    let page = doc.pages.first().ok_or("typst: no pages")?;
+    let mut page = doc.pages.first().ok_or("typst: no pages")?.clone();
 
-    let baseline_ratio = math_baseline_ratio(page);
+    // Auto-sized Typst pages collapse to layout bounds, but math glyph ink can
+    // extend beyond those bounds. Expand and translate the vector frame before
+    // rasterization so fractions, limits, accents, and descenders are retained.
+    let (pad_left, pad_top, pad_right, pad_bottom) = if is_inline {
+        (
+            typst::layout::Abs::zero(),
+            typst::layout::Abs::pt(6.0),
+            typst::layout::Abs::zero(),
+            typst::layout::Abs::pt(9.0),
+        )
+    } else {
+        (
+            typst::layout::Abs::pt(8.0),
+            typst::layout::Abs::pt(6.0),
+            typst::layout::Abs::pt(8.0),
+            typst::layout::Abs::pt(6.0),
+        )
+    };
+    let original_size = page.frame.size();
+    page.frame
+        .translate(typst::layout::Point::new(pad_left, pad_top));
+    page.frame.set_size(typst::layout::Size::new(
+        original_size.x + pad_left + pad_right,
+        original_size.y + pad_top + pad_bottom,
+    ));
+
+    let baseline_ratio = math_baseline_ratio(&page);
 
     // 4. Render directly to pixels via typst-render (no SVG intermediary)
     let pixel_per_pt = 3.0_f32;
-    let pixmap = typst_render::render(page, pixel_per_pt);
+    let pixmap = typst_render::render(&page, pixel_per_pt);
 
     let w = pixmap.width() as usize;
     let h = pixmap.height() as usize;
@@ -1558,6 +1905,30 @@ fn render_math_formula(
     })
 }
 
+/// Return the rendered height of an inline formula once its asynchronous
+/// raster is cached. Fixed-height containers can grow on the next repaint.
+#[cfg(feature = "math")]
+pub fn cached_inline_math_height(
+    ui: &egui::Ui,
+    cache: &CommonMarkCache,
+    latex: &str,
+    options: &CommonMarkOptions,
+) -> Option<f32> {
+    // Key must match what the render pipeline stores (exact colors, like #92,
+    // and the same point size — see `math_size_pt`).
+    let hash = math_cache_hash(
+        latex,
+        true,
+        ui.visuals().text_color(),
+        ui.visuals().panel_fill,
+        math_size_pt(ui, options),
+    );
+    match cache.math_states.get(&hash) {
+        Some(MathState::Ready { size, .. }) => Some(size.y),
+        _ => None,
+    }
+}
+
 /// Public function to render math from the callback. Called from the `render_math_fn` closure.
 /// Handles caching and background rendering following the mermaid pattern.
 #[cfg(feature = "math")]
@@ -1566,17 +1937,36 @@ pub fn render_math(
     cache: &mut CommonMarkCache,
     latex: &str,
     is_inline: bool,
+    options: &CommonMarkOptions,
 ) {
-    let is_dark = ui.style().visuals.dark_mode;
+    render_math_with_layout(ui, cache, latex, is_inline, true, options);
+}
+
+/// Render inline math in a vertically centered fixed-height table cell.
+#[cfg(feature = "math")]
+pub fn render_math_in_table(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    options: &CommonMarkOptions,
+) {
+    render_math_with_layout(ui, cache, latex, true, false, options);
+}
+
+#[cfg(feature = "math")]
+fn render_math_with_layout(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    is_inline: bool,
+    align_to_text_baseline: bool,
+    options: &CommonMarkOptions,
+) {
     let bg = ui.visuals().panel_fill;
     let fg = ui.visuals().text_color();
+    let size_pt = math_size_pt(ui, options);
 
-    // Hash content + theme for cache key
-    let mut hasher = DefaultHasher::new();
-    latex.hash(&mut hasher);
-    is_inline.hash(&mut hasher);
-    is_dark.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = math_cache_hash(latex, is_inline, fg, bg, size_pt);
 
     // Poll for completed background renders
     let mut received_any = false;
@@ -1608,6 +1998,7 @@ pub fn render_math(
     // the next formula spawns now instead of waiting for the 100ms placeholder
     // tick — otherwise throughput is capped at slots-per-100ms, not render speed.
     if received_any {
+        cache.mark_layout_changed();
         ui.ctx().request_repaint();
     }
 
@@ -1622,13 +2013,21 @@ pub fn render_math(
         && !cache.math_rendering.contains(&hash)
         && cache.math_rendering.len() < math_concurrency()
     {
-        spawn_math_render(hash, latex, is_inline, fg, bg, cache);
+        if spawn_math_render(hash, latex, is_inline, fg, bg, size_pt, cache)
+            == MathEnqueueStatus::Full
+        {
+            // The shared queue is bounded. Retry promptly after workers have
+            // had a chance to drain it instead of silently waiting for an
+            // unrelated UI event to revisit this formula.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        }
     }
 
     // Display based on current state
     match cache.math_states.get(&hash) {
         Some(MathState::Rendering) => {
-            if is_inline {
+            if is_inline && align_to_text_baseline {
                 // Inline: small placeholder
                 ui.spinner();
             } else {
@@ -1657,7 +2056,7 @@ pub fn render_math(
             baseline_ratio,
         }) => {
             let sized_texture = egui::load::SizedTexture::new(texture.id(), *size);
-            if is_inline {
+            if is_inline && align_to_text_baseline {
                 // Align the formula's own baseline to the text baseline. Inline
                 // content lays out bottom-aligned, so by default the image bottom
                 // sits at the line bottom and the formula's baseline (at a
@@ -1702,6 +2101,8 @@ pub fn render_math(
                 let (rect, _) = ui
                     .allocate_exact_size(egui::vec2(size.x, size.y + lift), egui::Sense::hover());
                 img.paint_at(ui, egui::Rect::from_min_size(rect.min, *size));
+            } else if is_inline {
+                ui.add(egui::Image::new(egui::ImageSource::Texture(sized_texture)));
             } else {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
@@ -1733,22 +2134,74 @@ pub fn render_math(
 }
 
 #[cfg(feature = "math")]
+fn math_cache_hash(
+    latex: &str,
+    is_inline: bool,
+    fg: egui::Color32,
+    bg: egui::Color32,
+    size_pt: f32,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    latex.hash(&mut hasher);
+    is_inline.hash(&mut hasher);
+    fg.hash(&mut hasher);
+    bg.hash(&mut hasher);
+    // Quantized to 0.01 pt: the rendered bitmap differs at any size the eye can
+    // tell apart, but per-frame float resolution of the body height must not
+    // spawn a fresh typst compile every paint.
+    ((size_pt * 100.0).round() as i64).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Point size to render formulas at, given the ui's Body style and the
+/// configured scale.
+///
+/// Kept in one place because the render path and the height-lookup path
+/// compute the cache key independently — if they disagree by so much as a
+/// rounding step, the lookup misses a key that was just stored.
+pub fn math_size_pt(ui: &egui::Ui, options: &CommonMarkOptions) -> f32 {
+    let body = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .map(|f| f.size)
+        .unwrap_or(16.0);
+    (body * options.math_scale).max(1.0)
+}
+
+#[cfg(feature = "math")]
 fn spawn_math_render(
     hash: u64,
     latex: &str,
     is_inline: bool,
     fg: egui::Color32,
     bg: egui::Color32,
+    size_pt: f32,
     cache: &mut CommonMarkCache,
-) {
-    cache.math_rendering.insert(hash);
-    let latex = latex.to_owned();
-    let tx = cache.math_tx.clone();
-
-    std::thread::spawn(move || {
-        let result = render_math_formula(&latex, is_inline, fg, bg);
-        let _ = tx.send(MathRenderResult { hash, result });
-    });
+) -> MathEnqueueStatus {
+    let job = MathJob {
+        hash,
+        latex: latex.to_owned(),
+        is_inline,
+        fg,
+        size_pt,
+        bg,
+        result_tx: cache.math_tx.clone(),
+    };
+    let status = enqueue_math_job(&MATH_JOB_TX, job);
+    match status {
+        MathEnqueueStatus::Queued => {
+            cache.math_rendering.insert(hash);
+        }
+        MathEnqueueStatus::Full => {}
+        MathEnqueueStatus::Disconnected => {
+            cache.math_states.insert(
+                hash,
+                MathState::Error("math renderer workers are unavailable".to_owned()),
+            );
+        }
+    }
+    status
 }
 
 #[cfg(not(feature = "better_syntax_highlighting"))]
@@ -1925,6 +2378,9 @@ pub struct CommonMarkCache {
     /// estimates are unreliable in image-heavy documents.
     active_search_y: Option<f32>,
 
+    /// Incremented whenever asynchronous content changes the document layout.
+    layout_revision: u64,
+
     /// Mermaid diagram render states: content hash → rendering/ready/error
     #[cfg(feature = "mermaid")]
     mermaid_states: HashMap<u64, MermaidState>,
@@ -1948,6 +2404,10 @@ pub struct CommonMarkCache {
     /// Set when a regular image is clicked (texture id + intrinsic size for lightbox).
     /// Texture lifetime is owned by egui's loader, so we only carry the id.
     clicked_image: Option<(egui::TextureId, egui::Vec2)>,
+
+    /// Last allocated size per ordinary image URI. Loader completion can
+    /// replace a placeholder with a differently sized image.
+    image_sizes: HashMap<String, egui::Vec2>,
 
     /// Hash of the diagram that currently has an active background thread.
     /// Only one diagram renders at a time so they appear top-to-bottom.
@@ -2017,6 +2477,7 @@ impl Default for CommonMarkCache {
             edit_feedback: None,
             editor_rects: HashMap::new(),
             session_feedback: HashMap::new(),
+            layout_revision: 0,
             #[cfg(feature = "mermaid")]
             mermaid_states: HashMap::new(),
             #[cfg(feature = "mermaid")]
@@ -2035,6 +2496,7 @@ impl Default for CommonMarkCache {
             #[cfg(feature = "mermaid")]
             clicked_mermaid: None,
             clicked_image: None,
+            image_sizes: HashMap::new(),
             #[cfg(feature = "mermaid")]
             mermaid_rendering: None,
             #[cfg(feature = "math")]
@@ -2267,10 +2729,58 @@ impl CommonMarkCache {
         self.active_search_y = Some(self.current_scroll_offset + viewport_y);
     }
 
+    /// Record an active search position already expressed in document space.
+    pub fn record_active_search_content_y(&mut self, content_y: f32) {
+        self.active_search_y = Some(content_y);
+    }
+
     /// Get the recorded content-relative y of the active match, if it has rendered
     /// at least once since the active range was set. Used for precise scroll-into-view.
     pub fn active_search_y(&self) -> Option<f32> {
         self.active_search_y
+    }
+
+    pub fn layout_revision(&self) -> u64 {
+        self.layout_revision
+    }
+
+    pub fn mark_layout_changed(&mut self) {
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+    }
+
+    fn observe_image_size(&mut self, uri: &str, size: egui::Vec2) {
+        match self.image_sizes.insert(uri.to_owned(), size) {
+            // A later size change invalidates measurements taken against the
+            // previous one.
+            Some(previous) if (previous - size).length_sq() > 0.25 => {
+                self.mark_layout_changed();
+            }
+            // `HashMap::insert` returns `None` the first time a key is written.
+            // Images load asynchronously, so the first paint measured any row
+            // containing this image with no size available; that measurement is
+            // now stale and has to be redone. Without this arm the row keeps the
+            // height it was given before the image existed (#124).
+            None => {
+                self.mark_layout_changed();
+            }
+            _ => {}
+        }
+    }
+
+    /// Seed an observed image size without painting. Test-only: production
+    /// code must go through the paint path so `layout_revision` is maintained.
+    #[doc(hidden)]
+    pub fn observe_image_size_for_test(&mut self, uri: &str, size: egui::Vec2) {
+        self.observe_image_size(uri, size);
+    }
+
+    /// Size of an image as last painted, if it has been painted at least once.
+    ///
+    /// Returns `None` before the first paint of that URI — callers must fall
+    /// back rather than assume zero, or a row will collapse on the frame before
+    /// the image loads.
+    pub fn observed_image_size(&self, uri: &str) -> Option<egui::Vec2> {
+        self.image_sizes.get(uri).copied()
     }
 
     /// Read-only view of stored search ranges (used by the renderer).

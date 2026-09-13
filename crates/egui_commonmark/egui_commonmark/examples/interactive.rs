@@ -7,7 +7,7 @@
 //! An easy way to visualize rendered markdown interactively
 
 use eframe::egui;
-use egui_commonmark::*;
+use egui_commonmark_extended::*;
 
 struct App {
     cache: CommonMarkCache,

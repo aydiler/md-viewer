@@ -6,7 +6,7 @@
 //! is system theme. `cargo r --example scroll --all-features dark`
 
 use eframe::egui;
-use egui_commonmark::*;
+use egui_commonmark_extended::*;
 
 struct App {
     cache: CommonMarkCache,

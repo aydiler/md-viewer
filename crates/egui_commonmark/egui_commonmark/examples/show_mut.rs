@@ -2,7 +2,7 @@
 //! is light. `cargo r --example show_mut -- dark`
 
 use eframe::egui;
-use egui_commonmark::*;
+use egui_commonmark_extended::*;
 
 struct App {
     cache: CommonMarkCache,

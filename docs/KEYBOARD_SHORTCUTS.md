@@ -4,7 +4,7 @@
 
 | Shortcut | Action |
 |----------|--------|
-| Ctrl+T | New tab (open file dialog) |
+| Ctrl+T | Open file in new tab |
 | Ctrl+W | Close current tab |
 | Ctrl+Tab | Next tab |
 | Ctrl+Shift+Tab | Previous tab |
@@ -14,8 +14,8 @@
 
 | Shortcut | Action |
 |----------|--------|
-| Ctrl+O | Open file dialog |
-| Ctrl+S | Save active tab (source-mode editing) |
+| Ctrl+O | Open file dialog (files open in new tabs) |
+| Ctrl+S | Save active tab |
 | F5 | Toggle file watching |
 | Ctrl+Q | Quit application (prompts if unsaved edits) |
 
