@@ -270,8 +270,12 @@ pub fn code_block(
     let frame_response = egui::Frame::new()
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            // Force all code blocks to fill the available width
-            ui.set_min_width(ui.available_width());
+            // Force all code blocks to fill the available width, but never
+            // wider than what is visible: the CentralPanel's clip spans the
+            // whole window (egui clips only side panels to their own rect),
+            // so an unclamped fill used to paint over the right sidebar.
+            let visible_width = (ui.clip_rect().right() - ui.max_rect().left()).max(0.0);
+            ui.set_min_width(ui.available_width().min(visible_width));
             egui::ScrollArea::horizontal()
                 .id_salt(id)
                 .show(ui, |ui| {

@@ -1714,3 +1714,23 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Fix:** Give presets differences beyond family resolution: per-preset base body size (GitHub 16px vs VS Code preview 14px) applied to `TextStyle::Body`/`Heading`/`Monospace`, and preset-driven renderer line heights (GitHub 1.5/1.45, VS Code 1.6/1.36). The renderer derives all document sizes from `TextStyle::Body`, so one style entry cascades everywhere.
 **Gotchas:** Don't scale `TextStyle::Small` — it sizes chrome controls. State/checkmark UI updating is not evidence fonts changed: assert against `fonts(|f| f.definitions().clone())` or rendered metrics in tests.
 **Files:** `src/system_fonts.rs`, `src/main.rs`
+
+### CentralPanel's clip is window-wide — but ScrollArea inner rects already bound wide blocks; clip from max_rect and you erase widgets
+**Context:** "I can drag tables over the right sidebar, code blocks go above it, and resizing the sidebar resets table widths." Three reports, one egui asymmetry, one width policy — and two wrong fixes before the right one.
+
+**The asymmetry:** egui 0.33 clips `SidePanel`s to their own rect but `CentralPanel` content to `ctx.content_rect()` — the whole window (`containers/panel.rs`: `set_clip_rect(panel_rect)` vs `set_clip_rect(ctx.content_rect())`). `Ui::new_child` clones the parent painter, so every descendant inherits that window-wide clip; an explicit child `max_rect` is *not* intersected with it (the #64 carve-out depends on this). The vertical document ScrollArea only tightens the *scrolled* (Y) dimension of its content clip, so the X extent stays window-wide all the way down to tables and code blocks.
+
+**Why it still doesn't leak (much):** every wide block lives in a `ScrollArea::horizontal` whose inner rect is bounded by its parent's *available* rect — pane-bounded — and its content clip is `inner ± clip_rect_margin` (3px). Xvfb E2E (body drag, column-separator drag, wheel, sidebar resize, code selection drag) confirmed 0.2.2 paints wide blocks at most ~3px past the pane edge, hidden by the content gutter. The dramatic overlap reports trace to the *width policy*, not the clip.
+
+**Wrong fix #1:** capping carve-outs at `ui.clip_rect().right()` is a **no-op** — that clip is window-wide. Bound layout at `ui.max_rect().right()`, which *is* the viewport column.
+
+**Wrong fix #2 (data loss):** `ui.set_clip_rect(clip ∩ max_rect)` inside a carve-out **erased HTML tables entirely**. In the HTML/main-wrap path the scope's `max_rect` is *degenerate* (`max.y == min.y` — zero height); layout overflowing `max_rect` is legal — only the painter clip forbids painting, so pre-change content painted fine and post-change the clip was a zero-height rect. Never clip to `max_rect`; it is a layout hint and may be degenerate.
+
+**The width policy that actually bit:** `TableBuilder` persists user-resized widths and never re-shrinks them; reset-on-any-bound-change fired on every sidebar nudge, and because fitted columns fill the pane, *any* shrink overflows → reset *every* time. Fix: `table_shrink_rescale_widths` — growth keeps, shrink-that-fits keeps, shrink-that-overflows **rescales the persisted widths proportionally** (floored at per-column minimums) with a `reset()` so they take effect. Bound history distinguishes a genuine shrink from a user-dragged column: egui_extras resize does **not** redistribute width (one column grows by the pointer delta), so drags overflow by choice and must never be punished by an overflow rule.
+
+**Testing technique (three traps this fix walked into):**
+1. **Verify red-before-green.** Two "passing" regression tests were vacuous: budget-capped columns never overflow at rest, and rendering the fixture inside a blockquote shrinks the table bound so it never overflowed. A clip test whose fixture never approaches the clip passes forever.
+2. **One `begin_pass` per frame.** Calling `ctx.begin_pass(RawInput{events})` and then a helper that calls `begin_pass` again zeroes `pointer.delta()` — simulated drags silently do nothing while `button_down` stays true.
+3. **Drive `show_scrollable`, not `.show()`.** The renderer-owned ScrollArea creates the pane-bounded geometry; the plain entry cannot express any of it.
+
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (bootstrap + slice width caps, both table carve-outs, `table_shrink_rescale_widths`, `store_table_column_widths`), `crates/egui_commonmark/egui_commonmark/tests/pane_clip.rs`, `docs/devlog/068-wide-block-pane-clip.md`
