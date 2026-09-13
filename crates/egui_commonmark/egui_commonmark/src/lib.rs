@@ -94,14 +94,7 @@ pub use egui_commonmark_backend_extended::RenderHtmlFn;
 pub use egui_commonmark_backend_extended::RenderMathFn;
 pub use egui_commonmark_backend_extended::alerts::{Alert, AlertBundle};
 pub use egui_commonmark_backend_extended::misc::{
-    header_position_key, CommonMarkCache, EditFeedback, EditRegionConfig, STRONG_FONT_FAMILY,
-};
-pub use egui_commonmark_backend_extended::misc::{BlockBoundary, top_level_block_spans};
-pub use egui_commonmark_backend_extended::misc::{
-    EditSessionConfig, SessionBlock, SessionBlockFeedback,
-};
-pub use egui_commonmark_backend_extended::styler::{
-    EditBlockKind, MarkdownEditStyle, markdown_block_job,
+    header_position_key, CommonMarkCache, STRONG_FONT_FAMILY,
 };
 pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 #[cfg(feature = "math")]
@@ -485,32 +478,6 @@ impl<'f> CommonMarkViewer<'f> {
     /// outer `ScrollArea` — `show_scrollable` owns the ScrollArea internally.
     pub fn pending_scroll_offset(mut self, offset: Option<f32>) -> Self {
         self.pending_scroll_offset = offset;
-        self
-    }
-
-    /// Live-preview editing: replace the given top-level block byte range
-    /// with an inline TextEdit for this frame. The editor's working buffer
-    /// lives in egui temp state under `EditRegionConfig::id`; collect it via
-    /// [`CommonMarkCache::take_edit_feedback`] right after painting and splice
-    /// changed text back into your own buffer.
-    pub fn edit_region(mut self, region: Option<EditRegionConfig>) -> Self {
-        self.options.edit_region = region;
-        self
-    }
-
-    /// Persistent editing session: every text block in `blocks` paints as a
-    /// styled TextEdit bound to per-block temp buffers; other blocks render
-    /// normally. Collect per-block results via
-    /// [`CommonMarkCache::take_session_feedback`] right after painting.
-    pub fn edit_session(mut self, session: Option<EditSessionConfig>) -> Self {
-        self.options.edit_session = session;
-        self
-    }
-
-    /// Record block boundaries while painting so the caller can hit-test
-    /// clicks into byte ranges via [`CommonMarkCache::block_span_at_content_y`].
-    pub fn record_block_layout(mut self, on: bool) -> Self {
-        self.options.record_block_layout = on;
         self
     }
 

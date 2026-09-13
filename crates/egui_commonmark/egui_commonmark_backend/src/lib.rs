@@ -12,7 +12,6 @@ pub mod html_table;
 pub mod misc;
 #[doc(hidden)]
 pub mod pulldown;
-pub mod styler;
 pub mod typography;
 
 #[cfg(feature = "embedded_image")]

@@ -15,7 +15,6 @@ use egui_commonmark_backend_extended::elements::{
 };
 use egui_commonmark_backend_extended::misc::*;
 use egui_commonmark_backend_extended::pulldown::*;
-
 use pulldown_cmark::{CowStr, HeadingLevel};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1696,198 +1695,13 @@ impl CommonMarkViewerInternal {
                 .expect("events just cached")
                 .to_vec();
             let event_count = events_data.len();
-            if crate::misc::edit_debug() {
-                eprintln!(
-                    "[show] session={:?} region={} events={}",
-                    options.edit_session.as_ref().map(|s| s.blocks.len()),
-                    options.edit_region.is_some(),
-                    event_count
-                );
-            }
             let mut events = events_data
                 .into_iter()
                 .enumerate()
                 .peekable();
 
-            // Live-preview editing state for this frame.
-            let mut session_painted: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
-            let mut session_fb: HashMap<egui::Id, Vec<crate::misc::SessionBlockFeedback>> =
-                HashMap::new();
-            let _ = cache.take_edit_feedback();
-
-            if crate::misc::edit_debug() {
-                eprintln!(
-                    "[show] mode: session={:?} edit_region={:?} events={}",
-                    options.edit_session.as_ref().map(|s| s.blocks.len()),
-                    options.edit_region.is_some(),
-                    event_count
-                );
-            }
-
             while let Some((index, (e, src_span))) = events.next() {
                 let start_position = ui.next_widget_position();
-                let src_span_end = src_span.end;
-
-                if crate::misc::edit_debug() && std::env::var("MDV_PROBE").is_ok() {
-                    eprintln!(
-                        "[probe] session_blocks={:?} span={}..{}",
-                        options.edit_session.as_ref().map(|s| s.blocks.len()),
-                        src_span.start,
-                        src_span.end
-                    );
-                }
-                // ---- Persistent editing session ----
-                // Every text block paints as a styled TextEdit bound to its
-                // own temp buffer; non-text blocks fall through to normal
-                // rendering. Per-block feedback is stashed for the caller.
-                if let Some(session) = &options.edit_session {
-                    let block_idx = session.blocks.iter().position(|b| {
-                        src_span.start >= b.src.start && src_span.end <= b.src.end
-                    });
-                    if let Some(bi) = block_idx {
-                        let blk = &session.blocks[bi];
-                        let text_kind = matches!(
-                            blk.kind,
-                            crate::styler::EditBlockKind::Heading(_)
-                                | crate::styler::EditBlockKind::Paragraph
-                                | crate::styler::EditBlockKind::Quote
-                                | crate::styler::EditBlockKind::ListItem
-                        );
-                        if text_kind && !session_painted.contains(&bi) {
-                            session_painted.insert(bi);
-                            let editor_id = session.id_salt.with(("blk", bi));
-                            // Seed from source on first paint of this
-                            // block; later frames read the live buffer.
-                            let (mut buf, seeded) = ui.ctx().data_mut(|d| {
-                                match d.get_temp::<String>(editor_id) {
-                                    Some(b) => (b, false),
-                                    None => (text.get(blk.src.clone()).unwrap_or("").to_string(), true),
-                                }
-                            });
-                            let _ = seeded;
-                            let caret_char = ui
-                                .ctx()
-                                .data_mut(|d| d.get_temp::<usize>(editor_id.with("caret")));
-                            let reveal_line = caret_char
-                                .map(|ci| buf.chars().take(ci).filter(|&c| c == '\n').count());
-
-                            let sty = crate::styler::MarkdownEditStyle::from_ui(ui);
-                            let kind = blk.kind;
-                            let sty_for_measure = sty.clone();
-                            let measure_text = buf.clone();
-                            let content_h = {
-                                let job = crate::styler::markdown_block_job(
-                                    &measure_text,
-                                    kind,
-                                    &sty_for_measure,
-                                    reveal_line,
-                                    max_width,
-                                );
-                                ui.fonts_mut(|f| f.layout_job(job)).size().y
-                            };
-                            let box_h = (content_h + 12.0).max(sty.body_size * 1.5);
-                            let mut layouter = move |ui: &egui::Ui,
-                                                    text: &dyn egui::TextBuffer,
-                                                    wrap: f32|
-                                  -> std::sync::Arc<egui::Galley> {
-                                let job = crate::styler::markdown_block_job(
-                                    text.as_str(),
-                                    kind,
-                                    &sty,
-                                    reveal_line,
-                                    wrap,
-                                );
-                                ui.fonts_mut(|f| f.layout_job(job))
-                            };
-
-                            // Explicit-size allocation: the surrounding
-                            // paint layout is INLINE-FLOW (LTR + wrap), so an
-                            // unconstrained multiline TextEdit would grab all
-                            // remaining width x height as a narrow sliver.
-                            // We pre-measured above; allocate exact height at
-                            // full width and end the row.
-                            let response = ui
-                                .allocate_ui_with_layout(
-                                    egui::vec2(max_width, box_h),
-                                    egui::Layout::top_down_justified(egui::Align::LEFT),
-                                    |ui| {
-                                        egui::Frame::NONE
-                                            .inner_margin(egui::Margin::symmetric(6, 2))
-                                            .show(ui, |ui| {
-                                                egui::TextEdit::multiline(&mut buf)
-                                                    .id(editor_id)
-                                                    .layouter(&mut layouter)
-                                                    .desired_width(max_width)
-                                                    .min_size(egui::vec2(
-                                                        max_width,
-                                                        content_h + 4.0,
-                                                    ))
-                                                    .show(ui)
-                                            })
-                                            .inner
-                                    },
-                                )
-                                .inner;
-                            ui.end_row();
-
-                            // Typography rhythm matching the rendered view:
-                            // heading above/below + paragraph spacing.
-                            {
-                                let body_h = sty_for_measure.body_size;
-                                match kind {
-                                    crate::styler::EditBlockKind::Heading(l) => {
-                                        let below = body_h
-                                            * sty_for_measure
-                                                .heading_below_scale
-                                                [(l as usize - 1).min(5)];
-                                        ui.add_space(below);
-                                    }
-                                    crate::styler::EditBlockKind::Paragraph => {
-                                        ui.add_space(sty_for_measure.paragraph_gap);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if crate::misc::edit_debug() {
-                                eprintln!(
-                                    "[session] painted blk#{bi} kind={kind:?} rect={:?} chars={}",
-                                    response.response.rect,
-                                    buf.chars().count()
-                                );
-                            }
-
-                            // Persist caret char index for next frame's reveal.
-                            if let Some(cr) = response.state.cursor.char_range() {
-                                let idx = cr.primary.index.min(buf.chars().count());
-                                ui.ctx().data_mut(|d| {
-                                    d.insert_temp(editor_id.with("caret"), idx)
-                                });
-                            }
-                            ui.ctx()
-                                .data_mut(|d| d.insert_temp(editor_id, buf.clone()));
-                            session_fb.entry(session.id_salt).or_default().push(
-                                crate::misc::SessionBlockFeedback {
-                                    index: bi,
-                                    text: buf,
-                                    changed: response.response.changed(),
-                                },
-                            );
-
-                            // Consume remaining events of this block.
-                            while let Some((_, (_, sp_next))) =
-                                events.next_if(|&(_, ref pair)| {
-                                    pair.1.start >= blk.src.start
-                                        && pair.1.end <= blk.src.end
-                                })
-                            {
-                                let _ = sp_next;
-                            }
-                            continue;
-                        }
-                    }
-                }
-
                 // Add a viewport-skip waypoint at every block-level end (not
                 // just list-internal ends as the original code did). Without
                 // this, docs whose content is mostly headings + paragraphs
@@ -1940,11 +1754,6 @@ impl CommonMarkViewerInternal {
                         let scroll_cache = scroll_cache(cache, &source_id);
                         let end_position = ui.next_widget_position();
 
-                        // Split points and boundaries dedupe independently:
-                        // record=false frames (Rendered mode) still fill
-                        // split_points, so a later Live frame must not skip
-                        // boundary recording just because the split point
-                        // already exists.
                         let split_index = if is_atomic_table {
                             events
                                 .peek()
@@ -1975,38 +1784,6 @@ impl CommonMarkViewerInternal {
                                 relative_end,
                             ));
                         }
-
-                        if options.record_block_layout {
-                            // Record RAW screen y every frame (bootstrap full
-                            // paint guarantees each boundary is visited);
-                            // show_scrollable converts to content space after
-                            // the ScrollArea reports viewport top + scroll.
-                            let existing = scroll_cache
-                                .boundaries
-                                .iter_mut()
-                                .find(|b| b.event_index == index);
-                            match existing {
-                                Some(b) => b.top_y_raw = end_position.y,
-                                None => {
-                                    scroll_cache
-                                        .boundaries
-                                        .push(crate::misc::BlockBoundary {
-                                            event_index: index,
-                                            top_y_raw: end_position.y,
-                                            top_y: f32::NAN, // converted post-paint
-                                            next_start: src_span_end,
-                                        });
-                                    if crate::misc::edit_debug() {
-                                        eprintln!(
-                                        "[mdv-fork] boundary pushed idx={index} y={:.1} next={} total={}",
-                                        end_position.y,
-                                        src_span_end,
-                                        scroll_cache.boundaries.len()
-                                    );
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -2025,21 +1802,6 @@ impl CommonMarkViewerInternal {
                     width: max_width,
                     left_offset: content_origin_x - scroll_area_left,
                 });
-            }
-            // Flush persistent-session feedback collected this frame.
-            for (salt, mut fb) in session_fb {
-                if crate::misc::edit_debug() && std::env::var("MDV_PROBE").is_ok() {
-                    eprintln!(
-                        "[flush] salt_changed={:?} n={}",
-                        fb.iter().map(|f| (f.index, f.changed)).collect::<Vec<_>>(),
-                        fb.len()
-                    );
-                }
-                // `changed` must survive the stash: the app folds buffers
-                // only for entries where it is true (the frame the keystroke
-                // landed). Entries are rebuilt from `response.changed()`
-                // every frame, so no stale true can leak across frames.
-                cache.stash_session_feedback(&salt, fb);
             }
         });
 
@@ -2101,7 +1863,6 @@ impl CommonMarkViewerInternal {
                 // post-change frame falls into the bootstrap branch below.
                 sc.page_size = None;
                 sc.split_points.clear();
-                sc.boundaries.clear();
             }
             // Width/zoom/theme change: y-coordinates are invalid for the
             // new layout, even though parsed events are still good.
@@ -2110,7 +1871,6 @@ impl CommonMarkViewerInternal {
                 sc.layout_signature = layout_sig;
                 sc.page_size = None;
                 sc.split_points.clear();
-                sc.boundaries.clear();
                 sc.available_size = available_size;
             }
             if sc.layout_revision != layout_revision {
@@ -2118,17 +1878,6 @@ impl CommonMarkViewerInternal {
                 sc.layout_revision = layout_revision;
                 sc.page_size = None;
                 sc.split_points.clear();
-                sc.boundaries.clear();
-            }
-            if crate::misc::edit_debug() {
-                eprintln!(
-                    "[mdv-fork] frame: record={} boundaries={} splits={} events={} version={}",
-                    options.record_block_layout,
-                    sc.boundaries.len(),
-                    sc.split_points.len(),
-                    sc.events.len(),
-                    sc.content_version
-                );
             }
             // An unknown navigation target may require painting every event
             // so its precise position can be measured. Scrolling to an
@@ -2140,17 +1889,7 @@ impl CommonMarkViewerInternal {
             // to paint every event for the jump, not to recompute geometry.
             // The push site deduplicates by event index, so the full render
             // can still refresh page_size without rebuilding the split list.
-            // Editing modes must paint every event each frame: session
-            // feedback folds only blocks that actually paint, and boundary
-            // recording has to cover the whole document for click-to-edit
-            // hit-testing. A record_block_layout frame backfills ALL
-            // boundaries after Rendered-mode slice frames visited only part
-            // of the document. Re-bootstrap on those frames; plain rendered
-            // frames keep the viewport-slice fast path.
-            let editing_frame = options.edit_session.is_some()
-                || options.edit_region.is_some()
-                || options.record_block_layout;
-            if force_full_render || editing_frame {
+            if force_full_render {
                 sc.page_size = None;
             }
         }
@@ -2191,11 +1930,8 @@ impl CommonMarkViewerInternal {
                 page_size.y = out.content_size.y;
             }
             sc.available_size = available_size;
-            convert_boundaries_to_content_space(&mut sc.boundaries, &out);
             return out;
         }
-        // Kept for future restoration once skip-paint is bug-free.
-        #[allow(unreachable_code)]
         let page_size_opt = scroll_cache(cache, &source_id).page_size;
         let Some(page_size) = page_size_opt else {
             unreachable!()

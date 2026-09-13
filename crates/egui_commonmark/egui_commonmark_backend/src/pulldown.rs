@@ -8,11 +8,6 @@ pub struct ScrollableCache {
     pub available_size: Vec2,
     pub page_size: Option<Vec2>,
     pub split_points: Vec<(usize, Pos2, Pos2)>,
-    /// Block boundaries recorded when `CommonMarkOptions::record_block_layout`
-    /// is on: content-relative y where the following block starts, plus the
-    /// byte offset just after the boundary event. Parallel to the safe
-    /// split-point subset of blocks; used for click→block hit-testing.
-    pub boundaries: Vec<crate::misc::BlockBoundary>,
     /// Parsed pulldown events, owned (Event<'static>) so they outlive the
     /// borrow of the source text. Repopulated only when `content_version`
     /// changes, replacing the per-frame `Parser::new_ext(text).collect()`
