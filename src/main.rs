@@ -4530,7 +4530,13 @@ impl MarkdownApp {
                     .map_or(self.available_font_families.len(), Vec::len);
 
                 let row_height = ui.spacing().interact_size.y;
-                egui::ScrollArea::vertical().max_height(300.0).show_rows(
+                // auto_shrink_x = false: egui's default (TRUE) shrinks the
+                // area to its widest row, which paints the floating scrollbar
+                // mid-dialog instead of at the window's right edge.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(300.0)
+                    .show_rows(
                     ui,
                     row_height,
                     match_count + 1, // + 1 for the pinned "System Default" row

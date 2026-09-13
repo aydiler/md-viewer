@@ -1715,7 +1715,6 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Gotchas:** Don't scale `TextStyle::Small` — it sizes chrome controls. State/checkmark UI updating is not evidence fonts changed: assert against `fonts(|f| f.definitions().clone())` or rendered metrics in tests.
 **Files:** `src/system_fonts.rs`, `src/main.rs`
 
-<<<<<<< HEAD
 ### CentralPanel's clip is window-wide — but ScrollArea inner rects already bound wide blocks; clip from max_rect and you erase widgets
 **Context:** "I can drag tables over the right sidebar, code blocks go above it, and resizing the sidebar resets table widths." Three reports, one egui asymmetry, one width policy — and two wrong fixes before the right one.
 
