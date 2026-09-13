@@ -14,9 +14,25 @@
 
 | Shortcut | Action |
 |----------|--------|
-| Ctrl+O | Open file in new tab |
+| Ctrl+O | Open file dialog (files open in new tabs) |
+| Ctrl+S | Save active tab |
 | F5 | Toggle file watching |
-| Ctrl+Q | Quit application |
+| Ctrl+Q | Quit application (prompts if unsaved edits) |
+
+## Editing
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+E | Toggle live-preview editing for the active tab |
+| Click block | Activate that block's inline editor (Live mode) |
+| Esc | Leave the active block, return to the rendered view (Live mode) |
+
+Editing modes: **Live preview** (Ctrl+E — everything renders except the
+block you click into), **Source** (whole-file raw markdown, View menu), and
+**Rendered** (reading view). In Source mode, Ctrl+W / middle-click closing a
+dirty tab and Ctrl+Q raise an unsaved-changes confirmation with Save /
+Discard / Cancel. If the watched file changes on disk while you have
+unsaved edits, a banner offers Reload-from-disk or Keep-my-version.
 
 ## Navigation
 

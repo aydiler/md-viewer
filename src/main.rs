@@ -10,12 +10,16 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
-use egui_commonmark_extended::{header_position_key, CommonMarkCache, CommonMarkViewer};
+use egui_commonmark_extended::{
+    header_position_key, CommonMarkCache, CommonMarkViewer, EditBlockKind, EditRegionConfig,
+    EditSessionConfig, SessionBlock,
+};
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
 use regex::Regex;
@@ -59,6 +63,196 @@ const CONTENT_RIGHT_RESIZE_GUTTER: i8 = 10;
 // share the same line/page behavior.
 const KEYBOARD_LINE_SCROLL_STEP: f32 = 48.0;
 const KEYBOARD_PAGE_SCROLL_RATIO: f32 = 0.9;
+
+// Idle period after the last keystroke before derived caches (outline headers,
+// local links, line counts, search matches) are rebuilt. Keeps typing snappy
+// while still converging within a quarter second of pause.
+const DERIVED_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Hash a content string for dirty/sync tracking. Uses the same
+/// `DefaultHasher` scheme as the vendored renderer's event cache. Hashes are
+/// only compared within one process lifetime, so cross-run stability is not a
+/// requirement.
+fn hash_content(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Convert a byte offset in `text` into the char index that egui cursor APIs
+/// (`CCursor.index`) expect. Offsets past the end clamp to the char count;
+/// offsets landing mid-UTF-8-sequence round down to the containing char start.
+fn byte_offset_to_char_index(text: &str, byte_offset: usize) -> usize {
+    let clamped = byte_offset.min(text.len());
+    let boundary = match clamped {
+        0 => 0,
+        n if n >= text.len() => text.len(),
+        _ => {
+            // Walk back to a UTF-8 char boundary (floor division semantics).
+            let mut b = clamped;
+            while !text.is_char_boundary(b) {
+                b -= 1;
+            }
+            b
+        }
+    };
+    text[..boundary].chars().count()
+}
+
+/// Recompute the live-edit anchor after the edited block's text changed
+/// length. The anchor keeps its relative position inside the block, clamped
+/// to the new block length.
+fn anchor_after_splice(
+    anchor: usize,
+    range_start: usize,
+    range_end: usize,
+    new_len: usize,
+) -> usize {
+    let within = anchor.saturating_sub(range_start).min(range_end - range_start);
+    range_start + within.min(new_len)
+}
+
+/// Byte offset of the start of a 1-based `line` in `text`. Lines beyond the
+/// document clamp to the end of the text.
+fn byte_offset_of_line_start(text: &str, line: usize) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+    let mut offset = 0usize;
+    for (i, bytes) in text.split_inclusive('\n').enumerate() {
+        if i + 1 >= line {
+            break;
+        }
+        offset += bytes.len();
+    }
+    offset.min(text.len())
+}
+
+/// Classify a top-level block's first line into its editing surface kind.
+/// Mirrors what `pulldown-cmark` would emit for the block opener.
+fn block_kind_of(block_text: &str) -> EditBlockKind {
+    let Some(first) = block_text.lines().next() else {
+        return EditBlockKind::Paragraph;
+    };
+    let t = first.trim_start();
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes)
+        && t[hashes..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == ' ' || c == '\t')
+    {
+        return EditBlockKind::Heading(hashes as u8);
+    }
+    if t.starts_with('>') {
+        return EditBlockKind::Quote;
+    }
+    let body = t.trim_start_matches([' ', '\t']);
+    if matches!(body.as_bytes().first(), Some(b'-' | b'*' | b'+'))
+        && body[1..].starts_with(' ')
+    {
+        return EditBlockKind::ListItem;
+    }
+    let digits = body.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 && body[digits..].starts_with(". ") {
+        return EditBlockKind::ListItem;
+    }
+    if body.starts_with("```") {
+        return EditBlockKind::CodeBlock;
+    }
+    EditBlockKind::Paragraph
+}
+
+/// How the watcher should react to an on-disk change for one open tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskChange {
+    /// No-op echo or our own write — ignore entirely.
+    Ignore,
+    /// Buffer already matches disk (edits undone back to saved state) —
+    /// re-sync bookkeeping.
+    Resync,
+    /// External change while the buffer has unsaved edits — ask the user.
+    Conflict,
+    /// Clean external change — reload from disk.
+    Reload,
+}
+
+/// Pure decision core of `reload_changed_tabs` so the watcher policy stays
+/// unit-testable.
+fn classify_disk_change(
+    synced_content_hash: u64,
+    buffer_hash: u64,
+    dirty: bool,
+    in_flight_save_hash: Option<u64>,
+    incoming: u64,
+) -> DiskChange {
+    // Pure echo of unchanged content.
+    if !dirty && incoming == synced_content_hash {
+        return DiskChange::Ignore;
+    }
+    // Our own in-flight save observed on disk.
+    if in_flight_save_hash == Some(incoming) {
+        return DiskChange::Ignore;
+    }
+    // Live buffer already equals what's on disk.
+    if in_flight_save_hash.is_none() && buffer_hash == incoming {
+        return DiskChange::Resync;
+    }
+    if dirty {
+        DiskChange::Conflict
+    } else {
+        DiskChange::Reload
+    }
+}
+
+/// Open `path` with the system's default handler (Linux desktops: xdg-open).
+/// Fire-and-forget: the child outlives the app, and we never wait on it.
+fn open_external(path: &Path) {
+    match Command::new("xdg-open").arg(path).spawn() {
+        Ok(_) => log::info!("Opened {:?} in external application", path),
+        Err(e) => {
+            log::error!("Failed to open {:?} externally: {}", path, e);
+        }
+    }
+}
+
+/// Render a tab in source-editing mode: a monospace multiline TextEdit bound
+/// directly to `tab.content`, inside a ScrollArea that follows the caret
+/// (`ui.scroll_to_rect` from the TextEdit targets this enclosing scroller).
+/// Buffer changes only mark the tab dirty; heavy derived work happens
+/// debounced in the update loop.
+fn render_source_editor_ui(ui: &mut egui::Ui, tab: &mut Tab) {
+    let editor_id = tab.source_editor_id();
+
+    egui::ScrollArea::vertical()
+        .id_salt("source_editor_scroll")
+        .show(ui, |ui| {
+            let response = egui::TextEdit::multiline(&mut tab.content)
+                .id(editor_id)
+                .code_editor()
+                .desired_width(ui.available_width())
+                .show(ui);
+
+            if response.response.changed() {
+                tab.mark_edited(Instant::now());
+            }
+
+            // Consume pending caret jumps after the widget exists so its
+            // state is in the context store. Byte offsets from search/header
+            // machinery are converted to the char indices egui cursors use.
+            if let Some(byte_off) = tab.pending_caret_byte.take() {
+                let char_idx = byte_offset_to_char_index(&tab.content, byte_off);
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(char_idx)),
+                    ));
+                    state.store(ui.ctx(), editor_id);
+                }
+                response.response.request_focus();
+            }
+        });
+}
 
 // App-level keyboard scroll actions; kept private until shortcut wiring needs
 // to pass them through `MarkdownApp::update`.
@@ -495,12 +689,54 @@ struct ParsedHeaders {
     outline_headers: Vec<Header>,
 }
 
-/// A single match in a tab's content, identified by byte range and 1-based line number
+/// Editing surface of a tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditMode {
+    /// Pure rendered view (original viewer behavior).
+    Rendered,
+    /// Whole-file raw markdown TextEdit.
+    Source,
+    /// Obsidian-style live preview: everything rendered except the active
+    /// top-level block, which shows as an inline raw-text editor.
+    Live,
+}
+
+/// A search match identified by byte range and line number
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchMatch {
     byte_start: usize,
     byte_end: usize,
     line_number: usize,
+}
+
+// ---- Background save pipeline (State→Logic→UI→Async: thread does I/O,
+// update() only polls the outcome channel) ----
+
+/// A snapshot queued for asynchronous write to disk.
+struct SaveJob {
+    path: PathBuf,
+    content: String,
+    /// Hash of `content`; echoed back so the app can tell stale outcomes
+    /// from fresh ones.
+    hash: u64,
+}
+
+/// Result of one [`SaveJob`] written by the worker thread.
+struct SaveOutcome {
+    path: PathBuf,
+    hash: u64,
+    result: io::Result<()>,
+}
+
+/// A user confirmation awaiting a decision because closing/quitting would
+/// abandon unsaved edits. Tracks the affected tab by path (indices shift
+/// while a dialog is open).
+#[derive(Clone)]
+enum UnsavedConfirm {
+    /// Close the tab with this path.
+    CloseTab(PathBuf),
+    /// Quit the whole app.
+    Quit,
 }
 
 /// Per-frame return from `render_search_bar`
@@ -1022,6 +1258,53 @@ struct Tab {
     /// parsed events and split_points can survive across frames without
     /// re-hashing the entire content.
     content_version: u64,
+    // ---- Editing state (Phase 0/1: source mode + save pipeline) ----
+    /// Hash of the buffer as last known to be in sync with the file on disk
+    /// (set on load, reload, and completed save).
+    synced_content_hash: u64,
+    /// Hash of the snapshot currently being written by the background save
+    /// thread. `Some` while a save is in flight; lets the watcher recognize
+    /// our own write events even before the completion message arrives.
+    in_flight_save_hash: Option<u64>,
+    /// Unsaved modifications exist in the buffer.
+    dirty: bool,
+    /// External on-disk change detected while `dirty` — a conflict awaiting
+    /// the user's choice (reload vs keep). Holds the on-disk hash so repeated
+    /// watcher events for the same change dedupe.
+    external_change_hash: Option<u64>,
+    /// Source editing mode: raw markdown TextEdit instead of rendered view.
+    edit_mode: EditMode,
+    /// Live preview: byte offset inside the currently-edited top-level block
+    /// (`None` = view-only, everything rendered). The block is resolved from
+    /// this anchor every frame so re-segmentation can't strand it.
+    active_edit_byte: Option<usize>,
+    /// Which (content_version, block_start) the inline editor buffer was last
+    /// seeded for — prevents clobbering in-flight typing with re-seeds.
+    live_seeded_for: Option<(u64, usize)>,
+    /// PSE session: live text per top-level block, parallel to serialized
+    /// segmentation. Buffers hold marker-stripped text for styled kinds.
+    session_buffers: Vec<String>,
+    /// Kinds per block at seed time (parallel to session_buffers).
+    session_kinds: Vec<EditBlockKind>,
+    /// True when any session buffer differs from its seeded snapshot.
+    session_dirty: bool,
+    /// Last painted session blocks (survives cache-refresh gaps).
+    session_last_blocks: Vec<SessionBlock>,
+    /// Derived caches (`outline_headers`, `local_links`, `content_lines`,
+    /// `search_matches`) are stale relative to `content` after an edit.
+    derived_stale: bool,
+    /// Time of the last buffer modification, for debounced derived refresh.
+    last_edit_at: Option<Instant>,
+    /// Set when the user chose "Save & Close" in the unsaved-changes dialog:
+    /// the tab is removed once its save completes cleanly.
+    close_after_save: bool,
+    /// Byte offset to move the source-editor caret to (search jumps, outline
+    /// clicks while in source mode). Consumed by the editor render pass.
+    pending_caret_byte: Option<usize>,
+    /// Top-left of the rendered content area last frame (inner_rect.min),
+    /// used to convert pointer clicks into content-relative y for
+    /// live-preview block hit-testing.
+    last_content_origin: Option<egui::Pos2>,
 }
 
 impl Tab {
@@ -1045,6 +1328,8 @@ impl Tab {
             cache.add_link_hook(link);
         }
 
+        let synced_content_hash = hash_content(&content);
+
         Ok(Self {
             id: egui::Id::new(&path),
             path,
@@ -1066,6 +1351,22 @@ impl Tab {
             history_forward: Vec::new(),
             search_matches: Vec::new(),
             content_version: 1,
+            synced_content_hash,
+            in_flight_save_hash: None,
+            dirty: false,
+            external_change_hash: None,
+            edit_mode: EditMode::Rendered,
+            active_edit_byte: None,
+            live_seeded_for: None,
+            session_buffers: Vec::new(),
+            session_kinds: Vec::new(),
+            session_dirty: false,
+            session_last_blocks: Vec::new(),
+            derived_stale: false,
+            last_edit_at: None,
+            close_after_save: false,
+            pending_caret_byte: None,
+            last_content_origin: None,
         })
     }
 
@@ -1076,10 +1377,198 @@ impl Tab {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 
+    /// Tab/window label including the unsaved-changes marker.
+    fn display_title(&self) -> String {
+        if self.dirty {
+            format!("{} •", self.title())
+        } else {
+            self.title()
+        }
+    }
+
+    /// Stable widget id for this tab's source editor.
+    fn source_editor_id(&self) -> egui::Id {
+        egui::Id::new(&self.path).with("source_editor")
+    }
+
     fn reload(&mut self) -> io::Result<()> {
         let content = String::from_utf8_lossy(&fs::read(&self.path)?).into_owned();
         self.apply_loaded_content(self.path.clone(), content, false);
         Ok(())
+    }
+
+    /// Record a user modification of the buffer. Cheap on purpose: heavy
+    /// derived work is deferred to the debounced `refresh_derived` pass.
+    fn mark_edited(&mut self, now: Instant) {
+        self.dirty = true;
+        self.derived_stale = true;
+        self.last_edit_at = Some(now);
+    }
+
+    // ---- PSE (Persistent Styled Editors) session ----
+
+    /// Seed (or re-seed) session buffers from the serialized content's
+    /// top-level blocks. Marker-stripping applies to Heading (leading `# `)
+    /// and Quote (leading `> `); other kinds keep raw text.
+    fn session_seed(&mut self) {
+        let spans = self.cache.top_level_block_spans(&self.id);
+        let mut buffers = Vec::with_capacity(spans.len());
+        let mut kinds = Vec::with_capacity(spans.len());
+        for span in &spans {
+            if span.end > self.content.len() {
+                break; // stale cache; remaining blocks invalid this frame
+            }
+            let raw = &self.content[span.clone()];
+            let kind = block_kind_of(raw);
+            let stripped = match kind {
+                EditBlockKind::Heading(_) => {
+                    let t = raw.trim_start_matches('#');
+                    t.strip_prefix([' ', '\t']).unwrap_or(t).to_string()
+                }
+                EditBlockKind::Quote => raw
+                    .lines()
+                    .map(|l| l.strip_prefix("> ").unwrap_or(l.strip_prefix('>').unwrap_or(l)))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => raw.to_string(),
+            };
+            buffers.push(stripped.to_string());
+            kinds.push(kind);
+        }
+        self.session_buffers = buffers;
+        self.session_kinds = kinds;
+        self.session_dirty = false;
+    }
+
+    /// Materialize one buffer back into markdown for its kind.
+    fn session_materialize(kind: EditBlockKind, buf: &str) -> String {
+        match kind {
+            EditBlockKind::Heading(level) => {
+                let hashes = "#".repeat(level as usize);
+                let mut out = String::new();
+                for (i, line) in buf.split_inclusive('\n').enumerate() {
+                    if i == 0 {
+                        out.push_str(&hashes);
+                        out.push(' ');
+                    }
+                    out.push_str(line);
+                }
+                out
+            }
+            EditBlockKind::Quote => buf
+                .split_inclusive('\n')
+                .map(|l| format!("> {l}"))
+                .collect(),
+            _ => buf.to_string(),
+        }
+    }
+
+    /// Fold session buffers back into `content`. Returns true when anything
+    /// changed (content replaced, derived caches invalidated).
+    fn session_serialize(&mut self) -> bool {
+        if !self.session_dirty {
+            return false;
+        }
+        let spans = self.cache.top_level_block_spans(&self.id);
+        let mut out = String::with_capacity(self.content.len() + 256);
+        let mut cursor = 0usize;
+        for (i, span) in spans.iter().enumerate() {
+            if span.start < cursor || span.end > self.content.len() {
+                break;
+            }
+            out.push_str(&self.content[cursor..span.start]);
+            match self.session_buffers.get(i) {
+                Some(buf) => {
+                    let kind = self
+                        .session_kinds
+                        .get(i)
+                        .copied()
+                        .unwrap_or(EditBlockKind::Paragraph);
+                    out.push_str(&Self::session_materialize(kind, buf));
+                }
+                None => out.push_str(&self.content[span.clone()]),
+            }
+            cursor = span.end;
+        }
+        out.push_str(&self.content[cursor..]);
+
+        if out == self.content {
+            self.session_dirty = false;
+            return false;
+        }
+        self.content = out;
+        self.content_lines = self.content.lines().count();
+        self.content_version = self.content_version.wrapping_add(1);
+        self.mark_edited(Instant::now());
+        true
+    }
+
+    /// Switch editing mode. Leaving Source/Live with un-refreshed edits
+    /// rebuilds derived caches immediately so outline, links and search match
+    /// what gets rendered again. Deactivates any live-edit block.
+    fn set_edit_mode(&mut self, mode: EditMode) {
+        if self.edit_mode == mode {
+            return;
+        }
+        if self.edit_mode == EditMode::Live {
+            self.session_serialize();
+        }
+        self.edit_mode = mode;
+        self.active_edit_byte = None;
+        self.live_seeded_for = None;
+        if mode == EditMode::Rendered && self.derived_stale {
+            self.refresh_derived();
+        }
+    }
+
+    /// Ctrl+E: cycle Rendered → Live → Source → Rendered so every press
+    /// visibly changes the surface.
+    fn cycle_edit_mode(&mut self) {
+        if self.edit_mode == EditMode::Live {
+            self.session_serialize();
+        }
+        let next = match self.edit_mode {
+            EditMode::Rendered => EditMode::Live,
+            EditMode::Live => EditMode::Source,
+            EditMode::Source => EditMode::Rendered,
+        };
+        log::info!("edit mode: {:?} -> {:?}", self.edit_mode, next);
+        self.set_edit_mode(next);
+    }
+
+    /// Mark the buffer as in-sync with disk at `hash` (after load or a
+    /// completed save). Only meaningful if the current buffer still hashes to
+    /// `hash`; callers check that before calling.
+    ///
+    /// Deliberately does NOT touch `derived_stale`/`last_edit_at`: a save may
+    /// complete before the debounced derived-cache rebuild runs, and that
+    /// rebuild must still happen afterwards.
+    fn note_synced(&mut self, hash: u64) {
+        self.synced_content_hash = hash;
+        self.dirty = false;
+        self.external_change_hash = None;
+        self.in_flight_save_hash = None;
+    }
+
+    /// Rebuild everything derived from `content` after edits (outline,
+    /// links, line count, renderer cache invalidation). Called debounced from
+    /// the update loop — never per keystroke.
+    fn refresh_derived(&mut self) {
+        self.content_lines = self.content.lines().count();
+        self.cache = CommonMarkCache::default();
+        self.content_version = self.content_version.wrapping_add(1);
+
+        let parsed = parse_headers(&self.content);
+        self.document_title = parsed.document_title;
+        self.outline_headers = parsed.outline_headers;
+
+        self.local_links = parse_local_links(&self.content, &self.path);
+        for link in &self.local_links {
+            self.cache.add_link_hook(link);
+        }
+        self.search_matches.clear();
+        self.derived_stale = false;
+        self.last_edit_at = None;
     }
 
     /// Rebuild `search_matches` for `query`. Empty query clears matches.
@@ -1118,6 +1607,20 @@ impl Tab {
 
         // Stale byte ranges; caller rebuilds if search bar is open.
         self.search_matches.clear();
+
+        // The buffer now matches disk exactly.
+        self.synced_content_hash = hash_content(&self.content);
+        self.dirty = false;
+        self.external_change_hash = None;
+        self.in_flight_save_hash = None;
+        self.derived_stale = false;
+        self.last_edit_at = None;
+
+        // PSE session state is derived from content; force re-seed.
+        self.session_buffers.clear();
+        self.session_kinds.clear();
+        self.session_last_blocks.clear();
+        self.session_dirty = false;
     }
 
     fn navigate_to_link(&mut self, link: &str) -> io::Result<bool> {
@@ -2172,6 +2675,19 @@ struct MarkdownApp {
     recent_files: Vec<RecentEntry>,
     // Welcome page: whether the recent list is expanded ("Show more")
     welcome_show_all: bool,
+    // ---- Editing / saving (Phase 0/1) ----
+    // Sender for background save jobs; None if the worker thread failed to spawn.
+    save_tx: Option<Sender<SaveJob>>,
+    // Completed save outcomes, polled non-blocking each frame.
+    save_rx: Receiver<SaveOutcome>,
+    // Dirty state of the active tab last frame — drives the window-title marker.
+    last_active_dirty: bool,
+    // Awaiting confirmation: closing a tab or quitting with unsaved edits.
+    unsaved_confirm: Option<UnsavedConfirm>,
+    // Headless e2e: synthetic click at this content-y, consumed once.
+    sim_click_pending: Option<f32>,
+    // Set when "Save All" was chosen in the quit dialog: quit once saves land.
+    quit_after_saves: bool,
     // MCP bridge for E2E testing
     #[cfg(feature = "mcp")]
     mcp_bridge: McpBridge,
@@ -2361,6 +2877,42 @@ impl MarkdownApp {
             .map(|d| d != ":0" && d != ":0.0" && !d.is_empty())
             .unwrap_or(false);
 
+        // Background save worker: the UI thread only clones + hashes and
+        // polls outcomes; all file I/O happens here (EGUI_WORKFLOW Phase 4).
+        // Writes go to a temp file followed by an atomic rename so a crash
+        // mid-write can never leave a truncated markdown file behind.
+        let (save_tx, save_job_rx) = mpsc::channel::<SaveJob>();
+        let (save_outcome_tx, save_rx) = mpsc::channel::<SaveOutcome>();
+        let save_worker_ok = std::thread::Builder::new()
+            .name("md-viewer-save".into())
+            .spawn(move || {
+                while let Ok(job) = save_job_rx.recv() {
+                    let tmp_path = {
+                        let mut name = job.path.clone().into_os_string();
+                        name.push(format!(".mdv-tmp-{}", std::process::id()));
+                        PathBuf::from(name)
+                    };
+                    let result = fs::write(&tmp_path, job.content.as_bytes())
+                        .and_then(|()| fs::rename(&tmp_path, &job.path));
+                    if result.is_err() {
+                        let _ = fs::remove_file(&tmp_path);
+                    }
+                    // If the app dropped the receiver we are shutting down.
+                    if save_outcome_tx
+                        .send(SaveOutcome {
+                            path: job.path,
+                            hash: job.hash,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .is_ok();
+        let save_tx = save_worker_ok.then_some(save_tx);
+
         let mut app = Self {
             tabs,
             active_tab,
@@ -2420,6 +2972,14 @@ impl MarkdownApp {
             search: SearchState::default(),
             recent_files: persisted.recent_files.unwrap_or_default(),
             welcome_show_all: false,
+            save_tx,
+            save_rx,
+            last_active_dirty: false,
+            unsaved_confirm: None,
+            sim_click_pending: std::env::var("MDV_SIM_CLICK_Y")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok()),
+            quit_after_saves: false,
             #[cfg(feature = "mcp")]
             mcp_bridge,
         };
@@ -2442,7 +3002,7 @@ impl MarkdownApp {
 
     fn window_title(&self) -> String {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            format!("{} - Markdown Viewer", tab.title())
+            format!("{} - Markdown Viewer", tab.display_title())
         } else {
             "Markdown Viewer".to_string()
         }
@@ -2608,7 +3168,301 @@ impl MarkdownApp {
     }
 
     fn close_active_tab(&mut self) {
-        self.close_tab(self.active_tab);
+        self.request_close_tab(self.active_tab);
+    }
+
+    /// Close `idx`, but guard against silently abandoning unsaved edits:
+    /// a dirty tab raises an in-app confirmation instead of closing.
+    fn request_close_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[idx].dirty {
+            let path = self.tabs[idx].path.clone();
+            self.unsaved_confirm = Some(UnsavedConfirm::CloseTab(path));
+            return;
+        }
+        self.close_tab(idx);
+    }
+
+    /// Quit, guarding against unsaved edits in any open tab.
+    fn request_quit(&mut self, ctx: &egui::Context) {
+        if self.tabs.iter().any(|t| t.dirty) {
+            self.unsaved_confirm = Some(UnsavedConfirm::Quit);
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn any_dirty(&self) -> bool {
+        self.tabs.iter().any(|t| t.dirty)
+    }
+
+    /// Enqueue the tab's buffer for background write. Cheap (clone + hash
+    /// only); the actual I/O happens on the save worker thread. A no-op when
+    /// nothing changed since the last sync/save or a save is already in
+    /// flight for this exact snapshot.
+    fn request_save(&mut self, idx: usize) -> bool {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return false;
+        };
+        if !tab.dirty && tab.in_flight_save_hash.is_none() {
+            return false;
+        }
+        if tab.edit_mode == EditMode::Live {
+            // Buffers are canonical while Live; fold them into `content`
+            // before hashing/writing so disk matches what the user sees.
+            tab.session_serialize();
+        }
+        let hash = hash_content(&tab.content);
+        if Some(hash) == tab.in_flight_save_hash {
+            return false;
+        }
+        let job = SaveJob {
+            path: tab.path.clone(),
+            content: tab.content.clone(),
+            hash,
+        };
+        let sent = match &self.save_tx {
+            Some(tx) => tx.send(job).is_ok(),
+            None => false,
+        };
+        if sent {
+            if let Some(tab) = self.tabs.get_mut(idx) {
+                tab.in_flight_save_hash = Some(hash);
+            }
+        }
+        sent
+    }
+
+    /// Consume completed save outcomes. Called once per frame from update().
+    fn poll_save_outcomes(&mut self) {
+        while let Ok(outcome) = self.save_rx.try_recv() {
+            let idx = self
+                .tabs
+                .iter()
+                .position(|t| t.path == outcome.path && t.in_flight_save_hash == Some(outcome.hash));
+            let Some(idx) = idx else { continue };
+            match outcome.result {
+                Ok(()) => {
+                    let still_matches = hash_content(&self.tabs[idx].content) == outcome.hash;
+                    let close_requested = self.tabs[idx].close_after_save;
+                    if still_matches {
+                        self.tabs[idx].note_synced(outcome.hash);
+                    } else {
+                        // User typed while the write was in flight — keep the
+                        // dirty state so the next save picks up the tail.
+                        self.tabs[idx].in_flight_save_hash = None;
+                    }
+                    if close_requested && !self.tabs[idx].dirty {
+                        self.close_tab(idx);
+                    }
+                }
+                Err(e) => {
+                    self.tabs[idx].in_flight_save_hash = None;
+                    self.error_message =
+                        Some(format!("Failed to save {}: {}", self.tabs[idx].title(), e));
+                }
+            }
+        }
+
+        // All pending saves settled cleanly → honor a deferred quit request.
+        if self.quit_after_saves
+            && !self.any_dirty()
+            && self.tabs.iter().all(|t| t.in_flight_save_hash.is_none())
+        {
+            self.quit_after_saves = false;
+            self.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Thin hint bar shown in Live mode while no block is being edited, so
+    /// entering the mode is visible even though the canvas looks unchanged.
+    fn render_live_hint(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if tab.edit_mode != EditMode::Live || tab.active_edit_byte.is_some() {
+            return;
+        }
+        egui::TopBottomPanel::bottom("live_hint_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("✎ Live preview — click any block to edit it · Esc stops editing · Ctrl+E cycles modes")
+                        .weak(),
+                );
+            });
+        });
+    }
+
+    /// Banner shown when the active tab has unsaved edits AND the file changed
+    /// on disk (watcher detected an external modification). Offers explicit
+    /// resolution instead of silently clobbering either side.
+    fn render_conflict_banner(&mut self, ctx: &egui::Context) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Resolution {
+            ReloadFromDisk,
+            KeepMine,
+        }
+
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if tab.external_change_hash.is_none() {
+            return;
+        }
+        let file_name = tab.title();
+
+        let mut resolution: Option<Resolution> = None;
+        egui::TopBottomPanel::top("conflict_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("⚠")
+                        .color(egui::Color32::from_rgb(255, 170, 80)),
+                );
+                ui.label(egui::RichText::new(format!(
+                    "{file_name} changed on disk while you have unsaved edits."
+                )));
+                if ui.button("Reload from disk").clicked() {
+                    resolution = Some(Resolution::ReloadFromDisk);
+                }
+                if ui.button("Keep my version").clicked() {
+                    resolution = Some(Resolution::KeepMine);
+                }
+            });
+        });
+
+        match resolution {
+            Some(Resolution::ReloadFromDisk) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if let Err(error) = tab.reload() {
+                        self.error_message = Some(format!(
+                            "Unable to reload {}: {error}",
+                            tab.path.display()
+                        ));
+                    }
+                }
+            }
+            Some(Resolution::KeepMine) => {
+                // Drop the marker; the buffer stays dirty. Saving overwrites
+                // the external change; a *new* external edit re-prompts.
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.external_change_hash = None;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Modal-ish confirmation for closing a tab or quitting with unsaved
+    /// edits. Prevents silent data loss on Ctrl+W / Ctrl+Q / tab-bar ✕.
+    fn render_unsaved_confirm(&mut self, ctx: &egui::Context) {
+        enum Choice {
+            SaveThenProceed,
+            DiscardAndProceed,
+            Cancel,
+        }
+
+        let Some(confirm) = self.unsaved_confirm.clone() else {
+            return;
+        };
+
+        let (message, is_quit) = match &confirm {
+            UnsavedConfirm::Quit => ("Quit with unsaved changes?".to_string(), true),
+            UnsavedConfirm::CloseTab(path) => (
+                format!(
+                    "\"{}\" has unsaved changes.",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "This file".to_string())
+                ),
+                false,
+            ),
+        };
+
+        let mut choice: Option<Choice> = None;
+        egui::Window::new("Unsaved changes")
+            .id(egui::Id::new("unsaved_confirm_window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(message);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let save_label = if is_quit { "Save All" } else { "Save" };
+                    if ui.button(save_label).clicked() {
+                        choice = Some(Choice::SaveThenProceed);
+                    }
+                    let discard_label = if is_quit {
+                        "Discard All"
+                    } else {
+                        "Discard Changes"
+                    };
+                    if ui.button(discard_label).clicked() {
+                        choice = Some(Choice::DiscardAndProceed);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(Choice::Cancel);
+                    }
+                });
+            });
+
+        let idx_for = |app: &Self, confirm: &UnsavedConfirm| match confirm {
+            UnsavedConfirm::CloseTab(path) => app.tabs.iter().position(|t| t.path == *path),
+            UnsavedConfirm::Quit => None,
+        };
+
+        match choice {
+            Some(Choice::SaveThenProceed) => {
+                match &confirm {
+                    UnsavedConfirm::CloseTab(_) => {
+                        if let Some(idx) = idx_for(self, &confirm) {
+                            self.tabs[idx].close_after_save = true;
+                            if !self.request_save(idx) {
+                                // Writer unavailable — keep the dialog state
+                                // cleared and surface the error instead.
+                                self.error_message =
+                                    Some("Save failed: file writer unavailable".to_string());
+                            }
+                        }
+                    }
+                    UnsavedConfirm::Quit => {
+                        let dirty: Vec<usize> = self
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.dirty)
+                            .map(|(i, _)| i)
+                            .collect();
+                        let mut all_enqueued = !dirty.is_empty();
+                        for idx in dirty {
+                            if !self.request_save(idx) {
+                                all_enqueued = false;
+                            }
+                        }
+                        self.quit_after_saves = all_enqueued;
+                    }
+                }
+                self.unsaved_confirm = None;
+            }
+            Some(Choice::DiscardAndProceed) => match &confirm {
+                UnsavedConfirm::CloseTab(_) => {
+                    if let Some(idx) = idx_for(self, &confirm) {
+                        self.close_tab(idx);
+                    }
+                }
+                UnsavedConfirm::Quit => {
+                    for tab in &mut self.tabs {
+                        tab.dirty = false; // abandon buffers deliberately
+                    }
+                    self.quit_after_saves = false;
+                    self.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            },
+            Some(Choice::Cancel) => self.unsaved_confirm = None,
+            None => {}
+        }
     }
 
     fn next_tab(&mut self) {
@@ -2985,48 +3839,88 @@ impl MarkdownApp {
         let active_path = self.tabs.get(self.active_tab).map(|t| t.path.clone());
 
         for path in changed_paths {
-            // Trigger flash effect for the changed file (use canonical path for consistent lookup)
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-            self.flashing_paths.insert(canonical, now);
+            // ---- Classify the change against each open tab first ----
+            // Self-writes (our own background saves) and pure echoes must not
+            // clobber editor buffers or trigger UI churn, so each matching
+            // tab decides: Skip / Reload / Conflict.
+            let mut matched_any = false;
+            let mut relevant_change = false;
+            let mut active_was_reloaded = false;
 
-            // Also flash parent directories up to the explorer root
-            if let Some(root) = &self.file_explorer.root {
-                // Check if the changed path is within the explorer root
-                if path.starts_with(root) {
-                    if let Some(parent) = path.parent() {
-                        refresh_directories.insert(parent.to_path_buf());
-                    }
-                }
+            for tab in self.tabs.iter_mut().filter(|t| t.path == path) {
+                matched_any = true;
+                let Ok(bytes) = fs::read(&tab.path) else {
+                    continue;
+                };
+                let incoming = hash_content(&String::from_utf8_lossy(&bytes));
 
-                let mut current = path.parent();
-                while let Some(parent) = current {
-                    if parent.starts_with(root) || parent == root {
-                        self.flashing_paths.insert(
-                            parent
-                                .canonicalize()
-                                .unwrap_or_else(|_| parent.to_path_buf()),
-                            now,
-                        );
+                match classify_disk_change(
+                    tab.synced_content_hash,
+                    hash_content(&tab.content),
+                    tab.dirty,
+                    tab.in_flight_save_hash,
+                    incoming,
+                ) {
+                    DiskChange::Ignore => continue,
+                    DiskChange::Resync => {
+                        tab.note_synced(incoming);
+                        continue;
                     }
-                    if parent == root {
-                        break;
+                    DiskChange::Conflict => {
+                        // Never touch the buffer automatically. Record the
+                        // on-disk hash so repeat events dedupe; the banner
+                        // asks the user what to do.
+                        if tab.external_change_hash != Some(incoming) {
+                            log::info!("External change while dirty (conflict): {:?}", tab.path);
+                            tab.external_change_hash = Some(incoming);
+                        }
+                        relevant_change = true;
                     }
-                    current = parent.parent();
+                    DiskChange::Reload => {
+                        log::info!("Reloading tab: {:?}", path);
+                        if let Err(error) = tab.reload() {
+                            self.error_message =
+                                Some(format!("Unable to reload {}: {error}", path.display()));
+                            continue;
+                        }
+                        relevant_change = true;
+                        if Some(&tab.path) == active_path.as_ref() {
+                            active_was_reloaded = true;
+                        }
+                    }
                 }
             }
 
-            // Reload the tab content
-            let mut active_was_reloaded = false;
-            for tab in &mut self.tabs {
-                if tab.path == path {
-                    log::info!("Reloading tab: {:?}", path);
-                    if let Err(error) = tab.reload() {
-                        self.error_message =
-                            Some(format!("Unable to reload {}: {error}", path.display()));
-                        continue;
+            // No open tab uses this path (explorer-only change): keep the old
+            // flash/refresh behavior.
+            if !matched_any || relevant_change {
+                // Trigger flash effect for the changed file (use canonical path for consistent lookup)
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                self.flashing_paths.insert(canonical, now);
+
+                // Also flash parent directories up to the explorer root
+                if let Some(root) = &self.file_explorer.root {
+                    // Check if the changed path is within the explorer root
+                    if path.starts_with(root) {
+                        if let Some(parent) = path.parent() {
+                            refresh_directories.insert(parent.to_path_buf());
+                        }
                     }
-                    if Some(&tab.path) == active_path.as_ref() {
-                        active_was_reloaded = true;
+
+                    let mut current = path.parent();
+                    while let Some(parent) = current {
+                        if parent.starts_with(root) || parent == root {
+                            self.flashing_paths.insert(
+                                parent
+                                    .canonicalize()
+                                    .unwrap_or_else(|_| parent.to_path_buf()),
+                                now,
+                            );
+                        }
+                        if parent == root {
+                            break;
+                        }
+                        current = parent.parent();
                     }
                 }
             }
@@ -3174,6 +4068,16 @@ impl MarkdownApp {
         let Some(m) = tab.search_matches.get(idx) else {
             return;
         };
+        // Source mode has no rendered layout to scroll; move the editor
+        // caret to the match instead. Live preview activates the block.
+        if tab.edit_mode == EditMode::Source {
+            tab.pending_caret_byte = Some(m.byte_start);
+            return;
+        }
+        if tab.edit_mode == EditMode::Live {
+            tab.active_edit_byte = Some(m.byte_start);
+            return;
+        }
         if tab.last_content_height <= 0.0 || tab.content_lines == 0 {
             return;
         }
@@ -3250,7 +4154,7 @@ impl MarkdownApp {
             .tabs
             .iter()
             .enumerate()
-            .map(|(idx, tab)| (tab.title(), idx == self.active_tab))
+            .map(|(idx, tab)| (tab.display_title(), idx == self.active_tab))
             .collect();
 
         let tab_count = tab_info.len();
@@ -3600,6 +4504,18 @@ impl MarkdownApp {
         // Calculate scroll target if header was clicked
         if let Some(idx) = clicked_header_index {
             if let Some(header) = tab.outline_headers.get(idx) {
+                // Source/Live modes have no full rendered layout: jump via the
+                // editor (caret in Source; activate the containing block in Live).
+                if tab.edit_mode == EditMode::Source {
+                    tab.pending_caret_byte =
+                        Some(byte_offset_of_line_start(&tab.content, header.line_number));
+                    return;
+                }
+                if tab.edit_mode == EditMode::Live {
+                    tab.active_edit_byte =
+                        Some(byte_offset_of_line_start(&tab.content, header.line_number));
+                    return;
+                }
                 // The renderer records the same source-stable key, so formatting
                 // and duplicate display titles cannot redirect the click.
                 let key = header_position_key(header.source_start);
@@ -3776,7 +4692,7 @@ impl MarkdownApp {
         };
 
         // Push current search match ranges into the cache so the renderer can paint highlights
-        if search_is_open && !tab.search_matches.is_empty() {
+        if search_is_open && !tab.search_matches.is_empty() && tab.edit_mode != EditMode::Source {
             let ranges: Vec<_> = tab
                 .search_matches
                 .iter()
@@ -3808,9 +4724,52 @@ impl MarkdownApp {
                 ..Default::default()
             })
             .show(ui, |ui| {
+                // Source editing mode: raw markdown editor instead of the
+                // rendered view. Renderer scroll bookkeeping is meaningless
+                // here, so skip the whole viewer pipeline.
+                if tab.edit_mode == EditMode::Source {
+                    render_source_editor_ui(ui, tab);
+                    return;
+                }
+
                 // Capture scroll input for manual handling during selection
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
+
+                // ---- PSE session configuration ----
+                let mut live_salt: Option<egui::Id> = None;
+                let mut live_blocks: Option<Vec<SessionBlock>> = None;
+                if tab.edit_mode == EditMode::Live {
+                    // Seed/refresh session buffers from serialized content.
+                    // Empty spans == caches mid-refresh: fall back to last
+                    // known blocks so editors never flicker away.
+                    let spans = tab.cache.top_level_block_spans(&tab.id);
+                    let span_count = spans.len();
+                    if span_count > 0 && tab.session_kinds.len() != span_count {
+                        tab.session_seed();
+                    }
+                    let blocks: Vec<SessionBlock> = if span_count > 0
+                        && tab.session_kinds.len() == span_count
+                    {
+                        spans
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, r)| {
+                                tab.session_kinds.get(i).map(|k| SessionBlock {
+                                    src: r.clone(),
+                                    kind: *k,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        std::mem::take(&mut tab.session_last_blocks)
+                    };
+                    if !blocks.is_empty() {
+                        tab.session_last_blocks = blocks.clone();
+                        live_salt = Some(tab.source_editor_id().with("pse"));
+                        live_blocks = Some(blocks);
+                    }
+                }
 
                 // The renderer owns the ScrollArea now (via show_scrollable),
                 // so we configure scroll_source / pending offset / content
@@ -3826,7 +4785,7 @@ impl MarkdownApp {
                 // Line heights follow the emulated viewer (GitHub 1.5/1.45,
                 // VS Code preview 1.6/1.36); the font preset owns the metrics.
                 let (preset_line_height, preset_code_line_height) = self.font_preset.line_heights();
-                let mut scroll_output = CommonMarkViewer::new()
+                let mut viewer = CommonMarkViewer::new()
                     .default_implicit_uri_scheme(&tab.base_uri)
                     .max_image_width(Some(800))
                     .default_width(default_width)
@@ -3852,6 +4811,14 @@ impl MarkdownApp {
                     .heading_spacing_below(0.75)
                     .content_version(tab.content_version)
                     .pending_scroll_offset(pending)
+                    .record_block_layout(false);
+                if let Some(blocks) = live_blocks.clone() {
+                    viewer = viewer.edit_session(Some(EditSessionConfig {
+                        id_salt: tab.source_editor_id().with("pse"),
+                        blocks,
+                    }));
+                }
+                let mut scroll_output = viewer
                     .force_full_render(force_full_render)
                     .scroll_source(egui::scroll_area::ScrollSource {
                         scroll_bar: true,
@@ -3859,6 +4826,36 @@ impl MarkdownApp {
                         mouse_wheel: true,
                     })
                     .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+
+                // ---- PSE: fold per-block feedback into session buffers ----
+                if live_salt.is_some() {
+                    // Drop any legacy single-editor feedback; sessions use
+                    // take_session_feedback exclusively.
+                    tab.cache.take_edit_feedback();
+                    for fb in
+                        tab.cache.take_session_feedback(&tab.source_editor_id().with("pse"))
+                    {
+                        if fb.changed {
+                            if let Some(buf) = tab.session_buffers.get_mut(fb.index) {
+                                if *buf != fb.text {
+                                    log::debug!(
+                                        "live: block {} changed ({} -> {} chars)",
+                                        fb.index,
+                                        buf.chars().count(),
+                                        fb.text.chars().count()
+                                    );
+                                    *buf = fb.text;
+                                    tab.session_dirty = true;
+                                    tab.dirty = true;
+                                    tab.mark_edited(Instant::now());
+                                }
+                            }
+                        }
+                    }
+                }
+                if tab.edit_mode == EditMode::Live {
+                    tab.last_content_origin = Some(scroll_output.inner_rect.min);
+                }
 
                 tab.scroll_offset = scroll_output.state.offset.y;
                 tab.last_viewport_height = scroll_output.inner_rect.height();
@@ -4875,6 +5872,36 @@ impl eframe::App for MarkdownApp {
             self.reload_changed_tabs(changed_paths);
         }
 
+        // Collect completed background saves (never blocking).
+        self.poll_save_outcomes();
+
+        // Debounced rebuild of edit-derived caches (outline headers, local
+        // links, line counts). Only after an idle gap following the last
+        // keystroke — never per frame while typing.
+        let now = Instant::now();
+        for idx in 0..self.tabs.len() {
+            let should_refresh = self.tabs[idx].derived_stale
+                && self.tabs[idx]
+                    .last_edit_at
+                    .is_some_and(|t| now.duration_since(t) >= DERIVED_REFRESH_DEBOUNCE);
+            if should_refresh {
+                self.tabs[idx].refresh_derived();
+                if idx == self.active_tab && self.search.is_open {
+                    // Matches were just cleared; force the find bar to rebuild
+                    // (same invalidation trick the watcher-reload path uses).
+                    self.search.last_tab = None;
+                }
+            }
+        }
+
+        // Window title must reflect the active tab's dirty marker; track the
+        // transition instead of comparing strings every frame.
+        let active_dirty = self.tabs.get(self.active_tab).is_some_and(|t| t.dirty);
+        if active_dirty != self.last_active_dirty {
+            self.last_active_dirty = active_dirty;
+            self.title_dirty = true;
+        }
+
         // Poll for asynchronous Explorer root scan completion.
         if self.file_explorer.pending_scan.is_some() {
             if self.file_explorer.poll_pending_scan() {
@@ -5031,6 +6058,8 @@ impl eframe::App for MarkdownApp {
         let mut prev_match = false;
         let mut close_search_kb = false;
         let mut keyboard_scroll_action: Option<KeyboardScrollAction> = None;
+        let mut save_active = false;
+        let mut toggle_source_mode = false;
 
         // Ctrl+/- zoom: applies to lightbox when open, document otherwise.
         // Steps are multiplicative (×1.25) like browsers and the lightbox.
@@ -5130,6 +6159,26 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
                     quit_app = true;
                 }
+                // Ctrl+S: Save active tab (no-op when not dirty / no tab)
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
+                    save_active = true;
+                }
+                // Ctrl+E: Toggle live-preview editing for the active tab
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::E) {
+                    toggle_source_mode = true;
+                }
+                // Esc (Live mode, block active, find bar closed): stop
+                // editing the active block, return to the rendered view.
+                if i.key_pressed(egui::Key::Escape) && !self.search.is_open {
+                    let deactivate = self.tabs.get(self.active_tab).is_some_and(|t| {
+                        t.edit_mode == EditMode::Live && t.active_edit_byte.is_some()
+                    });
+                    if deactivate {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.active_edit_byte = None;
+                        }
+                    }
+                }
                 // Ctrl + scroll wheel / pinch to zoom (multiplicative, like
                 // browsers). The lightbox captures wheel input itself in
                 // raw_input_hook, so this only runs for the document.
@@ -5168,9 +6217,16 @@ impl eframe::App for MarkdownApp {
                 }
                 // Plain document scroll keys reuse the existing pending-scroll pipeline.
                 // Arrow keys stay available for search navigation while the find bar is open.
+                // In source mode the TextEdit owns caret movement/scrolling, so the
+                // app-level scroll shortcuts must not steal those keys (LESSONS: mode
+                // -specific keys take priority over document-level ones).
                 let no_scroll_modifier =
                     !i.modifiers.ctrl && !i.modifiers.alt && !i.modifiers.command;
-                if no_scroll_modifier {
+                let source_mode_owns_keys = self.tabs.get(self.active_tab).is_some_and(|t| {
+                    t.edit_mode == EditMode::Source
+                        || (t.edit_mode == EditMode::Live && t.active_edit_byte.is_some())
+                });
+                if no_scroll_modifier && !source_mode_owns_keys {
                     if !self.search.is_open {
                         if i.key_pressed(egui::Key::ArrowUp) {
                             keyboard_scroll_action = Some(KeyboardScrollAction::LineUp);
@@ -5211,7 +6267,26 @@ impl eframe::App for MarkdownApp {
             self.show_explorer = !self.show_explorer;
         }
         if quit_app {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            // Guarded: raises an unsaved-changes confirmation instead when
+            // any tab has unsaved edits.
+            self.request_quit(ctx);
+        }
+        if save_active {
+            if let Some(tab) = self.tabs.get(self.active_tab) {
+                if tab.dirty {
+                    let idx = self.active_tab;
+                    if !self.request_save(idx) {
+                        self.error_message =
+                            Some("Save failed: file writer unavailable".to_string());
+                    }
+                }
+            }
+        }
+        if toggle_source_mode {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.cycle_edit_mode();
+            }
+            self.title_dirty = true;
         }
         if close_tab {
             self.close_active_tab();
@@ -5298,11 +6373,48 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    let can_save = self
+                        .tabs
+                        .get(self.active_tab)
+                        .is_some_and(|t| t.dirty);
+                    let save_btn = ui.add_enabled(
+                        can_save,
+                        egui::Button::new("Save").shortcut_text("Ctrl+S"),
+                    );
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: File → Save",
+                        "button",
+                        &save_btn,
+                        None,
+                    );
+                    if save_btn.clicked()
+                    {
+                        let idx = self.active_tab;
+                        if !self.request_save(idx) {
+                            self.error_message =
+                                Some("Save failed: file writer unavailable".to_string());
+                        }
+                        ui.close();
+                    }
+
+                    let has_tab = !self.tabs.is_empty();
+                    if ui
+                        .add_enabled(has_tab, egui::Button::new("Open in External Editor"))
+                        .on_hover_text("Opens the current file with the system's default application; live reload picks up changes")
+                        .clicked()
+                    {
+                        if let Some(tab) = self.tabs.get(self.active_tab) {
+                            open_external(&tab.path);
+                        }
+                        ui.close();
+                    }
+
                     if ui
                         .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
                         .clicked()
                     {
-                        self.close_active_tab();
+                        self.request_close_tab(self.active_tab);
                         ui.close();
                     }
 
@@ -5383,6 +6495,73 @@ impl eframe::App for MarkdownApp {
 
                 #[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
                 let view_menu = ui.menu_button("View", |ui| {
+                    let current_mode = self
+                        .tabs
+                        .get(self.active_tab)
+                        .map(|t| t.edit_mode)
+                        .unwrap_or(EditMode::Rendered);
+                    let mode_label = |mode: EditMode, label: &str| -> String {
+                        if current_mode == mode {
+                            format!("✓ {label}")
+                        } else {
+                            label.to_string()
+                        }
+                    };
+                    let mut picked_mode: Option<EditMode> = None;
+                    #[cfg(feature = "mcp")]
+                    let register = |name: String, btn: &egui::Response| {
+                        self.mcp_bridge.register_widget(&name, "button", btn, None);
+                    };
+                    #[cfg(not(feature = "mcp"))]
+                    let register = |_name: String, _btn: &egui::Response| {};
+
+                    let live_btn = ui.add(
+                        egui::Button::new(mode_label(
+                            EditMode::Live,
+                            "Edit Markdown (Live Preview)",
+                        ))
+                        .shortcut_text("Ctrl+E"),
+                    );
+                    let live_clicked = {
+                        let b = live_btn.on_hover_text("Everything renders except the block you click into, which shows raw markdown");
+                        register("Menu: View → Live Preview".to_string(), &b);
+                        b.clicked()
+                    };
+                    if live_clicked {
+                        picked_mode = Some(EditMode::Live);
+                    }
+
+                    let source_btn =
+                        ui.add(egui::Button::new(mode_label(EditMode::Source, "Edit Markdown (Source)")));
+                    let source_clicked = {
+                        let b = source_btn.on_hover_text("Edit the whole file as raw markdown");
+                        register("Menu: View → Source".to_string(), &b);
+                        b.clicked()
+                    };
+                    if source_clicked {
+                        picked_mode = Some(EditMode::Source);
+                    }
+
+                    let rendered_btn =
+                        ui.add(egui::Button::new(mode_label(EditMode::Rendered, "Rendered")));
+                    let rendered_clicked = {
+                        let b = rendered_btn.on_hover_text("Reading view");
+                        register("Menu: View → Rendered".to_string(), &b);
+                        b.clicked()
+                    };
+                    if rendered_clicked {
+                        picked_mode = Some(EditMode::Rendered);
+                    }
+                    if let Some(mode) = picked_mode {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.set_edit_mode(mode);
+                        }
+                        self.title_dirty = true;
+                        ui.close();
+                    }
+
+                    ui.separator();
+
                     let theme_text = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
@@ -5681,6 +6860,11 @@ impl eframe::App for MarkdownApp {
             self.error_message = None;
         }
 
+        // ---- Editing UI state: external-change conflict + unsaved guard ----
+        self.render_conflict_banner(ctx);
+        self.render_unsaved_confirm(ctx);
+        self.render_live_hint(ctx);
+
         // Find bar (conditional, between error bar and tab bar)
         let search_outcome = self.render_search_bar(ctx);
         // Rebuild matches if query or tab changed (TextEdit may have mutated the query)
@@ -5701,9 +6885,9 @@ impl eframe::App for MarkdownApp {
             tab_to_close = self.render_tab_bar(ui);
         });
 
-        // Close tab if requested
+        // Close tab if requested (guarded for unsaved edits)
         if let Some(idx) = tab_to_close {
-            self.close_tab(idx);
+            self.request_close_tab(idx);
         }
 
         // File explorer (left sidebar)
@@ -5722,7 +6906,7 @@ impl eframe::App for MarkdownApp {
         // Close tab from explorer (middle-click on open file)
         if let Some(path) = explorer_action.file_to_close {
             if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
-                self.close_tab(idx);
+                self.request_close_tab(idx);
             }
         }
 
@@ -6964,6 +8148,142 @@ mod tests {
         assert_eq!(
             keyboard_scroll_target(25.0, 500.0, 300.0, KeyboardScrollAction::LineDown),
             0.0
+        );
+    }
+
+    // ---- Editing / saving (Phase 0/1) ----
+
+    #[test]
+    fn hash_content_is_deterministic_and_separates_inputs() {
+        let a = hash_content("# Hello\n");
+        assert_eq!(a, hash_content("# Hello\n"));
+        assert_ne!(a, hash_content("# Hello\r\n"));
+        assert_ne!(a, hash_content(""));
+    }
+
+    #[test]
+    fn byte_offset_to_char_index_ascii() {
+        let text = "abcdef";
+        assert_eq!(byte_offset_to_char_index(text, 0), 0);
+        assert_eq!(byte_offset_to_char_index(text, 3), 3);
+        // Past-the-end clamps to char count.
+        assert_eq!(byte_offset_to_char_index(text, 100), 6);
+    }
+
+    #[test]
+    fn byte_offset_to_char_index_multibyte_and_mid_sequence() {
+        // Each emoji is 4 bytes; CJK chars are 3 bytes each.
+        let text = "a🎉b中文";
+        assert_eq!(byte_offset_to_char_index(text, 1), 1); // after 'a'
+        assert_eq!(byte_offset_to_char_index(text, 5), 2); // after emoji
+        assert_eq!(byte_offset_to_char_index(text, 9), 4); // after '中'
+        // Mid-UTF-8-sequence offsets round down to the containing char start.
+        assert_eq!(byte_offset_to_char_index(text, 2), 1);
+        assert_eq!(byte_offset_to_char_index(text, 7), 3); // inside '文'
+        assert_eq!(byte_offset_to_char_index(text, text.len()), 5);
+    }
+
+    #[test]
+    fn byte_offset_of_line_start_basic_lines() {
+        let text = "one\ntwo\nthree";
+        assert_eq!(byte_offset_of_line_start(text, 1), 0);
+        assert_eq!(byte_offset_of_line_start(text, 2), 4);
+        assert_eq!(byte_offset_of_line_start(text, 3), 8);
+        // Beyond the document → end of text.
+        assert_eq!(byte_offset_of_line_start(text, 99), text.len());
+    }
+
+    #[test]
+    fn byte_offset_of_line_start_empty_and_single_line() {
+        assert_eq!(byte_offset_of_line_start("", 1), 0);
+        assert_eq!(byte_offset_of_line_start("only", 1), 0);
+        assert_eq!(byte_offset_of_line_start("only\n", 2), 5);
+    }
+
+    #[test]
+    fn classify_disk_change_ignores_echoes_and_self_writes() {
+        let disk = hash_content("disk");
+        let other = hash_content("other");
+        // Unchanged content re-reported by the watcher.
+        assert_eq!(
+            classify_disk_change(disk, disk, false, None, disk),
+            DiskChange::Ignore
+        );
+        // Our own in-flight write landing on disk.
+        assert_eq!(
+            classify_disk_change(other, other, true, Some(disk), disk),
+            DiskChange::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_disk_change_resyncs_reverted_edits() {
+        let saved = hash_content("saved");
+        // Buffer was edited then undone back to the saved state: dirty but
+        // equal to disk → clear dirty instead of prompting/reloading.
+        assert_eq!(
+            classify_disk_change(saved, saved, true, None, saved),
+            DiskChange::Resync
+        );
+    }
+
+    #[test]
+    fn classify_disk_change_conflicts_only_when_dirty() {
+        let synced = hash_content("synced");
+        let buffer = hash_content("buffer with edits");
+        let external = hash_content("external edit");
+        assert_eq!(
+            classify_disk_change(synced, buffer, true, None, external),
+            DiskChange::Conflict
+        );
+        assert_eq!(
+            classify_disk_change(synced, buffer, false, None, external),
+            DiskChange::Reload
+        );
+        // A pending save must not be mistaken for a resync opportunity.
+        let inflight = hash_content("in-flight snapshot");
+        assert_eq!(
+            classify_disk_change(synced, buffer, false, Some(inflight), external),
+            DiskChange::Reload
+        );
+    }
+
+    #[test]
+    fn anchor_after_splice_keeps_relative_position() {
+        // Block [10..20), anchor at 15 (5 bytes in), text grows to 30 bytes.
+        assert_eq!(anchor_after_splice(15, 10, 20, 30), 15);
+        // Anchor at block start stays at block start.
+        assert_eq!(anchor_after_splice(10, 10, 20, 0), 10);
+        // Deleting the whole block clamps the anchor to its start.
+        assert_eq!(anchor_after_splice(18, 10, 20, 0), 10);
+        // Anchor beyond a shrunken block clamps to the new end.
+        assert_eq!(anchor_after_splice(19, 10, 20, 3), 13);
+        // Anchor before the range is untouched by clamping semantics.
+        assert_eq!(anchor_after_splice(4, 10, 20, 8), 10);
+    }
+
+    #[test]
+    fn block_kind_detects_all_shapes() {
+        assert_eq!(
+            block_kind_of("## Heading\n\nbody"),
+            EditBlockKind::Heading(2)
+        );
+        assert_eq!(
+            block_kind_of("- item one\n- item two"),
+            EditBlockKind::ListItem
+        );
+        assert_eq!(
+            block_kind_of("12. ordered item"),
+            EditBlockKind::ListItem
+        );
+        assert_eq!(block_kind_of("> quoted"), EditBlockKind::Quote);
+        assert_eq!(
+            block_kind_of("```rust\nfn x() {}\n```\n"),
+            EditBlockKind::CodeBlock
+        );
+        assert_eq!(
+            block_kind_of("Just a paragraph.\n"),
+            EditBlockKind::Paragraph
         );
     }
 
