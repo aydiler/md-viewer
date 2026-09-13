@@ -12,7 +12,7 @@ resolver = "3"
 license = "MIT OR Apache-2.0"
 edition = "2021"
 rust-version = "1.89"
-version = "0.28.2"
+version = "0.28.3"
 repository = "https://github.com/aydiler/md-viewer"
 
 [workspace.dependencies]

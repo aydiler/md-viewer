@@ -2,6 +2,25 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.0] - 2026-09-13
+
+Fonts got a real settings surface, and wide tables stopped escaping the reading pane.
+
+### Features
+
+- **One Fonts menu with presets, text sizes, and a family picker that always works (#200, #202).** The two old font entries — a family picker plus a preset submenu — are now a single **View → Fonts…** dialog holding all three choices: a **Preset** row (Default / GitHub / VS Code, emulating each viewer's font stacks), a **Text Size** row (14–24 px, shared by every preset), and a searchable **Family** list. Every family that appears in the list is guaranteed to take effect: fontique's raw enumeration reports 742 names for 317 actual families on a stock Linux system — localized and weight-instance aliases ("Noto Sans Black") resolve to the base family's regular face, and script-only families (emoji, symbol, Indic) cannot cover Latin text at all, so picking them silently fell back to the default. The picker now offers one canonical name per family, filtered by the same Latin-coverage gate the installer applies, computed off the UI thread (≈0.5 s, with a scanning note in the dialog until it lands). Presets drive the code font and line heights; a picked family leads the body chain, and the dialog says so inline.
+
+- **Font stacks resolve through fontique (#200).** The preset and fallback resolution moved from hardcoded path lists to fontique's platform collection, which delegates to fontconfig on Linux, DirectWrite on Windows, and CoreText on macOS — so the emulated stacks pick up each platform's real substitutions (Segoe UI → Adwaita Sans on modern GNOME, for instance) instead of a Linux-only guess.
+
+### Bug Fixes
+
+- **Wide tables no longer slide under the sidebar, and column widths survive sidebar resizes (#201).** Two defects, one investigation: tables could be dragged over the right sidebar while code blocks went above it, and every sidebar nudge reset hand-resized table columns. The overlap traced to a width policy, not the clip — table columns persisted user-resized widths and never re-shrunk, so *any* pane shrink overflowed and reset *every* time. Widths now rescale proportionally when a shrink still fits (floored at per-column minimums), while deliberate column drags — which egui satisfies by growing the dragged column rather than redistributing — are never punished. Sidebar-drag verification drove the pane-clip regression suite in the vendored renderer.
+
+### Internal
+
+- **The vendored renderer moves to 0.28.3** with the pane-clip width caps above.
+- **The AUR `md-viewer-git` PKGBUILD disables makepkg LTO**, which broke with recent rustc on this package's profile.
+
 ## [0.2.2] - 2026-09-12
 
 Two rendering fixes that took opposite roads to confidence — one reproduced only after the right instrument was built, the other verified in both directions — plus the first fragment navigation.
