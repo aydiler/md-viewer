@@ -11,7 +11,8 @@ use egui::{
     Vec2,
 };
 use egui_commonmark_extended::{
-    CommonMarkCache, CommonMarkViewer, EditFeedback, EditRegionConfig,
+    CommonMarkCache, CommonMarkViewer, EditFeedback, EditRegionConfig, EditSessionConfig,
+    SessionBlockFeedback,
 };
 
 const MARKDOWN: &str =
@@ -72,6 +73,56 @@ fn run_frame(
     (geom.get(), feedback.into_inner())
 }
 
+/// Paint one Live-mode frame through `show_scrollable` with the given
+/// persistent-editing session. Returns viewport geometry plus the per-block
+/// feedback stashed by this frame.
+fn run_session_frame(
+    ctx: &Context,
+    markdown: &str,
+    cache: &RefCell<CommonMarkCache>,
+    session: Option<EditSessionConfig>,
+    events: Vec<Event>,
+) -> (FrameGeom, Option<Vec<SessionBlockFeedback>>) {
+    let geom = std::cell::Cell::new(FrameGeom {
+        inner_min_y: 0.0,
+        scroll_offset_y: 0.0,
+    });
+    let feedback = std::cell::Cell::new(None);
+    let source_id = egui::Id::new("test-doc");
+
+    ctx.run(
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            events,
+            ..Default::default()
+        },
+        |ctx| {
+            let mut cache = cache.borrow_mut();
+            let mut viewer = CommonMarkViewer::new()
+                .record_block_layout(true)
+                .scroll_source(ScrollSource {
+                    scroll_bar: true,
+                    drag: false,
+                    mouse_wheel: true,
+                });
+            if let Some(cfg) = &session {
+                viewer = viewer.edit_session(Some(cfg.clone()));
+            }
+            CentralPanel::default().show(ctx, |ui| {
+                let out = viewer.show_scrollable(source_id, ui, &mut cache, markdown);
+                geom.set(FrameGeom {
+                    inner_min_y: out.inner_rect.min.y,
+                    scroll_offset_y: out.state.offset.y,
+                });
+            });
+            let salt = session.as_ref().map(|s| s.id_salt);
+            let fb = salt.map(|salt| cache.take_session_feedback(&salt));
+            feedback.set(fb);
+        },
+    );
+    (geom.get(), feedback.into_inner())
+}
+
 /// Screen-space position of the vertical middle of block `index`, found by
 /// probing the hit-tester (same mapping the app performs for real clicks).
 fn screen_pos_of_block(
@@ -102,25 +153,56 @@ fn screen_pos_of_block(
     panic!("no y resolves to block {index}");
 }
 
+/// Session-based port of the original click→activate→type story: a click
+/// resolves to the clicked paragraph via the recorded boundaries, the
+/// per-block session editor receives a keystroke, and the feedback reports
+/// exactly that block as changed. (The legacy `edit_region` single-editor
+/// option never had a feedback producer and is superseded by sessions.)
 #[test]
-fn live_preview_click_activates_and_types() {
+fn live_session_click_types_into_block() {
+    use egui_commonmark_extended::{EditBlockKind, SessionBlock};
+
     let ctx = Context::default();
     let cache = RefCell::new(CommonMarkCache::default());
     let doc_id = egui::Id::new("test-doc");
+    let salt = doc_id.with("pse");
 
-    // Frame 1: Live-mode-style paint records block layout.
-    let (geom, fb) = run_frame(&ctx, MARKDOWN, &cache, None, true, vec![]);
-    assert!(fb.is_none(), "no editor without an active region");
-
+    // Frame 1: Rendered-style paint records block layout.
+    let (geom, _) = run_frame(&ctx, MARKDOWN, &cache, None, true, vec![]);
     let spans = cache.borrow_mut().top_level_block_spans(&doc_id);
     assert_eq!(spans.len(), 4, "h1, para, h2, para: {spans:?}");
-    assert!(
-        cache.borrow_mut().has_block_layout(&doc_id),
-        "boundaries recorded"
-    );
+
+    // Build the session the way the app seeds it: one block per span, kind
+    // sniffed from the first line.
+    let blocks: Vec<SessionBlock> = spans
+        .iter()
+        .enumerate()
+        .map(|(_, span)| SessionBlock {
+            src: span.clone(),
+            kind: if MARKDOWN[span.clone()].starts_with("# ") {
+                EditBlockKind::Heading(1)
+            } else if MARKDOWN[span.clone()].starts_with("## ") {
+                EditBlockKind::Heading(2)
+            } else {
+                EditBlockKind::Paragraph
+            },
+        })
+        .collect();
+    assert_eq!(blocks[0].kind, EditBlockKind::Heading(1));
+    assert_eq!(blocks[1].kind, EditBlockKind::Paragraph);
+    let session = Some(EditSessionConfig {
+        id_salt: salt,
+        blocks,
+    });
+
+    // Frame 2: Live paint. All four text blocks seed; nothing changed yet.
+    let (_, fb) = run_session_frame(&ctx, MARKDOWN, &cache, session.clone(), vec![]);
+    let fb = fb.expect("session feedback stashed on the first Live frame");
+    assert_eq!(fb.len(), 4, "h1, para, h2, para paint editors: {fb:?}");
+    assert!(fb.iter().all(|f| !f.changed), "seed frame is not a change");
 
     // Click the FIRST PARAGRAPH (block index 1) — same math as the app:
-    // content_y = pointer.y - inner_rect.min.y + scroll_offset.
+    // content_y = pointer.y - inner_rect.min.y + scroll_offset_y.
     let click_screen = screen_pos_of_block(&ctx, &cache, doc_id, 1, geom);
     let content_y = click_screen.y - geom.inner_min_y + geom.scroll_offset_y;
     let hit = cache
@@ -130,43 +212,37 @@ fn live_preview_click_activates_and_types() {
     assert_eq!(hit, spans[1], "click resolves to the clicked paragraph");
     drop(spans);
 
-    // Activate exactly like the app: seed buffer + set edit_region.
-    let cfg = EditRegionConfig {
-        src: hit.clone(),
-        id: doc_id.with("live_editor"),
-        kind: egui_commonmark_extended::EditBlockKind::Paragraph,
-    };
-    ctx.data_mut(|d| d.insert_temp(cfg.id, MARKDOWN[hit.clone()].to_string()));
+    // Frame 3: focus the clicked block's editor the way a real click would.
+    let _ = run_session_frame(&ctx, MARKDOWN, &cache, session.clone(), vec![]);
+    ctx.memory_mut(|mem| mem.request_focus(salt.with(("blk", 1))));
 
-    // Frame 2: editor paints in place of the block.
-    let (_, fb) = run_frame(&ctx, MARKDOWN, &cache, Some(cfg.clone()), true, vec![]);
-    assert!(fb.is_some(), "inline editor painted for the active block");
-    assert!(!fb.unwrap().changed, "no phantom change without input");
-
-    // Frame 3: focus the editor the way a real click would leave it.
-    // (Synthetic same-frame press/release pairs don't run egui's full click
-    // pipeline, so grant focus explicitly — native input paths are what the
-    // app exercises.)
-    let _ = run_frame(&ctx, MARKDOWN, &cache, Some(cfg.clone()), true, vec![]);
-    ctx.memory_mut(|mem| mem.request_focus(cfg.id));
-
-    // Frame 4: keystroke lands in the focused inline editor.
-    let (_, fb) = run_frame(
+    // Frame 4: keystroke lands in the focused block editor only.
+    let (_, fb) = run_session_frame(
         &ctx,
         MARKDOWN,
         &cache,
-        Some(cfg.clone()),
-        true,
+        session.clone(),
         vec![Event::Text("Z".into())],
     );
-    let fb = fb.expect("editor still painted");
-    assert!(fb.changed, "keystroke reported as change");
+    let fb = fb.expect("editors still painted");
+    eprintln!("DEBUG fb={fb:?}");
+    let typed = fb
+        .iter()
+        .find(|f| f.index == 1)
+        .expect("clicked block reported");
+    assert!(typed.changed, "keystroke reported as change");
+    assert!(typed.text.contains('Z'), "keystroke reached buffer: {typed:?}");
+    assert!(
+        fb.iter().filter(|f| f.index != 1).all(|f| !f.changed),
+        "other blocks untouched: {fb:?}"
+    );
 
     // The working buffer diverged from the source slice — the app would now
-    // splice `fb.text` back into its String.
-    let edited = ctx.data_mut(|d| d.get_temp::<String>(cfg.id)).unwrap();
-    assert!(edited.contains('Z'), "keystroke reached buffer: {edited:?}");
-    assert_ne!(edited, MARKDOWN[hit], "buffer diverged from disk text");
+    // splice `typed.text` back into its String.
+    let edited = ctx
+        .data_mut(|d| d.get_temp::<String>(salt.with(("blk", 1))))
+        .unwrap();
+    assert_ne!(edited, MARKDOWN[hit.clone()], "buffer diverged from disk");
 }
 
 /// Regression: the app passes an arbitrary pre-built `egui::Id` as the

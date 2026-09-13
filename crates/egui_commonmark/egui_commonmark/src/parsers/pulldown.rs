@@ -2035,7 +2035,10 @@ impl CommonMarkViewerInternal {
                         fb.len()
                     );
                 }
-                fb.iter_mut().for_each(|f| f.changed = false); // reset AFTER log
+                // `changed` must survive the stash: the app folds buffers
+                // only for entries where it is true (the frame the keystroke
+                // landed). Entries are rebuilt from `response.changed()`
+                // every frame, so no stale true can leak across frames.
                 cache.stash_session_feedback(&salt, fb);
             }
         });
