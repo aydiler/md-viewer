@@ -3060,7 +3060,6 @@ impl MarkdownApp {
 
         egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("🔍");
 
                 let text_edit = egui::TextEdit::singleline(&mut self.search.query)
                     .id(input_id)
@@ -3651,7 +3650,7 @@ impl MarkdownApp {
             .show(ui, |ui| {
                 ui.add_space(64.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("📄").size(56.0).weak());
+                    ui.label(egui::RichText::new("Markdown").size(56.0).weak());
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new("Open a file or folder")
@@ -3668,14 +3667,14 @@ impl MarkdownApp {
                     let avail = ui.available_width();
                     ui.add_space(((avail - 230.0) / 2.0).max(0.0));
                     if ui
-                        .button(egui::RichText::new("📂  Open File").size(15.0))
+                        .button(egui::RichText::new("Open File…").size(15.0))
                         .clicked()
                     {
                         do_open_file = true;
                     }
                     ui.add_space(10.0);
                     if ui
-                        .button(egui::RichText::new("📁  Open Folder").size(15.0))
+                        .button(egui::RichText::new("Open Folder…").size(15.0))
                         .clicked()
                     {
                         do_open_folder = true;
@@ -3708,8 +3707,7 @@ impl MarkdownApp {
                                     .unwrap_or_default();
                                 let when = format_relative_time(entry.last_opened, now);
                                 ui.horizontal(|ui| {
-                                    let label =
-                                        egui::RichText::new(format!("📄 {name}")).size(14.0);
+                                    let label = egui::RichText::new(name.as_str()).size(14.0);
                                     let label = if *exists { label } else { label.weak() };
                                     let resp = ui
                                         .add_enabled(*exists, egui::Button::new(label).frame(false))
@@ -4153,8 +4151,8 @@ impl MarkdownApp {
                 let row_response = ui.horizontal(|ui| {
                     ui.add_space(indent as f32);
 
-                    // File icon
-                    ui.label("📄");
+                    // File icon (monochrome glyph — no emoji in app chrome)
+                    ui.label(egui::RichText::new("▪").weak());
 
                     // Highlight if file is open in a tab
                     let is_open = open_paths.contains(path);
@@ -4246,9 +4244,8 @@ impl MarkdownApp {
                         should_toggle = true;
                     }
 
-                    // Folder icon
-                    let folder_icon = if is_expanded { "📂" } else { "📁" };
-                    ui.label(folder_icon);
+                    // No decorative folder emoji — the expand button next to
+                    // the name already communicates folder state.
 
                     let response = ui.add(
                         egui::Label::new(name.as_str())
@@ -5384,9 +5381,9 @@ impl eframe::App for MarkdownApp {
                 #[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
                 let view_menu = ui.menu_button("View", |ui| {
                     let theme_text = if self.dark_mode {
-                        "☀ Light Mode"
+                        "☀ Light Mode" // ☀ is text-presentation → monochrome
                     } else {
-                        "🌙 Dark Mode"
+                        "☾ Dark Mode" // ☾ (U+263E) is a text symbol, not emoji
                     };
                     let theme_btn = ui.add(egui::Button::new(theme_text).shortcut_text("Ctrl+D"));
                     #[cfg(feature = "mcp")]
