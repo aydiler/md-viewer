@@ -92,5 +92,6 @@ lto = "thin"
 codegen-units = 4
 
 [patch.crates-io]
+epaint = { path = "crates/epaint", version = "0.33.3" }
 egui_commonmark_extended = { path = "crates/egui_commonmark/egui_commonmark", version = "0.28.3" }
 egui_commonmark_backend_extended = { path = "crates/egui_commonmark/egui_commonmark_backend", version = "0.28.3" }
