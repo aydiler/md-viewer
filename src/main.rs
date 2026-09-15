@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
+use egui::Widget;
 use egui_commonmark_extended::{header_position_key, CommonMarkCache, CommonMarkViewer};
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
@@ -1022,6 +1023,20 @@ struct Tab {
     /// parsed events and split_points can survive across frames without
     /// re-hashing the entire content.
     content_version: u64,
+    /// When true, the content area shows a TextEdit instead of CommonMarkViewer.
+    is_editing: bool,
+    /// Snapshot of the on-disk content at last load/save. The edit buffer is
+    /// dirty when `content != saved_content`.
+    saved_content: String,
+    /// "Saved ✓" / "Save failed" flash trigger for the edit toolbar
+    /// (true = success, false = failure).
+    save_flash: Option<(bool, Instant)>,
+    /// Scroll ratio (0..=1) captured when entering edit mode, applied to the
+    /// editor's ScrollArea on its first frame.
+    pending_edit_scroll: Option<f32>,
+    /// View-mode content height captured when entering edit mode; converts
+    /// the edit scroll ratio back to an absolute offset when leaving edit.
+    pre_edit_view_content_height: f32,
 }
 
 impl Tab {
@@ -1045,6 +1060,7 @@ impl Tab {
             cache.add_link_hook(link);
         }
 
+        let saved_content = content.clone();
         Ok(Self {
             id: egui::Id::new(&path),
             path,
@@ -1066,7 +1082,36 @@ impl Tab {
             history_forward: Vec::new(),
             search_matches: Vec::new(),
             content_version: 1,
+            is_editing: false,
+            saved_content,
+            save_flash: None,
+            pending_edit_scroll: None,
+            pre_edit_view_content_height: 0.0,
         })
+    }
+
+    /// Switch between rendered view and raw-edit mode, preserving the scroll
+    /// ratio across the switch (DSH-better-sidebar-style mode toggle).
+    fn set_edit_mode(&mut self, to_edit: bool) {
+        if self.is_editing == to_edit {
+            return;
+        }
+        // Scroll mapping across the mode switch: capture the current ratio
+        // and restore it in the other surface (ratio * that surface's
+        // content height).
+        let ratio = self.scroll_offset / self.last_content_height.max(1.0);
+        if to_edit {
+            self.pending_edit_scroll = Some(ratio);
+            self.pre_edit_view_content_height = self.last_content_height;
+        } else {
+            // Leaving edit: first-frame estimate for the view; the
+            // renderer's own correctives refine it after.
+            self.pending_scroll_offset =
+                Some(ratio * self.pre_edit_view_content_height.max(1.0));
+        }
+        self.is_editing = to_edit;
+        self.cache.clear_scrollable();
+        self.content_version = self.content_version.wrapping_add(1);
     }
 
     fn title(&self) -> String {
@@ -1079,6 +1124,25 @@ impl Tab {
     fn reload(&mut self) -> io::Result<()> {
         let content = String::from_utf8_lossy(&fs::read(&self.path)?).into_owned();
         self.apply_loaded_content(self.path.clone(), content, false);
+        Ok(())
+    }
+
+    /// Atomic save: write a temp file next to the target, then rename over
+    /// it (mirrors the dsh-better-sidebar editor's tmp+rename save path).
+    /// On success `saved_content` is refreshed so the buffer is no longer
+    /// dirty.
+    fn save_to_disk(&mut self) -> io::Result<()> {
+        let tmp = PathBuf::from(format!(
+            "{}.mdv-tmp-{}",
+            self.path.display(),
+            std::process::id()
+        ));
+        fs::write(&tmp, &self.content)?;
+        if let Err(error) = fs::rename(&tmp, &self.path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+        self.saved_content = self.content.clone();
         Ok(())
     }
 
@@ -1096,6 +1160,7 @@ impl Tab {
     fn apply_loaded_content(&mut self, path: PathBuf, content: String, reset_scroll: bool) {
         self.content_lines = content.lines().count();
         self.content = content;
+        self.saved_content = self.content.clone();
         self.path = path;
         self.id = egui::Id::new(&self.path);
         self.cache = CommonMarkCache::default();
@@ -3019,6 +3084,15 @@ impl MarkdownApp {
             let mut active_was_reloaded = false;
             for tab in &mut self.tabs {
                 if tab.path == path {
+                    // Never clobber unsaved edit-mode edits with a disk
+                    // reload (dirty-reload suppression, mirroring the
+                    // dsh-better-sidebar editor). A reload of identical
+                    // content (e.g. our own save echoing back through the
+                    // watcher) still proceeds.
+                    if tab.is_editing && tab.content != tab.saved_content {
+                        log::info!("Skipping reload of dirty edit tab: {:?}", path);
+                        continue;
+                    }
                     log::info!("Reloading tab: {:?}", path);
                     if let Err(error) = tab.reload() {
                         self.error_message =
@@ -3365,6 +3439,78 @@ impl MarkdownApp {
 
             if new_tab_btn.clicked() {
                 self.open_file_dialog();
+            }
+
+            // Preview|Edit segmented toggle for the active tab, right-aligned
+            // in the tab bar (DSH-better-sidebar editor-header placement).
+            // Borderless on purpose: the tab bar strip already carries a
+            // border, so only the filled active segment provides the frame.
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut switch_mode: Option<bool> = None; // Some(true) → edit
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::same(2))
+                        .show(ui, |ui| {
+                            ui.set_min_height(ui.text_style_height(&egui::TextStyle::Small));
+                            ui.horizontal(|ui| {
+                                // Added in Edit, Preview order so the
+                                // right-to-left layout renders [Preview|Edit].
+                                for (label, is_edit) in [("Edit", true), ("Preview", false)] {
+                                    let active = tab.is_editing == is_edit;
+                                    let text_color = if active {
+                                        ui.visuals().text_color()
+                                    } else {
+                                        ui.visuals().weak_text_color()
+                                    };
+                                    let response = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(label)
+                                                .small()
+                                                .color(text_color),
+                                        )
+                                        .fill(if active {
+                                            ui.visuals()
+                                                .widgets
+                                                .inactive
+                                                .weak_bg_fill
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        })
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if response.clicked() && !active {
+                                        switch_mode = Some(is_edit);
+                                    }
+                                }
+                            });
+                        });
+                    if let Some(to_edit) = switch_mode {
+                        tab.set_edit_mode(to_edit);
+                    }
+                    if tab.content != tab.saved_content {
+                        ui.label(
+                            egui::RichText::new("●")
+                                .small()
+                                .color(ui.visuals().warn_fg_color),
+                        )
+                        .on_hover_text("Unsaved changes — press Ctrl+S to save");
+                    }
+                    if let Some((ok, at)) = tab.save_flash {
+                        if (at.elapsed().as_millis() as u64) < FLASH_DURATION_MS * 3 {
+                            let (label, color) = if ok {
+                                ("Saved ✓", egui::Color32::from_rgb(90, 200, 120))
+                            } else {
+                                ("Save failed", ui.visuals().error_fg_color)
+                            };
+                            ui.label(egui::RichText::new(label).small().color(color));
+                        } else {
+                            tab.save_flash = None;
+                        }
+                    }
+                });
             }
         });
 
@@ -3817,6 +3963,45 @@ impl MarkdownApp {
                 // version through builder methods. The returned ScrollAreaOutput
                 // exposes state.offset and inner_rect for the post-render
                 // selection-preserving wheel hack below.
+                // View mode: CommonMarkViewer
+                // Edit mode: scrollable TextEdit for raw markdown
+                // (the Preview|Edit toggle lives in the tab bar)
+
+                let mut scroll_output: Option<egui::scroll_area::ScrollAreaOutput<()>> = None;
+
+                if tab.is_editing {
+                    // Edit mode: scrollable TextEdit with the raw markdown.
+                    // The TextEdit's own ScrollArea handles the wheel natively;
+                    // scroll_output stays None so the view-mode hacks below skip.
+                    let pending_edit = tab.pending_edit_scroll.take();
+                    let edit_out = egui::ScrollArea::vertical()
+                        .id_salt(tab.id.with("edit-scroll"))
+                        .auto_shrink(false)
+                        .max_width(content_rect.width())
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                let frame = egui::Frame::NONE
+                                    .inner_margin(egui::Margin::symmetric(4_i8, 2_i8));
+                                frame.show(ui, |ui| {
+                                    egui::TextEdit::multiline(&mut tab.content)
+                                        .id_salt(ui.id().with("edit"))
+                                        .desired_width(content_rect.width() - 8.0)
+                                        .desired_rows(24)
+                                        .frame(false)
+                                        .ui(ui);
+                                });
+                            });
+                        });
+                    tab.scroll_offset = edit_out.state.offset.y;
+                    tab.last_viewport_height = edit_out.inner_rect.height();
+                    tab.last_content_height = edit_out.content_size.y;
+                    if let Some(ratio) = pending_edit {
+                        let mut state = edit_out.state;
+                        state.offset.y = ratio * edit_out.content_size.y.max(1.0);
+                        state.store(ui.ctx(), edit_out.id);
+                        ui.ctx().request_repaint();
+                    }
+                } else {
                 let force_full_render =
                     tab.pending_header_click_key.is_some() || correct_search_this_frame;
                 let pending = tab.pending_scroll_offset.take();
@@ -3826,7 +4011,7 @@ impl MarkdownApp {
                 // Line heights follow the emulated viewer (GitHub 1.5/1.45,
                 // VS Code preview 1.6/1.36); the font preset owns the metrics.
                 let (preset_line_height, preset_code_line_height) = self.font_preset.line_heights();
-                let mut scroll_output = CommonMarkViewer::new()
+                scroll_output = Some(CommonMarkViewer::new()
                     .default_implicit_uri_scheme(&tab.base_uri)
                     .max_image_width(Some(800))
                     .default_width(default_width)
@@ -3858,11 +4043,14 @@ impl MarkdownApp {
                         drag: false,
                         mouse_wheel: true,
                     })
-                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content));
 
-                tab.scroll_offset = scroll_output.state.offset.y;
-                tab.last_viewport_height = scroll_output.inner_rect.height();
-                tab.last_content_height = scroll_output.content_size.y;
+                if let Some(so) = scroll_output.as_ref() {
+                    tab.scroll_offset = so.state.offset.y;
+                    tab.last_viewport_height = so.inner_rect.height();
+                    tab.last_content_height = so.content_size.y;
+                }
+                }
 
                 // If the renderer recorded an exact y for the active match, check
                 // whether the current scroll position keeps it visible. If not,
@@ -3876,20 +4064,23 @@ impl MarkdownApp {
                 // wheel input and locking the view (issue #19).
                 if correct_search_this_frame {
                     if let Some(actual_y) = tab.cache.active_search_y() {
-                        let current_scroll = scroll_output.state.offset.y;
-                        let viewport_top = current_scroll;
-                        let viewport_bottom = current_scroll + tab.last_viewport_height;
-                        // Consider "not visible" if outside the viewport with a small margin
-                        let margin_outside = 20.0_f32;
-                        let needs_correction = actual_y < viewport_top + margin_outside
-                            || actual_y > viewport_bottom - margin_outside;
-                        if needs_correction && tab.last_viewport_height > 0.0 {
-                            // Place the active match ~35% from the top of the viewport
-                            let inset = tab.last_viewport_height * 0.35;
-                            let want_scroll = (actual_y - inset).max(0.0);
-                            // Avoid stomping if we're already at the target (within a frame)
-                            if (want_scroll - current_scroll).abs() > 2.0 {
-                                tab.pending_scroll_offset = Some(want_scroll);
+                        // View-mode only: scroll_output is None while editing.
+                        if let Some(so) = scroll_output.as_ref() {
+                            let current_scroll = so.state.offset.y;
+                            let viewport_top = current_scroll;
+                            let viewport_bottom = current_scroll + tab.last_viewport_height;
+                            // Consider "not visible" if outside the viewport with a small margin
+                            let margin_outside = 20.0_f32;
+                            let needs_correction = actual_y < viewport_top + margin_outside
+                                || actual_y > viewport_bottom - margin_outside;
+                            if needs_correction && tab.last_viewport_height > 0.0 {
+                                // Place the active match ~35% from the top of the viewport
+                                let inset = tab.last_viewport_height * 0.35;
+                                let want_scroll = (actual_y - inset).max(0.0);
+                                // Avoid stomping if we're already at the target (within a frame)
+                                if (want_scroll - current_scroll).abs() > 2.0 {
+                                    tab.pending_scroll_offset = Some(want_scroll);
+                                }
                             }
                         }
                     }
@@ -3904,34 +4095,41 @@ impl MarkdownApp {
                 // the recorded y. Mirrors the search-match corrective above.
                 if let Some(key) = tab.pending_header_click_key.take() {
                     if let Some(actual_y) = tab.cache.get_header_position(&key) {
-                        let current_scroll = scroll_output.state.offset.y;
-                        let want_scroll = (actual_y - 50.0).max(0.0);
-                        if (want_scroll - current_scroll).abs() > 2.0 {
-                            tab.pending_scroll_offset = Some(want_scroll);
+                        // View-mode only: scroll_output is None while editing.
+                        if let Some(so) = scroll_output.as_ref() {
+                            let current_scroll = so.state.offset.y;
+                            let want_scroll = (actual_y - 50.0).max(0.0);
+                            if (want_scroll - current_scroll).abs() > 2.0 {
+                                tab.pending_scroll_offset = Some(want_scroll);
+                            }
                         }
                     }
                 }
 
-                // Manual scroll handling for mouse wheel during text selection
+                // Manual scroll handling for mouse wheel during text selection.
+                // View-mode only: in edit mode the TextEdit's own ScrollArea
+                // handles the wheel natively and scroll_output is None.
                 let pointer_over_content = ui.ctx().input(|i| {
                     i.pointer
                         .hover_pos()
                         .is_some_and(|pos| content_rect.contains(pos))
                 });
                 if raw_scroll.abs() > 0.0 && pointer_over_content {
-                    let current_offset = scroll_output.state.offset.y;
-                    let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
-                    let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
+                    if let Some(so) = scroll_output.as_mut() {
+                        let current_offset = so.state.offset.y;
+                        let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
+                        let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
 
-                    // Don't store at boundaries (can break selection)
-                    let would_hit_top = new_offset < 0.5;
-                    let would_hit_bottom = new_offset > max_scroll - 0.5;
-                    let offset_changed = (new_offset - current_offset).abs() > 0.5;
+                        // Don't store at boundaries (can break selection)
+                        let would_hit_top = new_offset < 0.5;
+                        let would_hit_bottom = new_offset > max_scroll - 0.5;
+                        let offset_changed = (new_offset - current_offset).abs() > 0.5;
 
-                    if offset_changed && !would_hit_top && !would_hit_bottom {
-                        scroll_output.state.offset.y = new_offset;
-                        scroll_output.state.store(ui.ctx(), scroll_output.id);
-                        ui.ctx().request_repaint();
+                        if offset_changed && !would_hit_top && !would_hit_bottom {
+                            so.state.offset.y = new_offset;
+                            so.state.store(ui.ctx(), so.id);
+                            ui.ctx().request_repaint();
+                        }
                     }
                 }
 
@@ -5031,6 +5229,7 @@ impl eframe::App for MarkdownApp {
         let mut prev_match = false;
         let mut close_search_kb = false;
         let mut keyboard_scroll_action: Option<KeyboardScrollAction> = None;
+        let mut save_request = false;
 
         // Ctrl+/- zoom: applies to lightbox when open, document otherwise.
         // Steps are multiplicative (×1.25) like browsers and the lightbox.
@@ -5130,6 +5329,10 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::Q) {
                     quit_app = true;
                 }
+                // Ctrl+S: save the active tab's edit buffer to disk
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::S) {
+                    save_request = true;
+                }
                 // Ctrl + scroll wheel / pinch to zoom (multiplicative, like
                 // browsers). The lightbox captures wheel input itself in
                 // raw_input_hook, so this only runs for the document.
@@ -5212,6 +5415,27 @@ impl eframe::App for MarkdownApp {
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // Ctrl+S: persist the active tab's edit buffer. Only meaningful in
+        // edit mode with unsaved changes; the flash label in the edit
+        // toolbar reports the outcome.
+        if save_request {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                if tab.is_editing && tab.content != tab.saved_content {
+                    match tab.save_to_disk() {
+                        Ok(()) => {
+                            log::info!("Saved tab edits: {:?}", tab.path);
+                            tab.save_flash = Some((true, Instant::now()));
+                        }
+                        Err(error) => {
+                            log::error!("Failed to save {:?}: {error}", tab.path);
+                            self.error_message =
+                                Some(format!("Unable to save {}: {error}", tab.path.display()));
+                            tab.save_flash = Some((false, Instant::now()));
+                        }
+                    }
+                }
+            }
         }
         if close_tab {
             self.close_active_tab();
