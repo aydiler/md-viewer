@@ -741,17 +741,54 @@ fn install_preset_mono_font(
 
 /// Bundled monochrome emoji face, appended last to both family chains.
 ///
-/// egui's rasterizer (ab_glyph/owned_ttf_parser) cannot render color-emoji
-/// formats (CBDT/CBLC bitmap, COLR/CPAL): a system "Noto Color Emoji" face
-/// loads but rasterizes blank. The bundled monochrome NotoEmoji has real
-/// vector outlines, so emoji appear as black-and-white glyphs instead of
-/// tofu. Appended last so it only supplies glyphs nothing else covers.
-/// (See docs/devlog/014-font-fallback.md and LESSONS.md "Color emojis not
-/// supported in egui".)
+/// Color-emoji coverage comes first via the system NotoColorEmoji face (see
+/// `install_emoji_fonts`); this monochrome face fills any emoji codepoints
+/// the color font lacks. Appended last so it only supplies glyphs nothing
+/// else covers.
+/// (See docs/devlog/014-font-fallback.md.)
 const EMOJI_FONT_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoEmoji-Regular.ttf");
 
-fn install_emoji_font(definitions: &mut FontDefinitions) {
+/// System color-emoji face (CBDT/CBLC bitmap font), appended after the
+/// regular system fallbacks but before the monochrome emoji face.
+const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+];
+
+/// Install emoji faces into the fallback chains.
+///
+/// The color face is only useful with the vendored epaint patch that
+/// rasterizes color-bitmap glyphs via swash (ab_glyph alone renders them
+/// blank). With the patch, emoji render in full color; without it, the
+/// monochrome face still provides visible glyphs.
+fn install_emoji_fonts(definitions: &mut FontDefinitions) {
+    for path in COLOR_EMOJI_FONT_PATHS {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                definitions
+                    .font_data
+                    .insert("ColorEmoji".to_owned(), FontData::from_owned(bytes).into());
+                for family in [
+                    FontFamily::Proportional,
+                    FontFamily::Monospace,
+                ] {
+                    if let Some(chain) = definitions.families.get_mut(&family) {
+                        // Insert ahead of epaint's built-in monochrome emoji
+                        // faces, which would otherwise claim the glyph first.
+                        let pos = chain
+                            .iter()
+                            .position(|n| n == "NotoEmoji-Regular" || n == "emoji-icon-font")
+                            .unwrap_or(chain.len());
+                        chain.insert(pos, "ColorEmoji".to_owned());
+                    }
+                }
+                log::info!("Loaded system color emoji font from {path}");
+                break;
+            }
+            Err(e) => log::debug!("Color emoji font {path} unavailable: {e}"),
+        }
+    }
     match std::fs::read(EMOJI_FONT_PATH) {
         Ok(bytes) => {
             definitions
@@ -812,7 +849,7 @@ pub(crate) fn setup_fonts(
             preset_mono_families,
         )
     };
-    install_emoji_font(&mut definitions);
+    install_emoji_fonts(&mut definitions);
     if installed.is_empty() {
         log::warn!("No suitable system font fallbacks found; using egui defaults.");
     } else {
@@ -1123,7 +1160,7 @@ mod tests {
         // Build the same definitions setup_fonts() would install: egui
         // defaults + the bundled monochrome emoji face appended last.
         let mut definitions = FontDefinitions::default();
-        install_emoji_font(&mut definitions);
+        install_emoji_fonts(&mut definitions);
 
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
@@ -1143,7 +1180,7 @@ mod tests {
         // Isolate which individual face supplies each glyph: one font per chain.
         let defaults = FontDefinitions::default();
         let mut with_ours = FontDefinitions::default();
-        install_emoji_font(&mut with_ours);
+        install_emoji_fonts(&mut with_ours);
         for (label, defs_source) in [
             ("builtin:NotoEmoji-Regular", &defaults),
             ("bundled:NotoEmoji", &with_ours),
@@ -1202,6 +1239,75 @@ mod tests {
             });
             eprintln!("ink pixels for {ch:?}: {ink}");
             assert!(ink > 20, "emoji {ch} rasterized blank (only {ink} ink pixels)");
+        }
+
+        // Color check (requires vendored epaint with the swash patch): each
+        // doc emoji must resolve to the ColorEmoji face and produce genuinely
+        // colored atlas pixels — saturated red/green RGB channels.
+        for (ch, want_channel) in [('\u{1F7E2}', "green"), ('\u{1F534}', "red")] {
+            let job = egui::text::LayoutJob::simple(
+                ch.to_string(),
+                font_id.clone(),
+                egui::Color32::WHITE,
+                f32::INFINITY,
+            );
+            let (colored, channel_peak) = ctx.fonts_mut(|f| {
+                let galley = f.layout_job(job);
+                let glyph = &galley.rows[0].glyphs[0];
+                let uv = glyph.uv_rect;
+                let image = f.image();
+                let [w, h] = image.size;
+                let mut peak = 0u8;
+                for y in uv.min[1] as usize..(uv.max[1] as usize).min(h) {
+                    for x in uv.min[0] as usize..(uv.max[0] as usize).min(w) {
+                        let px = image[(x, y)];
+                        let m = match want_channel {
+                            "green" => px.g(),
+                            _ => px.r(),
+                        };
+                        // Require the color channel to dominate its counterpart.
+                        let other = match want_channel {
+                            "green" => px.r(),
+                            _ => px.g(),
+                        };
+                        if px.a() > 32 && m > 48 && m as u16 > other as u16 + 16 {
+                            peak = peak.max(m);
+                        }
+                    }
+                }
+                (uv.colored, peak)
+            });
+            eprintln!("{ch:?}: colored flag = {colored}, {want_channel} channel peak = {channel_peak}");
+            // Debug: dump first few atlas pixels from the glyph region.
+            ctx.fonts(|f| {
+                let _ = f;
+            });
+            let job2 = egui::text::LayoutJob::simple(
+                ch.to_string(),
+                font_id.clone(),
+                egui::Color32::WHITE,
+                f32::INFINITY,
+            );
+            ctx.fonts_mut(|f| {
+                let galley = f.layout_job(job2);
+                let uv = galley.rows[0].glyphs[0].uv_rect;
+                let image = f.image();
+                let mut shown = 0;
+                for y in uv.min[1] as usize..uv.max[1] as usize {
+                    for x in uv.min[0] as usize..uv.max[0] as usize {
+                        let px = image[(x, y)];
+                        if px.a() > 0 && shown < 8 {
+                            eprintln!("  atlas px ({x},{y}) = {:?}", px);
+                            shown += 1;
+                        }
+                    }
+                }
+            });
+            assert!(colored, "emoji {ch} did not take the color-glyph path");
+            assert!(
+                channel_peak > 128,
+                "emoji {ch} rendered without color (peak {want_channel} = {channel_peak})"
+            );
         }
     }
 
