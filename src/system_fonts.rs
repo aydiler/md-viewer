@@ -766,9 +766,13 @@ fn install_emoji_fonts(definitions: &mut FontDefinitions) {
     for path in COLOR_EMOJI_FONT_PATHS {
         match std::fs::read(path) {
             Ok(bytes) => {
+                let mut data = FontData::from_owned(bytes);
+                // Restrict to default-emoji characters so the color face
+                // never claims general symbols (▶ ⚠ ✔ …) used by the UI.
+                data.emoji_only = true;
                 definitions
                     .font_data
-                    .insert("ColorEmoji".to_owned(), FontData::from_owned(bytes).into());
+                    .insert("ColorEmoji".to_owned(), data.into());
                 for family in [
                     FontFamily::Proportional,
                     FontFamily::Monospace,
@@ -1307,6 +1311,33 @@ mod tests {
             assert!(
                 channel_peak > 128,
                 "emoji {ch} rendered without color (peak {want_channel} = {channel_peak})"
+            );
+        }
+    }
+
+    #[test]
+    fn color_emoji_face_never_claims_ui_symbols() {
+        let mut definitions = FontDefinitions::default();
+        install_emoji_fonts(&mut definitions);
+        definitions.font_data.retain(|k, _| k == "ColorEmoji");
+        *definitions.families.get_mut(&FontFamily::Proportional).unwrap() =
+            vec!["ColorEmoji".to_owned()];
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        ctx.run(egui::RawInput::default(), |_ctx| {});
+        let font_id = egui::FontId::proportional(16.0);
+        // Default-emoji characters resolve through the color face...
+        for ch in ['\u{1F7E2}', '\u{1F534}', '\u{26AA}', '\u{2705}'] {
+            let ok = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
+            assert!(ok, "{ch} should come from ColorEmoji");
+        }
+        // ...but general UI symbols must not, even though Noto Color Emoji
+        // maps them — they belong to regular text faces.
+        for ch in ['\u{25B6}', '\u{25BC}', '\u{26A0}', '\u{2714}', '\u{2192}', '\u{2713}'] {
+            let claimed = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
+            assert!(
+                !claimed,
+                "{ch} (UI symbol) must not be claimed by the color emoji face"
             );
         }
     }

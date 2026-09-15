@@ -183,6 +183,10 @@ pub struct FontImpl {
     /// (CBDT/CBLC, sbix, COLR fonts have no vector outlines for ab_glyph).
     raw_bytes: std::sync::Arc<[u8]>,
     font_index: u32,
+
+    /// Whether this face is restricted to default-emoji characters (see
+    /// `is_default_emoji`), so color-emoji fonts never claim general symbols.
+    emoji_only: bool,
 }
 
 trait FontExt {
@@ -207,6 +211,7 @@ impl FontImpl {
         ab_glyph_font: ab_glyph::FontArc,
         raw_bytes: std::sync::Arc<[u8]>,
         font_index: u32,
+        emoji_only: bool,
         tweak: FontTweak,
     ) -> Self {
         Self {
@@ -217,6 +222,7 @@ impl FontImpl {
             glyph_alloc_cache: Default::default(),
             raw_bytes,
             font_index,
+            emoji_only,
         }
     }
 
@@ -246,12 +252,19 @@ impl FontImpl {
             .codepoint_ids()
             .map(|(_, chr)| chr)
             .filter(|&chr| !self.ignore_character(chr))
+            .filter(move |&chr| !self.emoji_only || is_default_emoji(chr))
     }
 
     /// `\n` will result in `None`
     pub(super) fn glyph_info(&mut self, c: char) -> Option<GlyphInfo> {
         if let Some(glyph_info) = self.glyph_info_cache.get(&c) {
             return Some(*glyph_info);
+        }
+
+        // An emoji-only face (e.g. a color-emoji font) must not claim general
+        // symbols (▶ ⚠ ✔ arrows, …) that regular text faces render better.
+        if self.emoji_only && !is_default_emoji(c) {
+            return None;
         }
 
         if self.ignore_character(c) {
@@ -665,6 +678,69 @@ fn color_glyph_uv_rect(
         max: [(glyph_pos.0 + w) as u16, (glyph_pos.1 + h) as u16],
         colored: true,
     })
+}
+
+/// Whether `c` is a character with default emoji presentation
+/// (`Emoji_Presentation=Yes` in Unicode's emoji-data).
+///
+/// Emoji-capable fonts that also cover plain symbols (Noto Color Emoji maps
+/// ▶ ⚠ ✔ → among many others) must only claim these characters, or they
+/// hijack UI glyphs from regular text faces.
+///
+/// Ranges from Unicode 15.1 emoji-data.txt; the supplemental planes are
+/// covered wholesale (everything there is emoji-oriented).
+#[inline]
+pub(super) fn is_default_emoji(c: char) -> bool {
+    const BMP_RANGES: &[(u32, u32)] = &[
+        (0x231A, 0x231B),
+        (0x23E9, 0x23EC),
+        (0x23F0, 0x23F0),
+        (0x23F3, 0x23F3),
+        (0x25FD, 0x25FE),
+        (0x2614, 0x2615),
+        (0x2648, 0x2653),
+        (0x267F, 0x267F),
+        (0x2693, 0x2693),
+        (0x26A1, 0x26A1),
+        (0x26AA, 0x26AB),
+        (0x26BD, 0x26BE),
+        (0x26C4, 0x26C5),
+        (0x26CE, 0x26CE),
+        (0x26D4, 0x26D4),
+        (0x26EA, 0x26EA),
+        (0x26F2, 0x26F3),
+        (0x26F5, 0x26F5),
+        (0x26FA, 0x26FA),
+        (0x26FD, 0x26FD),
+        (0x2705, 0x2705),
+        (0x270A, 0x270B),
+        (0x2728, 0x2728),
+        (0x274C, 0x274C),
+        (0x274E, 0x274E),
+        (0x2753, 0x2755),
+        (0x2757, 0x2757),
+        (0x2795, 0x2797),
+        (0x27B0, 0x27B0),
+        (0x27BF, 0x27BF),
+        (0x2B1B, 0x2B1C),
+        (0x2B50, 0x2B50),
+        (0x2B55, 0x2B55),
+        (0x1F004, 0x1F004),
+        (0x1F0CF, 0x1F0CF),
+        (0x1F18E, 0x1F18E),
+        (0x1F191, 0x1F19A),
+        (0x1F1E6, 0x1F1FF),
+        (0x1F201, 0x1F202),
+        (0x1F21A, 0x1F21A),
+        (0x1F22F, 0x1F22F),
+        (0x1F232, 0x1F23A),
+        (0x1F250, 0x1F251),
+    ];
+    let cp = c as u32;
+    if (0x1F300..=0x1FAFF).contains(&cp) {
+        return true;
+    }
+    BMP_RANGES.iter().any(|&(lo, hi)| (lo..=hi).contains(&cp))
 }
 
 /// Code points that will always be invisible (zero width).

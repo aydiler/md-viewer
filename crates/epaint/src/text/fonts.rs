@@ -124,6 +124,13 @@ pub struct FontData {
 
     /// Extra scale and vertical tweak to apply to all text of this font.
     pub tweak: FontTweak,
+
+    /// Restrict this face to characters that are emoji by default
+    /// (`Emoji_Presentation`), so a color-emoji font can supply 🟢✅ without
+    /// claiming general symbols (▶ ⚠ ✔ arrows, …) that text faces should
+    /// render. Default: `false`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub emoji_only: bool,
 }
 
 impl FontData {
@@ -132,6 +139,7 @@ impl FontData {
             font: std::borrow::Cow::Borrowed(font),
             index: 0,
             tweak: Default::default(),
+            emoji_only: false,
         }
     }
 
@@ -140,6 +148,7 @@ impl FontData {
             font: std::borrow::Cow::Owned(font),
             index: 0,
             tweak: Default::default(),
+            emoji_only: false,
         }
     }
 
@@ -792,6 +801,7 @@ impl FontsImpl {
                 ab_glyph,
                 raw_bytes,
                 font_data.index,
+                font_data.emoji_only,
                 tweak,
             );
             let key = FontFaceKey::new();
