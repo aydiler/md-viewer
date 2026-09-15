@@ -739,6 +739,36 @@ fn install_preset_mono_font(
     true
 }
 
+/// Bundled monochrome emoji face, appended last to both family chains.
+///
+/// egui's rasterizer (ab_glyph/owned_ttf_parser) cannot render color-emoji
+/// formats (CBDT/CBLC bitmap, COLR/CPAL): a system "Noto Color Emoji" face
+/// loads but rasterizes blank. The bundled monochrome NotoEmoji has real
+/// vector outlines, so emoji appear as black-and-white glyphs instead of
+/// tofu. Appended last so it only supplies glyphs nothing else covers.
+/// (See docs/devlog/014-font-fallback.md and LESSONS.md "Color emojis not
+/// supported in egui".)
+const EMOJI_FONT_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoEmoji-Regular.ttf");
+
+fn install_emoji_font(definitions: &mut FontDefinitions) {
+    match std::fs::read(EMOJI_FONT_PATH) {
+        Ok(bytes) => {
+            definitions
+                .font_data
+                .insert("NotoEmoji".to_owned(), FontData::from_owned(bytes).into());
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Proportional) {
+                family.push("NotoEmoji".to_owned());
+            }
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
+                family.push("NotoEmoji".to_owned());
+            }
+            log::info!("Loaded bundled monochrome emoji font from {EMOJI_FONT_PATH}");
+        }
+        Err(e) => log::warn!("Emoji font {EMOJI_FONT_PATH} unavailable: {e}"),
+    }
+}
+
 pub(crate) fn setup_fonts(
     ctx: &egui::Context,
     preferred_family: Option<&str>,
@@ -782,6 +812,7 @@ pub(crate) fn setup_fonts(
             preset_mono_families,
         )
     };
+    install_emoji_font(&mut definitions);
     if installed.is_empty() {
         log::warn!("No suitable system font fallbacks found; using egui defaults.");
     } else {
@@ -1085,6 +1116,93 @@ mod tests {
         // The default preset keeps the app's own sans selection.
         assert_eq!(FontPreset::Current.body_families(), None);
         assert!(FontPreset::Current.mono_families().is_empty());
+    }
+
+    #[test]
+    fn emoji_fallback_face_resolves_for_doc_emoji() {
+        // Build the same definitions setup_fonts() would install: egui
+        // defaults + the bundled monochrome emoji face appended last.
+        let mut definitions = FontDefinitions::default();
+        install_emoji_font(&mut definitions);
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        // Fonts aren't built until the first Context::run() pass.
+        ctx.run(egui::RawInput::default(), |_ctx| {});
+        let font_id = egui::FontId::proportional(16.0);
+        // Debug: font_data keys and family list as egui sees them.
+        ctx.fonts(|f| {
+            let defs = f.definitions();
+            eprintln!("font_data keys: {:?}", defs.font_data.keys().collect::<Vec<_>>());
+            eprintln!(
+                "Proportional chain: {:?}",
+                defs.families.get(&FontFamily::Proportional)
+            );
+            eprintln!("Monospace chain: {:?}", defs.families.get(&FontFamily::Monospace));
+        });
+        // Isolate which individual face supplies each glyph: one font per chain.
+        let defaults = FontDefinitions::default();
+        let mut with_ours = FontDefinitions::default();
+        install_emoji_font(&mut with_ours);
+        for (label, defs_source) in [
+            ("builtin:NotoEmoji-Regular", &defaults),
+            ("bundled:NotoEmoji", &with_ours),
+        ] {
+            let name = label.split(':').nth(1).unwrap();
+            let mut single = defs_source.clone();
+            single.font_data.retain(|k, _| k == name);
+            *single.families.get_mut(&FontFamily::Proportional).unwrap() = vec![name.to_owned()];
+            let ctx2 = egui::Context::default();
+            ctx2.set_fonts(single);
+            ctx2.run(egui::RawInput::default(), |_ctx| {});
+            let font_id = egui::FontId::proportional(16.0);
+            let results: Vec<bool> = ctx2.fonts_mut(|f| {
+                ['\u{1F7E2}', '\u{1F534}', '\u{1F535}', '\u{26AA}', '\u{2705}']
+                    .iter()
+                    .map(|&ch| f.has_glyph(&font_id, ch))
+                    .collect()
+            });
+            eprintln!("face {label}: 🟢🔴🔵⚪✅ = {results:?}");
+        }
+
+        for ch in ['\u{1F7E2}', '\u{1F534}', '\u{1F535}', '\u{26AA}', '\u{2705}'] {
+            let resolved = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
+            assert!(
+                resolved,
+                "emoji {ch} should resolve through the fallback chain to NotoEmoji"
+            );
+        }
+
+        // End-to-end ink check: rasterize each emoji and require actual
+        // coverage in the atlas, so a cmap hit with an empty outline fails.
+        for ch in ['\u{1F7E2}', '\u{1F534}', '\u{2705}'] {
+            let job = egui::text::LayoutJob::simple(
+                ch.to_string(),
+                font_id.clone(),
+                egui::Color32::WHITE,
+                f32::INFINITY,
+            );
+            let ink = ctx.fonts_mut(|f| {
+                let galley = f.layout_job(job);
+                let glyph = &galley.rows[0].glyphs[0];
+                let uv = glyph.uv_rect;
+                let image = f.image(); // full atlas
+                let [w, h] = image.size;
+                let (x0, y0) = (uv.min[0] as usize, uv.min[1] as usize);
+                let (x1, y1) = (uv.max[0] as usize, uv.max[1] as usize);
+                let mut count = 0usize;
+                for y in y0.min(h)..y1.min(h) {
+                    for x in x0.min(w)..x1.min(w) {
+                        if image[(x, y)].a() > 16 {
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            });
+            eprintln!("ink pixels for {ch:?}: {ink}");
+            assert!(ink > 20, "emoji {ch} rasterized blank (only {ink} ink pixels)");
+        }
     }
 
     #[test]
