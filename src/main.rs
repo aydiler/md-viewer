@@ -148,6 +148,79 @@ fn paint_sidebar_resize_affordance(
     );
 }
 
+/// Draw a small vector "document" icon (page with folded corner) for file
+/// rows in the explorer. Pure painter drawing — no font or emoji involved.
+fn paint_file_icon(ui: &mut egui::Ui, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let stroke = egui::Stroke::new(1.2, ui.visuals().weak_text_color());
+    let body = egui::Rect::from_min_max(
+        rect.left_top() + egui::vec2(2.0, 1.0),
+        rect.right_bottom() - egui::vec2(2.0, 1.0),
+    );
+    let fold = body.width() * 0.3;
+    // Page outline: top edge stops at the fold, then a diagonal to the right.
+    painter.line_segment(
+        [
+            egui::pos2(body.right_top().x - fold, body.top()),
+            body.left_top(),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(body.right_top().x - fold, body.top()),
+            body.right_top() + egui::vec2(0.0, fold),
+        ],
+        stroke,
+    );
+    painter.line_segment([body.left_top(), body.left_bottom()], stroke);
+    painter.line_segment([body.left_bottom(), body.right_bottom()], stroke);
+    painter.line_segment([body.right_bottom(), body.right_top() + egui::vec2(0.0, fold)], stroke);
+}
+
+/// Draw a small vector folder icon for directory rows in the explorer.
+/// An expanded folder is drawn slightly open (raised tab, lighter fill).
+fn paint_folder_icon(ui: &mut egui::Ui, size: f32, expanded: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    let stroke = egui::Stroke::new(1.2, visuals.weak_text_color());
+    let fill = if expanded {
+        visuals.extreme_bg_color
+    } else {
+        visuals.faint_bg_color
+    };
+    let tab_w = rect.width() * 0.5;
+    let tab_h = rect.height() * 0.25;
+    let body_top = rect.top() + tab_h;
+    // Tab (only spans the left half, like a real folder).
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            rect.left_top() + egui::vec2(1.0, 1.0),
+            egui::pos2(rect.left() + tab_w, body_top + 1.0),
+        ),
+        2.0,
+        fill,
+    );
+    painter.rect_stroke(
+        egui::Rect::from_min_max(
+            rect.left_top() + egui::vec2(1.0, 1.0),
+            egui::pos2(rect.left() + tab_w, body_top + 1.0),
+        ),
+        2.0,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
+    // Body.
+    let body = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 1.0, body_top),
+        rect.right_bottom() - egui::vec2(1.0, 1.0),
+    );
+    painter.rect_filled(body, 2.0, fill);
+    painter.rect_stroke(body, 2.0, stroke, egui::StrokeKind::Middle);
+}
+
 /// Check whether the desktop portal exposes the interface used by rfd's
 /// Linux folder picker. Calling rfd without this interface fails like a user
 /// cancellation, so checking first lets us distinguish that case and use a
@@ -4151,8 +4224,8 @@ impl MarkdownApp {
                 let row_response = ui.horizontal(|ui| {
                     ui.add_space(indent as f32);
 
-                    // File icon (monochrome glyph — no emoji in app chrome)
-                    ui.label(egui::RichText::new("▪").weak());
+                    // File icon (vector-drawn — no emoji in app chrome)
+                    paint_file_icon(ui, 14.0);
 
                     // Highlight if file is open in a tab
                     let is_open = open_paths.contains(path);
@@ -4244,8 +4317,8 @@ impl MarkdownApp {
                         should_toggle = true;
                     }
 
-                    // No decorative folder emoji — the expand button next to
-                    // the name already communicates folder state.
+                    // Vector folder icon; expanded state shows in the fill.
+                    paint_folder_icon(ui, 14.0, is_expanded);
 
                     let response = ui.add(
                         egui::Label::new(name.as_str())
