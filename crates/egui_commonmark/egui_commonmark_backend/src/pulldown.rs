@@ -34,6 +34,15 @@ pub struct ScrollableCache {
     /// measured `page_size` — the document extent came out wrong and blocks
     /// such as tables rendered narrower and horizontally offset.
     pub content_geometry: Option<ContentGeometry>,
+    /// Extent floor in content coordinates: the deepest painted bottom (plus
+    /// trailing breathing room) observed from a bottom-reaching slice that was
+    /// NOT overshooting. Async-grown content (math textures) and the slice
+    /// pass's relayout both can exceed the bootstrap-measured `page_size`;
+    /// this floor lets the reported extent follow the painted reality without
+    /// ratcheting — overshoot frames (viewport past the reported extent) are
+    /// excluded, because their paint runs past the document and would grow the
+    /// extent with every over-eager scroll. Reset wherever `page_size` is.
+    pub observed_extent_bottom: f32,
 }
 
 /// Layout geometry of the content column, captured at bootstrap.

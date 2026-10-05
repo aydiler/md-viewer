@@ -2341,6 +2341,7 @@ struct MarkdownApp {
     // Last zoom level handed to set_zoom_factor; skips redundant writes
     last_applied_zoom_level: Option<f32>,
     last_window_title: String,
+    selftest_frames: usize,
     title_dirty: bool,
     /// Cached set of open tab paths for file explorer highlighting (avoids per-frame syscalls)
     open_tab_paths: HashSet<PathBuf>,
@@ -2368,7 +2369,15 @@ impl MarkdownApp {
         let persisted: PersistedState = cc
             .storage
             .and_then(|s| eframe::get_value(s, APP_KEY))
-            .unwrap_or_default();
+            .unwrap_or_else(|| PersistedState {
+                // First-run reading defaults: light paper theme, serif body
+                // at a generous size. Only fires when nothing is persisted
+                // yet; in-app changes are respected afterwards.
+                dark_mode: Some(false),
+                selected_font_family: Some("Iowan Old Style".to_owned()),
+                text_size_class: Some(TextSizeClass::Large),
+                ..Default::default()
+            });
         let selected_font_family = persisted.selected_font_family;
         let font_preset = persisted.font_preset.unwrap_or_default();
         let text_size_class = persisted.text_size_class.unwrap_or_default();
@@ -2598,6 +2607,7 @@ impl MarkdownApp {
             last_applied_dark_mode: None,
             last_applied_zoom_level: None,
             last_window_title: String::new(),
+            selftest_frames: 0,
             title_dirty: true,
             open_tab_paths: HashSet::new(),
             lightbox: None,
@@ -5233,11 +5243,24 @@ impl eframe::App for MarkdownApp {
                 v.override_text_color = Some(egui::Color32::from_rgb(0xE0, 0xE0, 0xE0));
                 v
             } else {
+                // Instapaper "Paper" (sepia) palette:
+                // bg #f8f2e3, raised #f0eadb, border #b8b2a3, ink #3b3832,
+                // link #005f99, selection #e8e2d3.
                 let mut v = egui::Visuals::light();
-                v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-                v.window_fill = egui::Color32::from_rgb(0xF8, 0xF8, 0xF8);
-                v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
-                v.override_text_color = Some(egui::Color32::from_rgb(0x33, 0x33, 0x33));
+                v.panel_fill = egui::Color32::from_rgb(0xF8, 0xF2, 0xE3);
+                v.window_fill = egui::Color32::from_rgb(0xF8, 0xF2, 0xE3);
+                v.extreme_bg_color = egui::Color32::from_rgb(0xF0, 0xEA, 0xDB);
+                v.faint_bg_color = egui::Color32::from_rgb(0xF0, 0xEA, 0xDB);
+                v.override_text_color = Some(egui::Color32::from_rgb(0x3B, 0x38, 0x32));
+                v.hyperlink_color = egui::Color32::from_rgb(0x00, 0x5F, 0x99);
+                v.selection.bg_fill = egui::Color32::from_rgb(0xE8, 0xE2, 0xD3);
+                v.selection.stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0xB8, 0xB2, 0xA3));
+                v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0xF0, 0xEA, 0xDB);
+                v.widgets.noninteractive.weak_bg_fill =
+                    egui::Color32::from_rgb(0xF0, 0xEA, 0xDB);
+                v.widgets.noninteractive.bg_stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0xB8, 0xB2, 0xA3));
                 v
             };
             if let Some(color) = self.highlight_color {
@@ -6228,6 +6251,60 @@ impl eframe::App for MarkdownApp {
         // Capture AccessKit output for MCP bridge
         #[cfg(feature = "mcp")]
         self.mcp_bridge.capture_output(ctx);
+
+        // Live-app self test harness. `MDV_SELFTEST=1` runs the real app —
+        // real fonts, zoom, side panels, async math — for a fixed number of
+        // frames, then dumps the scroll geometry of the active tab to stderr
+        // and exits without saving state. `MDV_SELFTEST_SCROLL=<pts>` injects
+        // a pending scroll offset at frame 30 so the dump proves the offset
+        // can reach the true document bottom (and reveals any clamp that
+        // snaps it back short). `MDV_SELFTEST_SCROLLWALK=<from>:<to>:<steps>`
+        // instead walks the pending offset frame by frame from frame 30,
+        // simulating a wheel scroll across the given range — this exposes
+        // extent behavior that only appears while the viewport moves.
+        if std::env::var("MDV_SELFTEST").is_ok() {
+            self.selftest_frames += 1;
+            let frame = self.selftest_frames;
+            if let Ok(target) = std::env::var("MDV_SELFTEST_SCROLL") {
+                if frame == 30 {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.pending_scroll_offset = Some(target.parse().unwrap_or(3000.0));
+                    }
+                }
+            }
+            if let Ok(walk) = std::env::var("MDV_SELFTEST_SCROLLWALK") {
+                if frame >= 30 && frame < 120 {
+                    let parts: Vec<f32> = walk
+                        .split(':')
+                        .filter_map(|p| p.parse().ok())
+                        .collect();
+                    if parts.len() == 3 {
+                        let (from, to, steps) = (parts[0], parts[1], parts[2].max(1.0));
+                        let t = ((frame - 30) as f32 / steps).min(1.0);
+                        let offset = from + (to - from) * t;
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.pending_scroll_offset = Some(offset);
+                        }
+                    }
+                }
+            }
+            if frame >= 120 {
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    eprintln!(
+                        "SELFTEST f={} content={:.1} viewport={:.1} offset={:.1} max_by_content={:.1}",
+                        frame,
+                        tab.last_content_height,
+                        tab.last_viewport_height,
+                        tab.scroll_offset,
+                        (tab.last_content_height - tab.last_viewport_height).max(0.0)
+                    );
+                }
+            }
+            if frame >= 140 {
+                std::process::exit(0);
+            }
+            ctx.request_repaint();
+        }
     }
 }
 
