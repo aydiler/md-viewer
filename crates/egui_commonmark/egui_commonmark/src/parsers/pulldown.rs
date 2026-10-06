@@ -949,6 +949,22 @@ const TABLE_OVERFLOW_FRACTION: f32 = 0.30;
 const TABLE_OVERFLOW_KNEE: f32 = 0.90;
 const MAX_TABLE_MEASURED_CELLS: usize = 4_096;
 
+/// Trailing breathing room below the last block, in body-line heights. Added
+/// after the event loop so the scrollable extent ends with padding instead of
+/// the final line sitting flush against the pane bottom, and added again when
+/// a bottom slice raises the extent floor, so the measured and learned
+/// extents stay consistent. Scales with the body font to stay proportional
+/// at every text size.
+const TRAILING_PADDING_BODY_LINES: f32 = 2.0;
+
+/// Tolerance (in points) when deciding whether a slice reached the measured
+/// document bottom: the viewport's bottom edge may exceed `page_size` by up
+/// to this much and still count as non-overshoot. Without it, float drift
+/// between the measured extent and the viewport edge would classify a legit
+/// bottom paint as an overshoot and the extent floor would never learn from
+/// it — leaving the true document tail unreachable.
+const OVERSHOOT_EPSILON: f32 = 1.0;
+
 fn table_floors_overflow(minimum_total: f32, visible_column_budget: f32) -> bool {
     minimum_total > visible_column_budget + 0.01
 }
@@ -1975,12 +1991,10 @@ impl CommonMarkViewerInternal {
                 }
             }
 
-            // Breathing room below the last block: the scrollable extent
-            // ends with padding instead of the final line sitting flush
-            // against the pane bottom. Scales with the body font so it
-            // stays proportional at every text size.
+            // Trailing breathing room below the last block: see
+            // TRAILING_PADDING_BODY_LINES.
             let body_height = ui.text_style_height(&TextStyle::Body);
-            ui.add_space(2.0 * body_height);
+            ui.add_space(TRAILING_PADDING_BODY_LINES * body_height);
 
             if let Some(source_id) = split_points_id {
                 let content_height = (ui.next_widget_position().y - content_origin_y).max(0.0);
@@ -2331,8 +2345,9 @@ impl CommonMarkViewerInternal {
                 let sc = scroll_cache(cache, &source_id);
                 page_size_y.max(sc.observed_extent_bottom)
             };
-            if slice_reached_end && viewport.max.y <= page_size_y + 1.0 {
-                let padding = 2.0 * ui.text_style_height(&TextStyle::Body);
+            if slice_reached_end && viewport.max.y <= page_size_y + OVERSHOOT_EPSILON {
+                let padding =
+                    TRAILING_PADDING_BODY_LINES * ui.text_style_height(&TextStyle::Body);
                 let content_bottom = slice_re.response.rect.bottom() - child_origin;
                 let floor = content_bottom + padding;
                 if floor > reported_extent {

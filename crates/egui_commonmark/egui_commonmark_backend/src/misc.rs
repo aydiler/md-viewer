@@ -1945,7 +1945,6 @@ fn render_math_with_layout(
                 // lift = text_descent − image_descent. `image_descent` is exact
                 // per formula; `text_descent` is the body-font descent below the
                 // line box, a shape-independent fraction of line height.
-                let img = egui::Image::new(egui::ImageSource::Texture(sized_texture));
                 // Compute the text descent EXACTLY from egui's own metrics
                 // instead of a tuned constant. epaint places a glyph's baseline
                 // at `font_ascent` below the row top and adds the line-height

@@ -101,10 +101,17 @@ fn render_geometry_inner(
     let mut painted = Vec::new();
 
     // Two passes let egui settle font/layout caches before geometry is asserted.
+    // The pass gets a real screen rect: without one egui falls back to a
+    // 10000-wide pane, and the centered reading column would center within
+    // that instead of the width these assertions reason about.
+    let screen =
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(ui_width, 3600.0));
     for pass in 0..2 {
-        ctx.begin_pass(Default::default());
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        });
         egui::CentralPanel::default().show(&ctx, |ui| {
-            ui.set_width(ui_width);
             let response = CommonMarkViewer::new()
                 .default_width(Some(content_width as usize))
                 .table_max_width(Some(content_width as usize))
@@ -178,8 +185,14 @@ fn markdown_table_uses_height_aware_column_widths() {
         body.height() < 145.0,
         "height-aware layout was not applied: {body:?}"
     );
+    // The unwrapped prose is far wider than the column, so a budget that
+    // reached the description column wraps it around 279pt here (embedded
+    // fonts make that deterministic); a natural-width column would clip
+    // near ~150. The pane is the real screen rect (see render_geometry_inner),
+    // so the budget is a few points under the value the old fallback-pane
+    // env produced.
     assert!(
-        alpha.clip_rect.width() > 280.0,
+        alpha.clip_rect.width() > 275.0,
         "description column did not receive the spare width: {alpha:?}"
     );
 }
@@ -494,25 +507,29 @@ fn frontmatter_block_stays_within_the_content_column() {
     // 400, not 700: at 700 the value nearly fits on one line, so an unbounded
     // column barely overshoots and the assertion passes on a broken build.
     const CONTENT: f32 = 400.0;
-    let (_, _, painted) = render_geometry_frontmatter(FRONTMATTER_FIXTURE, 1400.0, CONTENT);
+    const UI_WIDTH: f32 = 1400.0;
+    let (_, _, painted) = render_geometry_frontmatter(FRONTMATTER_FIXTURE, UI_WIDTH, CONTENT);
 
     assert!(
         painted.iter().any(|t| t.text.contains("abstract")),
         "frontmatter table was not rendered; the test would prove nothing"
     );
+    // The reading column is centered in the pane, so containment is measured
+    // against the column's own right edge, not the pane's left edge.
+    let column_right = (UI_WIDTH + CONTENT) / 2.0;
     let after = painted
         .iter()
         .find(|t| t.text.contains("AFTER_FRONTMATTER"))
         .expect("the block after the frontmatter was not painted");
     assert!(
-        after.rect.right() <= CONTENT + 1.0,
-        "content after the frontmatter exceeds the content column: {} > {CONTENT}",
+        after.rect.right() <= column_right + 1.0,
+        "content after the frontmatter exceeds the content column: {} > {column_right}",
         after.rect.right()
     );
     for t in painted.iter().filter(|t| t.text.contains("deliberately")) {
         assert!(
-            t.rect.right() <= CONTENT + 1.0,
-            "frontmatter value exceeds the content column: {} > {CONTENT}",
+            t.rect.right() <= column_right + 1.0,
+            "frontmatter value exceeds the content column: {} > {column_right}",
             t.rect.right()
         );
     }

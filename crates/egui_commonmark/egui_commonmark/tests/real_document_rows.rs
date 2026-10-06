@@ -1,6 +1,7 @@
 //! Renders a real-world document and reports every painted row wider than
 //! the reading column, with its text prefix — used to diagnose right-edge
-//! clipping reported on a long project README.
+//! clipping reported on a long project README. Skipped unless the
+//! `MDV_REAL_DOC` environment variable points at a readable document.
 
 use std::sync::Arc;
 
@@ -34,8 +35,10 @@ const COLUMN_WIDTH: usize = 600;
 
 #[test]
 fn real_document_rows_stay_within_column() {
-    let path = std::env::var("MDV_REAL_DOC")
-        .unwrap_or_else(|_| "/Users/phillipchaffee/git/GLM-5/experiments/proxy-run/README.md".into());
+    let Ok(path) = std::env::var("MDV_REAL_DOC") else {
+        eprintln!("skip: set MDV_REAL_DOC=<path> to a markdown document to run");
+        return;
+    };
     let Ok(doc) = std::fs::read_to_string(&path) else {
         eprintln!("skip: cannot read {path}");
         return;
@@ -105,22 +108,6 @@ fn real_document_rows_stay_within_column() {
              max label left={max_left:.1}",
             texts.len()
         );
-        if frame == 4 {
-            for t in &texts {
-                if t.text.starts_with("vLLM >= 0.11")
-                    || t.text.starts_with("--disable-log-requests")
-                    || t.text.starts_with("; newer vLLM")
-                    || t.text.starts_with("— build the regen")
-                {
-                    eprintln!(
-                        "SEGMENT x={:.1} w={:.1} text={:?}",
-                        t.pos.x,
-                        t.galley.rect.width(),
-                        t.text.chars().take(40).collect::<String>()
-                    );
-                }
-            }
-        }
     }
 
     eprintln!(

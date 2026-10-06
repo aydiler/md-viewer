@@ -1239,11 +1239,16 @@ mod tests {
         // defaults + the bundled monochrome emoji face appended last.
         let mut definitions = FontDefinitions::default();
         install_emoji_fonts(&mut definitions);
+        // The color-glyph check needs the system color emoji font, which only
+        // the Linux paths in COLOR_EMOJI_FONT_PATHS provide; where it is
+        // absent (e.g. macOS) the fallback asserts above still ran, and the
+        // color path is exercised wherever the font exists.
+        let color_face_installed = definitions.font_data.contains_key("ColorEmoji");
 
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
         // Fonts aren't built until the first Context::run() pass.
-        ctx.run(egui::RawInput::default(), |_ctx| {});
+        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
         let font_id = egui::FontId::proportional(16.0);
         // Debug: font_data keys and family list as egui sees them.
         ctx.fonts(|f| {
@@ -1275,7 +1280,7 @@ mod tests {
             *single.families.get_mut(&FontFamily::Proportional).unwrap() = vec![name.to_owned()];
             let ctx2 = egui::Context::default();
             ctx2.set_fonts(single);
-            ctx2.run(egui::RawInput::default(), |_ctx| {});
+            let _ = ctx2.run(egui::RawInput::default(), |_ctx| {});
             let font_id = egui::FontId::proportional(16.0);
             let results: Vec<bool> = ctx2.fonts_mut(|f| {
                 [
@@ -1343,6 +1348,10 @@ mod tests {
         // Color check (requires vendored epaint with the swash patch): each
         // doc emoji must resolve to the ColorEmoji face and produce genuinely
         // colored atlas pixels — saturated red/green RGB channels.
+        if !color_face_installed {
+            eprintln!("skip color-glyph check: no system color emoji font on this platform");
+            return;
+        }
         for (ch, want_channel) in [('\u{1F7E2}', "green"), ('\u{1F534}', "red")] {
             let job = egui::text::LayoutJob::simple(
                 ch.to_string(),
@@ -1418,6 +1427,10 @@ mod tests {
     fn color_emoji_face_never_claims_ui_symbols() {
         let mut definitions = FontDefinitions::default();
         install_emoji_fonts(&mut definitions);
+        if !definitions.font_data.contains_key("ColorEmoji") {
+            eprintln!("skip: this test needs the system color emoji font (Linux Noto paths)");
+            return;
+        }
         definitions.font_data.retain(|k, _| k == "ColorEmoji");
         *definitions
             .families
@@ -1425,7 +1438,7 @@ mod tests {
             .unwrap() = vec!["ColorEmoji".to_owned()];
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
-        ctx.run(egui::RawInput::default(), |_ctx| {});
+        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
         let font_id = egui::FontId::proportional(16.0);
         // Default-emoji characters resolve through the color face...
         for ch in ['\u{1F7E2}', '\u{1F534}', '\u{26AA}', '\u{2705}'] {
