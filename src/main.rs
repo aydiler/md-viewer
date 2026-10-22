@@ -2088,6 +2088,10 @@ fn run_native_once(args: &Args) -> eframe::Result<()> {
             // StartupWMClass in the distributed .desktop file.
             .with_app_id("md-viewer")
             .with_drag_and_drop(true),
+        vsync: !wayland_session(
+            std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+            std::env::var_os("WAYLAND_SOCKET").as_deref(),
+        ),
         ..Default::default()
     };
 
@@ -2137,6 +2141,17 @@ fn fall_back_to_x11_if_wayland_socket_is_dead() {
 
 #[cfg(not(unix))]
 fn fall_back_to_x11_if_wayland_socket_is_dead() {}
+
+/// Driver vsync blocks the swap until the compositor's frame callback, which
+/// never arrives for a window on a hidden workspace, so the UI thread stops
+/// answering pings. On Wayland the compositor prevents tearing and winit
+/// already paces redraws on frame callbacks without blocking.
+fn wayland_session(display: Option<&OsStr>, socket: Option<&OsStr>) -> bool {
+    cfg!(all(unix, not(target_os = "macos")))
+        && [display, socket]
+            .into_iter()
+            .any(|value| value.is_some_and(|v| !v.is_empty()))
+}
 
 /// Resolve the filesystem path of the Wayland socket from `WAYLAND_DISPLAY`
 /// and `XDG_RUNTIME_DIR`, mirroring libwayland's lookup rules: an absolute
@@ -6116,6 +6131,22 @@ impl eframe::App for MarkdownApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vsync_is_disabled_only_for_wayland_sessions() {
+        let wl = Some(OsStr::new("wayland-1"));
+        let empty = Some(OsStr::new(""));
+        assert_eq!(
+            wayland_session(wl, None),
+            cfg!(all(unix, not(target_os = "macos")))
+        );
+        assert_eq!(
+            wayland_session(None, Some(OsStr::new("5"))),
+            cfg!(all(unix, not(target_os = "macos")))
+        );
+        assert!(!wayland_session(None, None));
+        assert!(!wayland_session(empty, empty));
+    }
 
     /// In-memory stand-in for eframe's key/value storage so persistence
     /// roundtrips run through the same RON encode/decode path as the app.

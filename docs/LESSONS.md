@@ -1740,3 +1740,10 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Fix:** `scan_pickable_font_families()` keeps a name only if it is the family's canonical name (`collection.family_name(family_id(name)) == name` collapses each alias group to one entry) AND `select_from_families` finds a normal-style face covering `"Aa"` — the identical gate `install_regular_fonts` applies, so anything listed is guaranteed to take effect. The probe costs ~0.5 s (one face load per rejected candidate), so it runs on a background thread and the dialog shows "System Default" + a scanning note until it lands.
 **Gotchas:** `family_names()` order is HashMap-arbitrary — sort case-insensitively yourself. `family_name(id)` returns the first-seen name for the id, which is the canonical one. Listing a family whose selection would fail re-creates the silent-fallback bug; always mirror the installer's gate.
 **Files:** `src/system_fonts.rs` (`scan_pickable_font_families`, `pickable_family_names`), `src/main.rs` (`pending_font_family_scan` poll), `docs/devlog/068-fonts-one-menu.md`
+
+### Driver vsync on Wayland freezes a hidden window
+**Context:** Hyprland showed "Application Not Responding" for md-viewer on a non-visible workspace whenever an open file changed.
+**Root cause:** With swap interval 1, Mesa's `eglSwapBuffers` blocks until the compositor's frame callback. Hyprland sends none to hidden workspaces, so the reload's repaint parked the UI thread in `wl_display_dispatch_queue` and pings went unanswered.
+**Fix:** `NativeOptions::vsync = false` on Wayland. The compositor already prevents tearing and winit paces `RedrawRequested` on frame callbacks without blocking. Keep vsync on X11.
+**Testing gotcha:** confirm the test window is really on a hidden workspace (`hyprctl clients -j`); this Hyprland uses Lua dispatch syntax (`hl.dsp.window.move({ workspace = "special:x", follow = false })`) and rejects the legacy form silently enough to fake a pass.
+**Files:** `src/main.rs` (`wayland_session`, `run_native_once`), `docs/devlog/069-wayland-hidden-vsync-hang.md`
