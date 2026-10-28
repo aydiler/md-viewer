@@ -2406,7 +2406,7 @@ impl MarkdownApp {
             .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
-        let full_width_content = persisted.full_width_content.unwrap_or(false);
+        let full_width_content = persisted.full_width_content.unwrap_or(true);
         let math_scale = persisted.math_scale.unwrap_or(1.0).clamp(1.0, 2.0);
         let highlight_color = persisted
             .highlight_color
@@ -5284,6 +5284,7 @@ impl eframe::App for MarkdownApp {
         let mut toggle_dark = false;
         let mut toggle_outline = false;
         let mut toggle_explorer = false;
+        let mut toggle_full_width = false;
         let mut quit_app = false;
         let mut zoom_factor_request: Option<f32> = None;
         let mut zoom_reset = false;
@@ -5347,6 +5348,10 @@ impl eframe::App for MarkdownApp {
                 // Ctrl+Shift+E: Toggle file explorer
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
                     toggle_explorer = true;
+                }
+                // Ctrl+Shift+W: Toggle full width
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W) {
+                    toggle_full_width = true;
                 }
                 // Ctrl+W: Close current tab
                 if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
@@ -5482,6 +5487,9 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_explorer {
             self.show_explorer = !self.show_explorer;
+        }
+        if toggle_full_width {
+            self.full_width_content = !self.full_width_content;
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -5734,9 +5742,9 @@ impl eframe::App for MarkdownApp {
                     }
 
                     let full_width_text = if self.full_width_content {
-                        "✓ Full Width"
+                        "✓ Full Width (Ctrl+Shift+W)"
                     } else {
-                        "Full Width"
+                        "Full Width (Ctrl+Shift+W)"
                     };
                     let full_width_btn = ui.add(egui::Button::new(full_width_text));
                     #[cfg(feature = "mcp")]

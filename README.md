@@ -117,6 +117,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+D | Toggle dark/light mode |
+| Ctrl+Shift+W | Toggle full width / reading column |
 | Ctrl+Shift+E | Toggle file explorer |
 | Ctrl+Shift+O | Toggle outline sidebar |
 | Ctrl++ / Ctrl+= | Zoom in |

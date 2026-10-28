@@ -650,7 +650,15 @@ fn fit_column_widths(desired: &[f32], available: f32, minimums: &[f32]) -> Vec<f
     let available = available as f64;
     let desired_total = desired.iter().sum::<f64>();
     if desired_total <= available {
-        return desired.into_iter().map(|width| width as f32).collect();
+        if desired_total > 0.0 {
+            let scale = available / desired_total;
+            return desired
+                .into_iter()
+                .map(|width| (width * scale) as f32)
+                .collect();
+        }
+        let per_col = (available / desired.len() as f64) as f32;
+        return vec![per_col; desired.len()];
     }
     let minimum_total = minimums.iter().sum::<f64>();
     if available <= minimum_total {
@@ -2414,16 +2422,20 @@ impl CommonMarkViewerInternal {
                 - table_frame.total_margin().sum().x
                 - table_frame.stroke.width * 2.0)
                 .max(0.0);
-            // Column widths persist across pane-width changes: a sidebar drag
-            // must not disturb the user's layout. TableBuilder keeps its own
-            // state and the outer horizontal scroller absorbs any overflow,
-            // so measure reserved heights with the widths that will actually
-            // render — last frame's — and fall back to the fresh proposal on
-            // first render (or after a genuine layout change, which resets
-            // below).
+            let last_bound = ui.data(|data| data.get_temp::<f32>(id.with("_last_table_bound")));
+            let bound_changed = last_bound.map_or(false, |last| (last - table_bound).abs() > 1.0);
+            ui.data_mut(|data| data.insert_temp(id.with("_last_table_bound"), table_bound));
+
+            // Column widths persist across stable panes, but reflow and scale
+            // when the display or pane width changes (window resize, full width toggle,
+            // or sidebar adjustments).
             let last_widths = ui
                 .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")));
-            let initial_widths = last_widths.clone().unwrap_or(initial_widths);
+            let initial_widths = if bound_changed {
+                baseline_widths.clone()
+            } else {
+                last_widths.clone().unwrap_or(initial_widths)
+            };
             // Cap separator drags at the pane edge: egui_extras grows the
             // dragged column without shrinking its neighbours, so an
             // unbounded drag pushed the columns to its right under the
@@ -2499,7 +2511,7 @@ impl CommonMarkViewerInternal {
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 table_frame.show(ui, |ui| {
-                                    let reset_column_widths = height_layout_changed;
+                                    let reset_column_widths = height_layout_changed || bound_changed;
                                     let mut builder = egui_extras::TableBuilder::new(ui)
                                         .id_salt(id.with("_wrapped"))
                                         .striped(true)
@@ -3421,15 +3433,23 @@ impl CommonMarkViewerInternal {
                     .collect()
             },
         );
-        // Column widths persist across pane-width changes (see the markdown
-        // table notes), with the same separator-drag caps.
+        // Column widths persist across stable panes, but reflow and scale
+        // when the display or pane width changes.
         let usable_bound_now = (table_bound
             - table_frame.total_margin().sum().x
             - table_frame.stroke.width * 2.0)
             .max(0.0);
+        let last_bound = ui.data(|data| data.get_temp::<f32>(id.with("_last_table_bound")));
+        let bound_changed = last_bound.map_or(false, |last| (last - table_bound).abs() > 1.0);
+        ui.data_mut(|data| data.insert_temp(id.with("_last_table_bound"), table_bound));
+
         let last_widths = ui
             .data(|data| data.get_temp::<Vec<f32>>(id.with("_column_widths")));
-        let initial_widths = last_widths.clone().unwrap_or(initial_widths);
+        let initial_widths = if bound_changed {
+            baseline_widths.clone()
+        } else {
+            last_widths.clone().unwrap_or(initial_widths)
+        };
         let column_caps = last_widths.map(|widths| {
             let total: f32 = widths.iter().sum();
             (0..initial_widths.len())
@@ -3463,7 +3483,7 @@ impl CommonMarkViewerInternal {
                     .show(ui, |ui| {
                 ui.vertical(|ui| {
                     table_frame.show(ui, |ui| {
-                        let reset_column_widths = height_layout_changed;
+                        let reset_column_widths = height_layout_changed || bound_changed;
                         let mut builder = egui_extras::TableBuilder::new(ui)
                             .id_salt(id.with("_wrapped"))
                             .striped(true)
@@ -4016,11 +4036,13 @@ mod tests {
     }
 
     #[test]
-    fn fitted_table_columns_leave_compact_tables_at_natural_width() {
-        assert_eq!(
-            fit_column_widths(&[60.0, 80.0, 120.0], 360.0, &[40.0; 3]),
-            vec![60.0, 80.0, 120.0]
-        );
+    fn fitted_table_columns_scale_proportionally_to_fill_available_width() {
+        let widths = fit_column_widths(&[60.0, 80.0, 120.0], 260.0, &[40.0; 3]);
+        assert_eq!(widths, vec![60.0, 80.0, 120.0]);
+
+        let scaled = fit_column_widths(&[60.0, 80.0, 120.0], 520.0, &[40.0; 3]);
+        assert_eq!(scaled, vec![120.0, 160.0, 240.0]);
+        assert!((scaled.iter().sum::<f32>() - 520.0).abs() < 0.1);
     }
 
     #[test]
