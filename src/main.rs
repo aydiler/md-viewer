@@ -232,29 +232,42 @@ fn paint_folder_icon(ui: &mut egui::Ui, size: f32, expanded: bool) {
 /// Linux folder picker. Calling rfd without this interface fails like a user
 /// cancellation, so checking first lets us distinguish that case and use a
 /// local fallback without opening a second dialog after a real cancellation.
+///
+/// The probe runs in-process over the session bus. It used to shell out to
+/// `gdbus`, which the snap and its core22 base do not ship, so the probe
+/// always failed there and fell through to a Tkinter picker that strict
+/// confinement cannot run either (#206).
 #[cfg(target_os = "linux")]
 fn portal_file_chooser_available() -> bool {
-    Command::new("gdbus")
-        .args([
-            "introspect",
-            "--session",
-            "--dest",
-            "org.freedesktop.portal.Desktop",
-            "--object-path",
-            "/org/freedesktop/portal/desktop",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|output| {
-            output.status.success() && portal_introspection_has_file_chooser(&output.stdout)
-        })
-        .unwrap_or(false)
+    match portal_file_chooser_version() {
+        Ok(version) => {
+            log::debug!("XDG Desktop Portal FileChooser available (version {version})");
+            true
+        }
+        Err(error) => {
+            log::info!("XDG Desktop Portal FileChooser probe failed: {error}");
+            false
+        }
+    }
 }
 
+/// Read `org.freedesktop.portal.FileChooser`'s `version` property. Succeeds
+/// only if the portal service exists *and* implements the FileChooser
+/// interface; D-Bus activation starts the portal if it is not yet running.
 #[cfg(target_os = "linux")]
-fn portal_introspection_has_file_chooser(stdout: &[u8]) -> bool {
-    String::from_utf8_lossy(stdout).contains("org.freedesktop.portal.FileChooser")
+fn portal_file_chooser_version() -> zbus::Result<u32> {
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let reply = connection.call_method(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &("org.freedesktop.portal.FileChooser", "version"),
+    )?;
+    let value: zbus::zvariant::OwnedValue = reply.body().deserialize()?;
+    u32::try_from(value).map_err(zbus::Error::from)
 }
 
 #[cfg(target_os = "linux")]
@@ -6350,16 +6363,6 @@ mod tests {
     #[test]
     fn full_width_tables_use_the_available_content_width() {
         assert_eq!(content_width_limit(true, 900.0), 900);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn portal_introspection_detects_file_chooser_interface() {
-        let output = br#"interface org.freedesktop.portal.FileChooser {"#;
-        assert!(portal_introspection_has_file_chooser(output));
-        assert!(!portal_introspection_has_file_chooser(
-            b"interface org.freedesktop.portal.OpenURI {"
-        ));
     }
 
     #[cfg(target_os = "linux")]
