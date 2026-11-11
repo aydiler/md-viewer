@@ -354,6 +354,13 @@ let target_path = target_path.canonicalize()?;  // Resolves ../
 ```
 **Files:** `src/main.rs`
 
+### `env!("CARGO_MANIFEST_DIR")` in a runtime path is the build machine's path
+**Context:** #204 bundled a monochrome emoji font and loaded it with `std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoEmoji-Regular.ttf"))`.
+**Problem:** `env!` is expanded at compile time, so the string is wherever the checkout sat during the build: a CI runner directory for the snap, the tarball and `md-viewer-bin`, and a cargo-registry directory for `cargo install`. On every user's machine the read failed, and the only symptom was a `warn!`. It passed every local test because the path exists on the machine that built it.
+**Fix:** embed the asset with `include_bytes!("../assets/…")` and load it with `FontData::from_static`. Confirm the asset is in `cargo package --list`, or crates.io builds fail to compile. Embedding a font makes the binary a redistributor, so its license text goes into `THIRD_PARTY_NOTICES` (which ships in every channel), not only next to the asset.
+**Testing:** a test that reads the asset passes on the build machine whether the code is right or wrong. Prove the guard by mutating the loader to read a path that does not exist (what users see) and watching the test go red.
+**Files:** `src/system_fonts.rs` (`EMOJI_FONT_BYTES`, `install_emoji_fonts`), `docs/devlog/070-emoji-font-loading.md`
+
 ---
 
 ## Vendoring Dependencies
