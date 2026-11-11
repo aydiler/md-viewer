@@ -154,7 +154,7 @@ fn paint_sidebar_resize_affordance(
 fn paint_file_icon(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    let stroke = egui::Stroke::new(1.2, ui.visuals().weak_text_color());
+    let stroke = egui::Stroke::new(1.2_f32, ui.visuals().weak_text_color());
     let body = egui::Rect::from_min_max(
         rect.left_top() + egui::vec2(2.0, 1.0),
         rect.right_bottom() - egui::vec2(2.0, 1.0),
@@ -192,7 +192,7 @@ fn paint_folder_icon(ui: &mut egui::Ui, size: f32, expanded: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
-    let stroke = egui::Stroke::new(1.2, visuals.weak_text_color());
+    let stroke = egui::Stroke::new(1.2_f32, visuals.weak_text_color());
     let fill = if expanded {
         visuals.extreme_bg_color
     } else {
