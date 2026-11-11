@@ -2442,7 +2442,7 @@ impl CommonMarkViewerInternal {
             // sidebar. A column may grow only into space the others are not
             // using (floored at its own minimum); with no last frame there
             // is no cap — fresh tables fit their budget anyway.
-            let column_caps = last_widths.map(|widths| {
+            let column_caps = last_widths.filter(|_| !bound_changed).map(|widths| {
                 let total: f32 = widths.iter().sum();
                 (0..initial_widths.len())
                     .map(|column| {
@@ -3450,7 +3450,7 @@ impl CommonMarkViewerInternal {
         } else {
             last_widths.clone().unwrap_or(initial_widths)
         };
-        let column_caps = last_widths.map(|widths| {
+        let column_caps = last_widths.filter(|_| !bound_changed).map(|widths| {
             let total: f32 = widths.iter().sum();
             (0..initial_widths.len())
                 .map(|column| {
