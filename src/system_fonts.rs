@@ -746,16 +746,20 @@ fn install_preset_mono_font(
 /// the color font lacks. Appended last so it only supplies glyphs nothing
 /// else covers.
 /// (See docs/devlog/014-font-fallback.md.)
-const EMOJI_FONT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/fonts/NotoEmoji-Regular.ttf"
-);
+///
+/// Embedded in the binary. It used to be read at runtime from
+/// `concat!(env!("CARGO_MANIFEST_DIR"), …)`, which is the *build machine's*
+/// checkout path, so every distributed binary silently lacked it.
+const EMOJI_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regular.ttf");
 
 /// System color-emoji face (CBDT/CBLC bitmap font), appended after the
 /// regular system fallbacks but before the monochrome emoji face.
+/// Only the CBDT `NotoColorEmoji.ttf` builds belong here; Fedora's COLRv1
+/// `Noto-COLRv1.ttf` is not handled by the swash bitmap path.
 const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
-    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-    "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf", // Arch (noto-fonts-emoji)
+    "/usr/share/fonts/TTF/NotoColorEmoji.ttf",  // Arch (older layout)
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", // Debian/Ubuntu (fonts-noto-color-emoji)
 ];
 
 /// Install emoji faces into the fallback chains.
@@ -792,20 +796,14 @@ fn install_emoji_fonts(definitions: &mut FontDefinitions) {
             Err(e) => log::debug!("Color emoji font {path} unavailable: {e}"),
         }
     }
-    match std::fs::read(EMOJI_FONT_PATH) {
-        Ok(bytes) => {
-            definitions
-                .font_data
-                .insert("NotoEmoji".to_owned(), FontData::from_owned(bytes).into());
-            if let Some(family) = definitions.families.get_mut(&FontFamily::Proportional) {
-                family.push("NotoEmoji".to_owned());
-            }
-            if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
-                family.push("NotoEmoji".to_owned());
-            }
-            log::info!("Loaded bundled monochrome emoji font from {EMOJI_FONT_PATH}");
+    definitions.font_data.insert(
+        "NotoEmoji".to_owned(),
+        FontData::from_static(EMOJI_FONT_BYTES).into(),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        if let Some(chain) = definitions.families.get_mut(&family) {
+            chain.push("NotoEmoji".to_owned());
         }
-        Err(e) => log::warn!("Emoji font {EMOJI_FONT_PATH} unavailable: {e}"),
     }
 }
 
@@ -1156,6 +1154,76 @@ mod tests {
         // The default preset keeps the app's own sans selection.
         assert_eq!(FontPreset::Current.body_families(), None);
         assert!(FontPreset::Current.mono_families().is_empty());
+    }
+
+    /// The bundled monochrome face must be registered on every machine, not
+    /// only on the one that built the binary. Runs without system fonts.
+    #[test]
+    fn bundled_emoji_face_is_always_registered_last() {
+        let mut definitions = FontDefinitions::default();
+        install_emoji_fonts(&mut definitions);
+        assert!(
+            definitions.font_data.contains_key("NotoEmoji"),
+            "bundled emoji face missing from font_data"
+        );
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            assert_eq!(
+                definitions.families[&family].last().map(String::as_str),
+                Some("NotoEmoji"),
+                "bundled emoji face must be the last fallback in {family:?}"
+            );
+        }
+    }
+
+    /// The bundled face on its own covers and inks the document emoji.
+    /// Runs without system fonts, so CI exercises the fallback path.
+    #[test]
+    fn bundled_emoji_face_alone_renders_doc_emoji() {
+        let mut definitions = FontDefinitions::default();
+        install_emoji_fonts(&mut definitions);
+        definitions.font_data.retain(|k, _| k == "NotoEmoji");
+        *definitions
+            .families
+            .get_mut(&FontFamily::Proportional)
+            .unwrap() = vec!["NotoEmoji".to_owned()];
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        ctx.run(egui::RawInput::default(), |_ctx| {});
+        let font_id = egui::FontId::proportional(16.0);
+        for ch in [
+            '\u{1F7E2}',
+            '\u{1F534}',
+            '\u{1F535}',
+            '\u{26AA}',
+            '\u{2705}',
+        ] {
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyph(&font_id, ch)),
+                "bundled emoji face lacks {ch}"
+            );
+            let job = egui::text::LayoutJob::simple(
+                ch.to_string(),
+                font_id.clone(),
+                egui::Color32::WHITE,
+                f32::INFINITY,
+            );
+            let ink = ctx.fonts_mut(|f| {
+                let galley = f.layout_job(job);
+                let uv = galley.rows[0].glyphs[0].uv_rect;
+                let image = f.image();
+                let [w, h] = image.size;
+                let mut count = 0usize;
+                for y in (uv.min[1] as usize).min(h)..(uv.max[1] as usize).min(h) {
+                    for x in (uv.min[0] as usize).min(w)..(uv.max[0] as usize).min(w) {
+                        if image[(x, y)].a() > 16 {
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            });
+            assert!(ink > 20, "bundled emoji {ch} rasterized blank ({ink} px)");
+        }
     }
 
     #[test]
