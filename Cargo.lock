@@ -3365,6 +3365,7 @@ dependencies = [
  "sys-locale",
  "ttf-parser",
  "url",
+ "zbus",
 ]
 
 [[package]]
