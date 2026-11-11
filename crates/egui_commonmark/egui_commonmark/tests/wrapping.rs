@@ -391,11 +391,10 @@ fn markdown_table_reflows_after_panel_width_changes() {
         "MARKDOWN_REFLOW_CELL",
     );
 
-    // Column widths persist across panel-width changes (a sidebar drag must
-    // not disturb the table), so the cell height stays identical and the
-    // overflow — if any — scrolls horizontally instead.
-    assert_eq!(heights[1], heights[0], "widen must not change the layout");
-    assert_eq!(heights[2], heights[0], "narrow must not change the layout");
+    // Responsive table policy: widening the panel expands the column, reflowing
+    // prose into fewer rows (lower height); narrowing the panel wraps into more rows.
+    assert!(heights[1] < heights[0], "widen must reflow text into fewer lines: {} vs {}", heights[1], heights[0]);
+    assert!(heights[2] > heights[1], "narrow must reflow text into more lines: {} vs {}", heights[2], heights[1]);
 }
 
 #[test]
@@ -407,9 +406,9 @@ fn html_table_reflows_after_panel_width_changes() {
     let heights =
         table_cell_height_after_widths(&markdown, &[220.0, 560.0, 180.0], "HTML_REFLOW_CELL");
 
-    // Sticky-width policy: identical heights across panel widths.
-    assert_eq!(heights[1], heights[0], "widen must not change the layout");
-    assert_eq!(heights[2], heights[0], "narrow must not change the layout");
+    // Responsive table policy: widening the panel expands the column and reduces height.
+    assert!(heights[1] < heights[0], "widen must reflow text into fewer lines: {} vs {}", heights[1], heights[0]);
+    assert!(heights[2] > heights[1], "narrow must reflow text into more lines: {} vs {}", heights[2], heights[1]);
 }
 
 const FRONTMATTER_FIXTURE: &str = "\
