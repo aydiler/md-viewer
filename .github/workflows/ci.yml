@@ -10,7 +10,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -45,7 +45,7 @@ jobs:
       - run: cargo test
 
   renderer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -84,7 +84,7 @@ jobs:
           cargo test --manifest-path crates/egui_commonmark/Cargo.toml -p egui_commonmark_macros_extended
 
   version-sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
