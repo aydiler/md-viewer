@@ -1159,6 +1159,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires installed system fonts"]
     fn emoji_fallback_face_resolves_for_doc_emoji() {
         // Build the same definitions setup_fonts() would install: egui
         // defaults + the bundled monochrome emoji face appended last.
@@ -1338,6 +1339,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires installed system fonts"]
     fn color_emoji_face_never_claims_ui_symbols() {
         let mut definitions = FontDefinitions::default();
         install_emoji_fonts(&mut definitions);
