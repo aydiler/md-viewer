@@ -17,7 +17,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **LaTeX Math** - Inline `$…$` and display `$$…$$` equations rendered via typst + mitex — fractions, sub/superscripts, `\boxed`, accents, matrices, and more — sized and baseline-aligned to the surrounding text
 - **Syntax Highlighting** - 200+ languages via syntect with beautiful color schemes
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, and more rendered natively via [merman](https://github.com/Latias94/merman) (click to enlarge)
-- **Tables that fit their content** - Column widths follow what each column actually needs, cell text wraps instead of clipping, and widths are optimized so rows wrap less; drag the dividers to override
+- **Tables that fill the pane** - Columns stretch proportionally to the available width and re-fit whenever the window, the Full Width setting or a sidebar changes size; cell text wraps instead of clipping, and you can drag the dividers to override
 - **HTML Tables** - Rendered as formatted grids with proper cell padding
 - **YAML Frontmatter** - A leading `---` block renders as a key/value table instead of raw text
 - **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
@@ -29,11 +29,9 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ![Syntax highlighting and a mermaid sequence diagram](screenshots/syntax-highlighting.png)
 
-*Wide tables, same document and same window width. In v0.1.17 the last three columns were cut off at the pane edge and reachable only by scrolling the table sideways; in 0.2.0 every column fits and long cell text wraps instead of being clipped*
+*Tables use the full width of the pane: wide tables wrap their cell text, small ones stretch, and both re-fit as you resize the window or the sidebars*
 
-| v0.1.17 | 0.2.0 |
-|---|---|
-| ![Table columns clipped in v0.1.17](screenshots/tables-before.png) | ![Table columns fitted in 0.2.0](screenshots/tables-after.png) |
+![Tables filling the document pane](screenshots/tables.png)
 
 *A leading `---` block renders as a key/value table rather than raw text; nested items and folded scalars keep their source spelling*
 
@@ -56,7 +54,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 ### View
 - **Dark & Light Themes** - Toggle with Ctrl+D
 - **Zoom** - 50% to 300% zoom (Ctrl++/-/0 or Ctrl+Scroll)
-- **Full Width** - Toggle between the reading-width column and the full content pane; prose and tables follow it together
+- **Full Width** - On by default; toggle between the full content pane and a reading-width column (Ctrl+Shift+W); prose and tables follow it together
 - **Formula Size** - Scale rendered math from 100% to 150% (View → Formula Size), independent of UI zoom
 - **Keyboard Scrolling** - Scroll documents with ↑/↓ by line or Page Up/Page Down by page when the find bar is closed
 - **Live Reload** - Auto-refresh on file changes (enabled by default)
@@ -64,7 +62,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **Font Selection** - Browse and apply installed system fonts via View menu (searchable, persistent)
 - **Smooth Text Rendering** - Optional toggle (View → Smooth Text Rendering) that disables glyph pixel-snapping for less jagged-looking text at fractional zoom levels
 
-*Full Width, Formula Size and the colour picker all live in the View menu*
+*Full Width (Ctrl+Shift+W), fonts, Formula Size and the colour picker all live in the View menu*
 
 ![The View menu](screenshots/view-menu.png)
 
