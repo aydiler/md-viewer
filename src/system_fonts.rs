@@ -746,8 +746,10 @@ fn install_preset_mono_font(
 /// the color font lacks. Appended last so it only supplies glyphs nothing
 /// else covers.
 /// (See docs/devlog/014-font-fallback.md.)
-const EMOJI_FONT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoEmoji-Regular.ttf");
+const EMOJI_FONT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/NotoEmoji-Regular.ttf"
+);
 
 /// System color-emoji face (CBDT/CBLC bitmap font), appended after the
 /// regular system fallbacks but before the monochrome emoji face.
@@ -773,10 +775,7 @@ fn install_emoji_fonts(definitions: &mut FontDefinitions) {
                 definitions
                     .font_data
                     .insert("ColorEmoji".to_owned(), data.into());
-                for family in [
-                    FontFamily::Proportional,
-                    FontFamily::Monospace,
-                ] {
+                for family in [FontFamily::Proportional, FontFamily::Monospace] {
                     if let Some(chain) = definitions.families.get_mut(&family) {
                         // Insert ahead of epaint's built-in monochrome emoji
                         // faces, which would otherwise claim the glyph first.
@@ -1174,12 +1173,18 @@ mod tests {
         // Debug: font_data keys and family list as egui sees them.
         ctx.fonts(|f| {
             let defs = f.definitions();
-            eprintln!("font_data keys: {:?}", defs.font_data.keys().collect::<Vec<_>>());
+            eprintln!(
+                "font_data keys: {:?}",
+                defs.font_data.keys().collect::<Vec<_>>()
+            );
             eprintln!(
                 "Proportional chain: {:?}",
                 defs.families.get(&FontFamily::Proportional)
             );
-            eprintln!("Monospace chain: {:?}", defs.families.get(&FontFamily::Monospace));
+            eprintln!(
+                "Monospace chain: {:?}",
+                defs.families.get(&FontFamily::Monospace)
+            );
         });
         // Isolate which individual face supplies each glyph: one font per chain.
         let defaults = FontDefinitions::default();
@@ -1198,15 +1203,27 @@ mod tests {
             ctx2.run(egui::RawInput::default(), |_ctx| {});
             let font_id = egui::FontId::proportional(16.0);
             let results: Vec<bool> = ctx2.fonts_mut(|f| {
-                ['\u{1F7E2}', '\u{1F534}', '\u{1F535}', '\u{26AA}', '\u{2705}']
-                    .iter()
-                    .map(|&ch| f.has_glyph(&font_id, ch))
-                    .collect()
+                [
+                    '\u{1F7E2}',
+                    '\u{1F534}',
+                    '\u{1F535}',
+                    '\u{26AA}',
+                    '\u{2705}',
+                ]
+                .iter()
+                .map(|&ch| f.has_glyph(&font_id, ch))
+                .collect()
             });
             eprintln!("face {label}: 🟢🔴🔵⚪✅ = {results:?}");
         }
 
-        for ch in ['\u{1F7E2}', '\u{1F534}', '\u{1F535}', '\u{26AA}', '\u{2705}'] {
+        for ch in [
+            '\u{1F7E2}',
+            '\u{1F534}',
+            '\u{1F535}',
+            '\u{26AA}',
+            '\u{2705}',
+        ] {
             let resolved = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
             assert!(
                 resolved,
@@ -1242,7 +1259,10 @@ mod tests {
                 count
             });
             eprintln!("ink pixels for {ch:?}: {ink}");
-            assert!(ink > 20, "emoji {ch} rasterized blank (only {ink} ink pixels)");
+            assert!(
+                ink > 20,
+                "emoji {ch} rasterized blank (only {ink} ink pixels)"
+            );
         }
 
         // Color check (requires vendored epaint with the swash patch): each
@@ -1281,7 +1301,9 @@ mod tests {
                 }
                 (uv.colored, peak)
             });
-            eprintln!("{ch:?}: colored flag = {colored}, {want_channel} channel peak = {channel_peak}");
+            eprintln!(
+                "{ch:?}: colored flag = {colored}, {want_channel} channel peak = {channel_peak}"
+            );
             // Debug: dump first few atlas pixels from the glyph region.
             ctx.fonts(|f| {
                 let _ = f;
@@ -1320,8 +1342,10 @@ mod tests {
         let mut definitions = FontDefinitions::default();
         install_emoji_fonts(&mut definitions);
         definitions.font_data.retain(|k, _| k == "ColorEmoji");
-        *definitions.families.get_mut(&FontFamily::Proportional).unwrap() =
-            vec!["ColorEmoji".to_owned()];
+        *definitions
+            .families
+            .get_mut(&FontFamily::Proportional)
+            .unwrap() = vec!["ColorEmoji".to_owned()];
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
         ctx.run(egui::RawInput::default(), |_ctx| {});
@@ -1333,7 +1357,9 @@ mod tests {
         }
         // ...but general UI symbols must not, even though Noto Color Emoji
         // maps them — they belong to regular text faces.
-        for ch in ['\u{25B6}', '\u{25BC}', '\u{26A0}', '\u{2714}', '\u{2192}', '\u{2713}'] {
+        for ch in [
+            '\u{25B6}', '\u{25BC}', '\u{26A0}', '\u{2714}', '\u{2192}', '\u{2713}',
+        ] {
             let claimed = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
             assert!(
                 !claimed,

@@ -177,7 +177,13 @@ fn paint_file_icon(ui: &mut egui::Ui, size: f32) {
     );
     painter.line_segment([body.left_top(), body.left_bottom()], stroke);
     painter.line_segment([body.left_bottom(), body.right_bottom()], stroke);
-    painter.line_segment([body.right_bottom(), body.right_top() + egui::vec2(0.0, fold)], stroke);
+    painter.line_segment(
+        [
+            body.right_bottom(),
+            body.right_top() + egui::vec2(0.0, fold),
+        ],
+        stroke,
+    );
 }
 
 /// Draw a small vector folder icon for directory rows in the explorer.
@@ -1179,8 +1185,7 @@ impl Tab {
         } else {
             // Leaving edit: first-frame estimate for the view; the
             // renderer's own correctives refine it after.
-            self.pending_scroll_offset =
-                Some(ratio * self.pre_edit_view_content_height.max(1.0));
+            self.pending_scroll_offset = Some(ratio * self.pre_edit_view_content_height.max(1.0));
         }
         self.is_editing = to_edit;
         self.cache.clear_scrollable();
@@ -3207,7 +3212,6 @@ impl MarkdownApp {
 
         egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-
                 let text_edit = egui::TextEdit::singleline(&mut self.search.query)
                     .id(input_id)
                     .hint_text("Find in document")
@@ -3539,15 +3543,10 @@ impl MarkdownApp {
                                     };
                                     let response = ui.add(
                                         egui::Button::new(
-                                            egui::RichText::new(label)
-                                                .small()
-                                                .color(text_color),
+                                            egui::RichText::new(label).small().color(text_color),
                                         )
                                         .fill(if active {
-                                            ui.visuals()
-                                                .widgets
-                                                .inactive
-                                                .weak_bg_fill
+                                            ui.visuals().widgets.inactive.weak_bg_fill
                                         } else {
                                             egui::Color32::TRANSPARENT
                                         })
@@ -4073,54 +4072,57 @@ impl MarkdownApp {
                         ui.ctx().request_repaint();
                     }
                 } else {
-                let force_full_render =
-                    tab.pending_header_click_key.is_some() || correct_search_this_frame;
-                let pending = tab.pending_scroll_offset.take();
-                let default_width = content_default_width(self.full_width_content);
-                let content_width =
-                    content_width_limit(self.full_width_content, content_rect.width());
-                // Line heights follow the emulated viewer (GitHub 1.5/1.45,
-                // VS Code preview 1.6/1.36); the font preset owns the metrics.
-                let (preset_line_height, preset_code_line_height) = self.font_preset.line_heights();
-                scroll_output = Some(CommonMarkViewer::new()
-                    .default_implicit_uri_scheme(&tab.base_uri)
-                    .max_image_width(Some(800))
-                    .default_width(default_width)
-                    // Full Width governs the complete document layout. With
-                    // the reading cap active, tables reflow within it; their
-                    // horizontal scroller still handles minimum-width or
-                    // user-resized overflow (#110).
-                    .table_max_width(Some(content_width))
-                    .indentation_spaces(2)
-                    .use_strong_font_family(true)
-                    // Frontmatter is metadata, not prose: show it as a
-                    // key/value table rather than a thematic break plus a
-                    // paragraph of raw `key: value` lines (#117).
-                    .render_frontmatter(true)
-                    .math_scale(self.math_scale)
-                    .show_alt_text_on_hover(true)
-                    .syntax_theme_dark("base16-ocean.dark")
-                    .syntax_theme_light("base16-ocean.light")
-                    .line_height(preset_line_height)
-                    .code_line_height(preset_code_line_height)
-                    .paragraph_spacing(2.0)
-                    .heading_spacing_above(2.0)
-                    .heading_spacing_below(0.75)
-                    .content_version(tab.content_version)
-                    .pending_scroll_offset(pending)
-                    .force_full_render(force_full_render)
-                    .scroll_source(egui::scroll_area::ScrollSource {
-                        scroll_bar: true,
-                        drag: false,
-                        mouse_wheel: true,
-                    })
-                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content));
+                    let force_full_render =
+                        tab.pending_header_click_key.is_some() || correct_search_this_frame;
+                    let pending = tab.pending_scroll_offset.take();
+                    let default_width = content_default_width(self.full_width_content);
+                    let content_width =
+                        content_width_limit(self.full_width_content, content_rect.width());
+                    // Line heights follow the emulated viewer (GitHub 1.5/1.45,
+                    // VS Code preview 1.6/1.36); the font preset owns the metrics.
+                    let (preset_line_height, preset_code_line_height) =
+                        self.font_preset.line_heights();
+                    scroll_output = Some(
+                        CommonMarkViewer::new()
+                            .default_implicit_uri_scheme(&tab.base_uri)
+                            .max_image_width(Some(800))
+                            .default_width(default_width)
+                            // Full Width governs the complete document layout. With
+                            // the reading cap active, tables reflow within it; their
+                            // horizontal scroller still handles minimum-width or
+                            // user-resized overflow (#110).
+                            .table_max_width(Some(content_width))
+                            .indentation_spaces(2)
+                            .use_strong_font_family(true)
+                            // Frontmatter is metadata, not prose: show it as a
+                            // key/value table rather than a thematic break plus a
+                            // paragraph of raw `key: value` lines (#117).
+                            .render_frontmatter(true)
+                            .math_scale(self.math_scale)
+                            .show_alt_text_on_hover(true)
+                            .syntax_theme_dark("base16-ocean.dark")
+                            .syntax_theme_light("base16-ocean.light")
+                            .line_height(preset_line_height)
+                            .code_line_height(preset_code_line_height)
+                            .paragraph_spacing(2.0)
+                            .heading_spacing_above(2.0)
+                            .heading_spacing_below(0.75)
+                            .content_version(tab.content_version)
+                            .pending_scroll_offset(pending)
+                            .force_full_render(force_full_render)
+                            .scroll_source(egui::scroll_area::ScrollSource {
+                                scroll_bar: true,
+                                drag: false,
+                                mouse_wheel: true,
+                            })
+                            .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content),
+                    );
 
-                if let Some(so) = scroll_output.as_ref() {
-                    tab.scroll_offset = so.state.offset.y;
-                    tab.last_viewport_height = so.inner_rect.height();
-                    tab.last_content_height = so.content_size.y;
-                }
+                    if let Some(so) = scroll_output.as_ref() {
+                        tab.scroll_offset = so.state.offset.y;
+                        tab.last_viewport_height = so.inner_rect.height();
+                        tab.last_content_height = so.content_size.y;
+                    }
                 }
 
                 // If the renderer recorded an exact y for the active match, check
@@ -4768,7 +4770,8 @@ impl MarkdownApp {
                 // One canonical name per body-capable family, scanned once in
                 // the background at startup. While the scan is running, only
                 // "System Default" is offered.
-                if self.available_font_families.is_empty() && self.pending_font_family_scan.is_some()
+                if self.available_font_families.is_empty()
+                    && self.pending_font_family_scan.is_some()
                 {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -4805,39 +4808,39 @@ impl MarkdownApp {
                     .auto_shrink([false, true])
                     .max_height(300.0)
                     .show_rows(
-                    ui,
-                    row_height,
-                    match_count + 1, // + 1 for the pinned "System Default" row
-                    |ui, rows| {
-                        for row in rows {
-                            if row == 0 {
-                                let default_selected = self.selected_font_family.is_none();
-                                let default_btn =
-                                    ui.selectable_label(default_selected, "System Default");
-                                #[cfg(feature = "mcp")]
-                                self.mcp_bridge.register_widget(
-                                    "Font Dialog: System Default",
-                                    "button",
-                                    &default_btn,
-                                    Some(if default_selected { "selected" } else { "" }),
-                                );
-                                if default_btn.clicked() {
-                                    new_selection = Some(None);
+                        ui,
+                        row_height,
+                        match_count + 1, // + 1 for the pinned "System Default" row
+                        |ui, rows| {
+                            for row in rows {
+                                if row == 0 {
+                                    let default_selected = self.selected_font_family.is_none();
+                                    let default_btn =
+                                        ui.selectable_label(default_selected, "System Default");
+                                    #[cfg(feature = "mcp")]
+                                    self.mcp_bridge.register_widget(
+                                        "Font Dialog: System Default",
+                                        "button",
+                                        &default_btn,
+                                        Some(if default_selected { "selected" } else { "" }),
+                                    );
+                                    if default_btn.clicked() {
+                                        new_selection = Some(None);
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                let font_index = filtered_indices
+                                    .as_ref()
+                                    .map_or(row - 1, |indices| indices[row - 1]);
+                                let name = &self.available_font_families[font_index];
+                                let is_selected =
+                                    self.selected_font_family.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(is_selected, name).clicked() {
+                                    new_selection = Some(Some(name.clone()));
+                                }
                             }
-                            let font_index = filtered_indices
-                                .as_ref()
-                                .map_or(row - 1, |indices| indices[row - 1]);
-                            let name = &self.available_font_families[font_index];
-                            let is_selected =
-                                self.selected_font_family.as_deref() == Some(name.as_str());
-                            if ui.selectable_label(is_selected, name).clicked() {
-                                new_selection = Some(Some(name.clone()));
-                            }
-                        }
-                    },
-                );
+                        },
+                    );
             });
 
         self.show_font_dialog = open;
@@ -5212,10 +5215,8 @@ impl eframe::App for MarkdownApp {
                 .map(Receiver::try_recv);
             match received {
                 Some(Ok(names)) => {
-                    self.available_font_families_lower = names
-                        .iter()
-                        .map(|name| name.to_ascii_lowercase())
-                        .collect();
+                    self.available_font_families_lower =
+                        names.iter().map(|name| name.to_ascii_lowercase()).collect();
                     self.available_font_families = names;
                     self.pending_font_family_scan = None;
                     // The list may have landed while the font dialog was
