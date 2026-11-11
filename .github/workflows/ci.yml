@@ -10,7 +10,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -18,9 +18,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
+          sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
 
@@ -45,7 +46,7 @@ jobs:
       - run: cargo test
 
   renderer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -55,9 +56,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
+          sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
 
@@ -84,7 +86,7 @@ jobs:
           cargo test --manifest-path crates/egui_commonmark/Cargo.toml -p egui_commonmark_macros_extended
 
   version-sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
