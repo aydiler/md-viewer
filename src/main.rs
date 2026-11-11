@@ -5367,8 +5367,8 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W) {
                     toggle_full_width = true;
                 }
-                // Ctrl+W: Close current tab
-                if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
+                // Ctrl+W: Close current tab (not Ctrl+Shift+W, which toggles full width)
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::W) {
                     close_tab = true;
                 }
                 // Ctrl+T: Open a file in a new tab
@@ -5756,11 +5756,12 @@ impl eframe::App for MarkdownApp {
                     }
 
                     let full_width_text = if self.full_width_content {
-                        "✓ Full Width (Ctrl+Shift+W)"
+                        "✓ Full Width"
                     } else {
-                        "Full Width (Ctrl+Shift+W)"
+                        "Full Width"
                     };
-                    let full_width_btn = ui.add(egui::Button::new(full_width_text));
+                    let full_width_btn =
+                        ui.add(egui::Button::new(full_width_text).shortcut_text("Ctrl+Shift+W"));
                     #[cfg(feature = "mcp")]
                     self.mcp_bridge.register_widget(
                         "Menu: View → Full Width",
