@@ -523,12 +523,21 @@ fn format_relative_time(epoch_secs: u64, now: u64) -> String {
     }
 }
 
+/// The tab bar shows when the user has not hidden it (#208), and always while
+/// the active tab is in Edit mode: the bar carries the Preview|Edit toggle,
+/// the unsaved-changes marker and the save confirmation.
+fn tab_bar_visible(show_tab_bar: bool, active_tab_editing: bool) -> bool {
+    show_tab_bar || active_tab_editing
+}
+
 /// Persisted state saved between sessions
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedState {
     dark_mode: Option<bool>,
     zoom_level: Option<f32>,
     show_outline: Option<bool>,
+    /// Tab bar visibility (#208). `None` (older state files) shows it.
+    show_tab_bar: Option<bool>,
     full_width_content: Option<bool>,
     math_scale: Option<f32>,
     /// Selection/highlight background color override, stored as premultiplied
@@ -2258,6 +2267,10 @@ struct MarkdownApp {
     dark_mode: bool,
     zoom_level: f32,
     show_outline: bool,
+    /// Whether the tab bar is shown (#208). The bar is still shown while the
+    /// active tab is in Edit mode, because it holds the Preview|Edit toggle
+    /// and the unsaved-changes marker.
+    show_tab_bar: bool,
     full_width_content: bool,
     math_scale: f32,
     // Selection/highlight background color override. `None` = theme default.
@@ -2439,6 +2452,7 @@ impl MarkdownApp {
             .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
+        let show_tab_bar = persisted.show_tab_bar.unwrap_or(true);
         let full_width_content = persisted.full_width_content.unwrap_or(true);
         let math_scale = persisted.math_scale.unwrap_or(1.0).clamp(1.0, 2.0);
         let highlight_color = persisted
@@ -2538,6 +2552,7 @@ impl MarkdownApp {
             dark_mode,
             zoom_level,
             show_outline,
+            show_tab_bar,
             full_width_content,
             math_scale,
             // Frame 1 always rebuilds Visuals anyway (last_applied_dark_mode
@@ -5136,6 +5151,7 @@ impl eframe::App for MarkdownApp {
             dark_mode: Some(self.dark_mode),
             zoom_level: Some(self.zoom_level),
             show_outline: Some(self.show_outline),
+            show_tab_bar: Some(self.show_tab_bar),
             full_width_content: Some(self.full_width_content),
             math_scale: Some(self.math_scale),
             highlight_color: self.highlight_color.map(|c| [c.r(), c.g(), c.b(), c.a()]),
@@ -5314,6 +5330,7 @@ impl eframe::App for MarkdownApp {
         let mut toggle_outline = false;
         let mut toggle_explorer = false;
         let mut toggle_full_width = false;
+        let mut toggle_edit_mode = false;
         let mut quit_app = false;
         let mut zoom_factor_request: Option<f32> = None;
         let mut zoom_reset = false;
@@ -5377,6 +5394,11 @@ impl eframe::App for MarkdownApp {
                 // Ctrl+Shift+E: Toggle file explorer
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
                     toggle_explorer = true;
+                }
+                // Ctrl+E: Toggle Preview/Edit for the active tab. Reachable
+                // with the tab bar hidden, where the segmented toggle lives.
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::E) {
+                    toggle_edit_mode = true;
                 }
                 // Ctrl+Shift+W: Toggle full width
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W) {
@@ -5519,6 +5541,12 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_full_width {
             self.full_width_content = !self.full_width_content;
+        }
+        if toggle_edit_mode {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                let to_edit = !tab.is_editing;
+                tab.set_edit_mode(to_edit);
+            }
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -5767,6 +5795,51 @@ impl eframe::App for MarkdownApp {
                     );
                     if outline_btn.clicked() {
                         self.show_outline = !self.show_outline;
+                        ui.close();
+                    }
+
+                    let tab_bar_text = if self.show_tab_bar {
+                        "✓ Show Tab Bar"
+                    } else {
+                        "Show Tab Bar"
+                    };
+                    let tab_bar_btn = ui.add(egui::Button::new(tab_bar_text));
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Show Tab Bar",
+                        "button",
+                        &tab_bar_btn,
+                        Some(if self.show_tab_bar { "on" } else { "off" }),
+                    );
+                    if tab_bar_btn.clicked() {
+                        self.show_tab_bar = !self.show_tab_bar;
+                        ui.close();
+                    }
+
+                    let editing = self
+                        .tabs
+                        .get(self.active_tab)
+                        .is_some_and(|tab| tab.is_editing);
+                    let edit_text = if editing {
+                        "✓ Edit Mode"
+                    } else {
+                        "Edit Mode"
+                    };
+                    let edit_btn = ui.add_enabled(
+                        self.tabs.get(self.active_tab).is_some(),
+                        egui::Button::new(edit_text).shortcut_text("Ctrl+E"),
+                    );
+                    #[cfg(feature = "mcp")]
+                    self.mcp_bridge.register_widget(
+                        "Menu: View → Edit Mode",
+                        "button",
+                        &edit_btn,
+                        Some(if editing { "on" } else { "off" }),
+                    );
+                    if edit_btn.clicked() {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.set_edit_mode(!editing);
+                        }
                         ui.close();
                     }
 
@@ -6029,9 +6102,16 @@ impl eframe::App for MarkdownApp {
 
         // Tab bar
         let mut tab_to_close: Option<usize> = None;
-        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
-            tab_to_close = self.render_tab_bar(ui);
-        });
+        if tab_bar_visible(
+            self.show_tab_bar,
+            self.tabs
+                .get(self.active_tab)
+                .is_some_and(|tab| tab.is_editing),
+        ) {
+            egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+                tab_to_close = self.render_tab_bar(ui);
+            });
+        }
 
         // Close tab if requested
         if let Some(idx) = tab_to_close {
@@ -7415,6 +7495,34 @@ mod tests {
         assert!(explorer.is_expanded(&notes));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tab_bar_shows_unless_hidden_and_always_while_editing() {
+        assert!(tab_bar_visible(true, false));
+        assert!(tab_bar_visible(true, true));
+        assert!(!tab_bar_visible(false, false));
+        assert!(tab_bar_visible(false, true));
+    }
+
+    #[test]
+    fn hidden_tab_bar_survives_a_persistence_roundtrip() {
+        let mut storage = MemoryStorage(HashMap::new());
+        let app_state = PersistedState {
+            show_tab_bar: Some(false),
+            ..PersistedState::default()
+        };
+        eframe::set_value(&mut storage, APP_KEY, &app_state);
+        let restored: PersistedState = eframe::get_value(&storage, APP_KEY).expect("state decodes");
+        assert_eq!(restored.show_tab_bar, Some(false));
+
+        // A state file written before #208 has no field; the bar stays visible.
+        let mut old_storage = MemoryStorage(HashMap::new());
+        eframe::Storage::set_string(&mut old_storage, APP_KEY, "()".to_owned());
+        let old: PersistedState =
+            eframe::get_value(&old_storage, APP_KEY).expect("pre-#208 state decodes");
+        assert_eq!(old.show_tab_bar, None);
+        assert!(old.show_tab_bar.unwrap_or(true));
     }
 
     #[test]

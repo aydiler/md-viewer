@@ -15,6 +15,7 @@
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+O | Open file in new tab |
+| Ctrl+E | Toggle Preview / Edit for the active tab |
 | Ctrl+S | Save the active tab (Edit mode) |
 | F5 | Toggle file watching |
 | Ctrl+Q | Quit application |
