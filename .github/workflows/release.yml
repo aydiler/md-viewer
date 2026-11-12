@@ -2,6 +2,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Dry run: `gh workflow run release.yml --ref main`. Builds every platform
+  # (and the snap) on the same runner images a real release uses, and
+  # publishes nothing: every publish job/step is gated on `push`. Exists
+  # because a retired runner image (macos-14, v0.3.1) and a crates.io-only
+  # compile error (#215) were each found only after the tag was pushed.
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,22 +23,31 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Compare tag, Cargo.toml, snapcraft.yaml versions
+        id: version
         # Fails fast if the pushed tag (v0.1.10) disagrees with either
         # Cargo.toml's `version = "..."` or snapcraft.yaml's `version: '...'`.
         # Extraction logic lifted verbatim from ci.yml:version-sync.
         run: |
-          TAG_VER="${GITHUB_REF#refs/tags/v}"
           CARGO_VER=$(awk -F'"' '/^version[[:space:]]*=[[:space:]]*"/{print $2; exit}' Cargo.toml)
           SNAP_VER=$(sed -n "s/^version:[[:space:]]*['\"]\\?\\([0-9]\\+\\.[0-9]\\+\\.[0-9]\\+\\)['\"]\\?.*/\\1/p" snap/snapcraft.yaml)
-          echo "tag=$TAG_VER cargo=$CARGO_VER snap=$SNAP_VER"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            TAG_VER="${GITHUB_REF#refs/tags/v}"
+          else
+            # Dry run: no tag. Still enforce Cargo.toml == snapcraft.yaml.
+            TAG_VER="$CARGO_VER"
+          fi
+          echo "event=$GITHUB_EVENT_NAME tag=$TAG_VER cargo=$CARGO_VER snap=$SNAP_VER"
           if [ "$TAG_VER" != "$CARGO_VER" ] || [ "$CARGO_VER" != "$SNAP_VER" ]; then
             echo "::error::Version mismatch: tag=v$TAG_VER cargo=$CARGO_VER snap=$SNAP_VER"
             exit 1
           fi
+          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
 
       - name: Vendored fork is publishable to crates.io
         # Fails the release if the vendored egui_commonmark fork's source differs
@@ -53,6 +68,7 @@ jobs:
     # Here it still fails in about a second rather than twenty minutes in, and
     # the run still goes red under an obvious name, but the other channels
     # publish.
+    if: github.event_name == 'push'
     name: crates.io token is valid
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -108,6 +124,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -173,7 +191,6 @@ jobs:
         # snap and AUR users never open the repository. Falls back to git-cliff
         # when the tagged version has no section.
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
           bash scripts/release-notes.sh "$VERSION" > RELEASE_NOTES.md
           echo "release notes: $(wc -l < RELEASE_NOTES.md) lines"
 
@@ -183,7 +200,6 @@ jobs:
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
           ASSET="md-viewer-${VERSION}-${{ matrix.asset_name }}.tar.gz"
           tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" md-viewer \
             -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_NOTICES
@@ -193,7 +209,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $VERSION = "${env:GITHUB_REF}" -replace '^refs/tags/v',''
+          $VERSION = "${env:VERSION}"
           $ASSET = "md-viewer-$VERSION-${{ matrix.asset_name }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/md-viewer.exe", "LICENSE", "THIRD_PARTY_NOTICES" -DestinationPath $ASSET
           $Hash = (Get-FileHash -Algorithm SHA256 $ASSET).Hash.ToLower()
@@ -211,6 +227,7 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     needs: [validate, build, check-crates-token]
     timeout-minutes: 20
@@ -322,7 +339,7 @@ jobs:
         id: build
 
       - uses: snapcore/action-publish@v1
-        if: steps.check.outputs.proceed == 'true'
+        if: steps.check.outputs.proceed == 'true' && github.event_name == 'push'
         with:
           snap: ${{ steps.build.outputs.snap }}
           release: stable
@@ -347,7 +364,7 @@ jobs:
       # itself still published fine (action-publish above does the upload),
       # only this listing-metadata sync broke. See docs/LESSONS.md.
       - name: Push snap store listing metadata
-        if: steps.check.outputs.proceed == 'true'
+        if: steps.check.outputs.proceed == 'true' && github.event_name == 'push'
         run: |
           sudo snap install snapcraft --classic
           snapcraft upload-metadata "${SNAP_FILE}" --force
@@ -357,6 +374,7 @@ jobs:
 
   publish-aur:
     name: Publish to AUR
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     needs: [validate, build]
     timeout-minutes: 10
@@ -443,6 +461,7 @@ jobs:
 
   publish-aur-bin:
     name: Publish to AUR (-bin)
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     needs: [validate, build]
     timeout-minutes: 10
@@ -574,6 +593,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     # Decoupled from publish-snap: the GH release page appears as soon as the
     # build matrix finishes (~12 min sooner). publish-aur-bin already pulls its

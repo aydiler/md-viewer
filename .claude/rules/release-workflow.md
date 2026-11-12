@@ -18,6 +18,14 @@ See `docs/LESSONS.md`, "CHANGELOG.md is hand-curated".
 
 ## Before tagging
 
+0. **Run the release dry run on `main` and wait for it to go green:**
+   `gh workflow run release.yml --ref main`, then `gh run watch`. It builds
+   Linux, macOS, Windows and the snap on the release's own runner images and
+   publishes nothing (every publish job shows *skipped*). Two releases were
+   broken by things only the release workflow exercises: a retired runner image
+   (`macos-14`, v0.3.1) and a crates.io-only build error (#215). Neither PR CI
+   nor `cross-platform.yml` caught them before the tag.
+
 1. **Everything intended for the release is merged to `main`,** and `main` is
    in sync with `origin/main`.
 
