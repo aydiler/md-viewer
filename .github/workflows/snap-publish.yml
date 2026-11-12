@@ -1,0 +1,63 @@
+name: Snap (re)publish
+# Builds the snap for an existing tag and, with `upload`, publishes it to
+# stable. For when release.yml's snap job failed on the store rather than on
+# the build: `gh run rerun` replays the workflow *as it was at the tag*, so a
+# fix to the snap steps on main never reaches that re-run. This workflow runs
+# from main and checks out the tag's sources.
+#
+#   gh workflow run snap-publish.yml --ref main -f tag=v0.3.2            # build only
+#   gh workflow run snap-publish.yml --ref main -f tag=v0.3.2 -f upload=true
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (e.g. v0.3.2)
+        required: true
+      upload:
+        description: Upload to the Snap Store stable channel
+        type: boolean
+        default: false
+
+concurrency:
+  group: snap-publish
+  cancel-in-progress: false
+
+jobs:
+  snap:
+    name: Snap ${{ inputs.tag }}${{ inputs.upload && ' (upload)' || ' (build only)' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the tag, keeping main's CI script
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          cp scripts/snap-ci.sh "$RUNNER_TEMP/snap-ci.sh"
+          git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null \
+            || { echo "::error::tag $TAG does not exist"; exit 1; }
+          git checkout --quiet "$TAG"
+          SNAP_VER=$(sed -n "s/^version:[[:space:]]*['\"]\?\([0-9.]*\)['\"]\?.*/\1/p" snap/snapcraft.yaml)
+          if [ "v$SNAP_VER" != "$TAG" ]; then
+            echo "::error::snapcraft.yaml at $TAG says $SNAP_VER"
+            exit 1
+          fi
+          echo "building $TAG ($(git rev-parse --short HEAD)), snap version $SNAP_VER"
+
+      - name: Install LXD and snapcraft
+        run: bash "$RUNNER_TEMP/snap-ci.sh" setup
+
+      - name: Build snap
+        id: build
+        run: bash "$RUNNER_TEMP/snap-ci.sh" build
+
+      - name: Upload to Snap Store (stable) and sync listing metadata
+        if: inputs.upload
+        run: bash "$RUNNER_TEMP/snap-ci.sh" publish "${{ steps.build.outputs.snap }}"
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}

@@ -340,7 +340,7 @@ jobs:
     name: Publish to Snap Store
     runs-on: ubuntu-24.04
     needs: [validate, build]
-    timeout-minutes: 30
+    timeout-minutes: 60  # build + store retries with backoff
     permissions:
       contents: read
     env:
@@ -362,42 +362,29 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.check.outputs.proceed == 'true'
 
-      - uses: snapcore/action-build@v1
+      # scripts/snap-ci.sh replaces snapcore/action-build + action-publish.
+      # Those call the Snap Store once per step with no retry; on 2026-11-12
+      # the store dropped about one request in twelve and v0.3.2's snap job
+      # failed six times at `snap install lxd` before building anything
+      # (devlog 078). The script mirrors the actions' steps, retried.
+      #
+      # The upload also runs `snapcraft upload-metadata --force`: the listing
+      # description comes from the snap's embedded snapcraft.yaml, so the repo
+      # stays the source of truth over web-UI edits. (`push-metadata` was
+      # renamed `upload-metadata`; v0.1.14 failed on the old verb, LESSONS.)
+      - name: Install LXD and snapcraft
+        if: steps.check.outputs.proceed == 'true'
+        run: bash scripts/snap-ci.sh setup
+
+      - name: Build snap
         if: steps.check.outputs.proceed == 'true'
         id: build
+        run: bash scripts/snap-ci.sh build
 
-      - uses: snapcore/action-publish@v1
+      - name: Upload to Snap Store (stable) and sync listing metadata
         if: steps.check.outputs.proceed == 'true' && github.event_name == 'push'
-        with:
-          snap: ${{ steps.build.outputs.snap }}
-          release: stable
+        run: bash scripts/snap-ci.sh publish "${{ steps.build.outputs.snap }}"
         env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-
-      # Push the store-listing description / summary embedded in the snap.
-      # snapcore/action-publish above only ships the .snap artifact to a
-      # channel; the Snap Store listing description is curated separately and
-      # won't pick up changes unless we explicitly upload-metadata. --force
-      # overwrites any web-UI edits, treating snap/snapcraft.yaml in the repo
-      # as source of truth.
-      #
-      # Note: snapcraft 8.x removed `--from-yaml`. Metadata is read from the
-      # .snap file's embedded yaml (which came from snap/snapcraft.yaml at
-      # build time), so the freshly-built snap from steps.build already
-      # carries the current description.
-      #
-      # `push-metadata` was renamed to `upload-metadata` (the whole `push`
-      # verb family became `upload`). v0.1.14's release used the old verb and
-      # this step failed with "no such command 'push-metadata'" — the snap
-      # itself still published fine (action-publish above does the upload),
-      # only this listing-metadata sync broke. See docs/LESSONS.md.
-      - name: Push snap store listing metadata
-        if: steps.check.outputs.proceed == 'true' && github.event_name == 'push'
-        run: |
-          sudo snap install snapcraft --classic
-          snapcraft upload-metadata "${SNAP_FILE}" --force
-        env:
-          SNAP_FILE: ${{ steps.build.outputs.snap }}
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
 
   publish-aur:
