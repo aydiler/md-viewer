@@ -96,6 +96,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 | Shortcut | Action |
 |----------|--------|
 | Ctrl+O | Open file in new tab |
+| Ctrl+S | Save the active tab (Edit mode) |
 | Alt+Left | Navigate back in history |
 | Alt+Right | Navigate forward in history |
 | Click link | Navigate in current tab |
