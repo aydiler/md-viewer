@@ -1763,4 +1763,4 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Root cause:** With swap interval 1, Mesa's `eglSwapBuffers` blocks until the compositor's frame callback. Hyprland sends none to hidden workspaces, so the reload's repaint parked the UI thread in `wl_display_dispatch_queue` and pings went unanswered.
 **Fix:** `NativeOptions::vsync = false` on Wayland. The compositor already prevents tearing and winit paces `RedrawRequested` on frame callbacks without blocking. Keep vsync on X11.
 **Testing gotcha:** confirm the test window is really on a hidden workspace (`hyprctl clients -j`); this Hyprland uses Lua dispatch syntax (`hl.dsp.window.move({ workspace = "special:x", follow = false })`) and rejects the legacy form silently enough to fake a pass.
-**Files:** `src/main.rs` (`wayland_session`, `run_native_once`), `docs/devlog/069-wayland-hidden-vsync-hang.md`
+**Files:** `src/main.rs` (`wayland_session`, `run_native_once`), `docs/devlog/073-wayland-hidden-vsync-hang.md`

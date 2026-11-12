@@ -48,6 +48,22 @@ Hidden test instance on `special:anrtest`, then append a line to its file:
 | stock + `vblank_mode=0` | 0 s | no |
 | this branch | 0 s | no |
 
+### Maintainer re-check on KWin + NVIDIA (2026-11-12)
+
+The freeze is not Hyprland- or Mesa-specific. Nested `kwin_wayland --virtual`
+under a private `dbus-run-session`, window minimized via a KWin script, one
+line appended to the open file, then the app (run as a gdb child) interrupted
+3 s later:
+
+| build | idle CPU (10 s) | main thread 3 s after the hidden reload |
+|---|---|---|
+| main | 0.0 % | `eglSwapBuffers` → `libEGL_nvidia` → `wl_display_dispatch_queue` (stuck) |
+| this branch | 0.0 % | winit `calloop` event loop (responsive) |
+
+Harness traps: Yama `ptrace_scope=1` blocks `gdb -p`, so run the app *under*
+gdb; and the nested KWin D-Bus-activates `knighttimed` on the private bus,
+which inherits stdout and keeps a `| tail` pipe open forever.
+
 ## Key Discoveries
 
 - The window must actually be hidden for the test to mean anything. Two early
