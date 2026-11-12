@@ -10,6 +10,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `dark_mode: bool` - global theme setting
   - `zoom_level: f32` - global zoom (0.5 to 3.0)
   - `show_outline: bool` - toggle outline sidebar visibility
+  - `show_tab_bar: bool` - tab bar visibility (#208); the bar still shows while the active tab is in Edit mode (`tab_bar_visible`)
   - `show_explorer: bool` - toggle file explorer visibility
   - `file_explorer: FileExplorer` - file explorer state
   - `watch_enabled: bool` - file watching state
@@ -34,6 +35,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `dark_mode: Option<bool>`
   - `zoom_level: Option<f32>`
   - `show_outline: Option<bool>`
+  - `show_tab_bar: Option<bool>` - `None` (state written before #208) shows the bar
   - `show_explorer: Option<bool>` - file explorer visibility
   - `explorer_root: Option<PathBuf>` - file explorer root directory
   - `expanded_dirs: Option<Vec<PathBuf>>` - expanded directories in explorer

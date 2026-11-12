@@ -1,6 +1,6 @@
 # Hide the tab bar (#208)
 
-**Status:** In progress
+**Status:** Complete
 **Branch:** `feature/hide-tab-bar`
 **Date:** 2026-11-12
 
@@ -42,3 +42,22 @@ So:
   pre-#208 state).
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --locked`
   (80 passed).
+- Xvfb E2E (MCP build, isolated `XDG_*` dirs, README.md):
+  - View → Show Tab Bar off: the snapshot loses `Tab: README.md`, and the
+    screenshot shows the document directly under the menu bar.
+  - View → Edit Mode: the bar comes back with Preview | Edit and the raw text.
+  - Preview: the bar hides again.
+  - Saved state has `show_tab_bar:Some(false)`; after a restart the tab
+    widgets are still absent.
+
+## Key Discoveries
+
+- Clicking View-menu items through `egui_click` was unreliable on Xvfb: one
+  click opened or closed the menu out of step with the snapshot, and one landed
+  on Dark Mode instead of Edit Mode. Real pointer clicks
+  (`xdotool mousemove --window <id> x y click 1`) at coordinates read off a
+  screenshot were reliable.
+
+## Future Improvements
+
+- An "auto-hide with one tab" mode, if someone asks for it.
