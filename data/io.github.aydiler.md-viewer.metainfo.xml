@@ -84,6 +84,56 @@
   </provides>
 
   <releases>
+    <release version="0.3.2" date="2026-11-12">
+      <description>
+        <p>Links and emoji:</p>
+        <ul>
+          <li>Bare URLs written without link syntax are clickable, as on GitHub</li>
+          <li>The red heart emoji renders in color</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.3.1" date="2026-11-12">
+      <description>
+        <p>Color emoji and editing:</p>
+        <ul>
+          <li>Emoji render in full color from the system's Noto Color Emoji font</li>
+          <li>A Preview / Edit toggle turns a tab into a plain Markdown editor, saved with Ctrl+S</li>
+          <li>Tables fill the pane, and Full Width is the default</li>
+          <li>A window on a hidden Wayland workspace no longer freezes when its file changes</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.3.0" date="2026-09-13">
+      <description>
+        <p>Fonts:</p>
+        <ul>
+          <li>One Fonts menu with presets, text sizes and a family picker</li>
+          <li>Font presets resolve against the fonts installed on the system</li>
+          <li>Wide tables no longer slide under the sidebar</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.2.2" date="2026-09-12">
+      <description>
+        <p>Fonts and links:</p>
+        <ul>
+          <li>Choose the document font from every installed system font</li>
+          <li>Links with a #fragment land on the heading they name</li>
+          <li>List markers line up with their item text</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.2.1" date="2026-09-10">
+      <description>
+        <p>Links and tables:</p>
+        <ul>
+          <li>Copy a link's address from its context menu</li>
+          <li>Dense tables take much less vertical space</li>
+          <li>Links to missing or undecodable targets are reported instead of ignored</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-04">
       <description>
         <p>Rendering and table overhaul:</p>
