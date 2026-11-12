@@ -660,6 +660,13 @@ objdump -T target/release/md-viewer | grep -oE 'GLIBC_[0-9.]+' | sort -u | tail
 ```
 **Files:** `snap/snapcraft.yaml`, `.github/workflows/release.yml`
 
+### A snap job failing at `snap install lxd` is the runner's store connection, not the build
+**Context:** v0.3.2. The snap job failed six times in a row (dry run and tag), always before our code was built: `unable to contact snap store`, HTTP 408 or `EOF` on `POST https://api.snapcraft.io/v2/snaps/refresh`, `cannot install system snap "snapd"`. Every other channel published.
+**Reading it:** if the failing step is the LXD/snapcraft install, nothing in the release commit is at fault. The Snap Store was dropping requests (probes from a workstation lost 2 of 24 across its six IPs). `create-release` needs only `[validate, build]`, so the GitHub Release is not blocked.
+**What worked:** wait, then re-dispatch `snap-publish.yml -f tag=vX.Y.Z -f upload=true` from main. It took two dispatches 45 minutes apart (devlog 078). Do **not** `gh run rerun` the tag's run: that replays the workflow as it was at the tag, without later fixes. `scripts/snap-ci.sh` retries each store call six times over about 8 minutes, which covers single dropped requests but not a longer outage.
+**Never** fall back to a local `--destructive-mode` build (glibc trap, entry below).
+**Files:** `scripts/snap-ci.sh`, `.github/workflows/snap-publish.yml`, `.github/workflows/release.yml` (`publish-snap`), `docs/devlog/078-snap-store-retry.md`
+
 ### snapcraft renamed `push-metadata` → `upload-metadata` (the whole `push` verb family)
 **Context:** v0.1.14 release. The **Publish to Snap Store** job went red, but the snap itself published fine — `snapcore/action-publish@v1` logged `Revision 17 created for 'md-viewer' and released to 'stable'`. The failure was the *next* step, "Push snap store listing metadata", which runs `snapcraft push-metadata "${SNAP_FILE}" --force`:
 ```
