@@ -2,6 +2,23 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.2] - 2026-11-12
+
+Bare URLs become links, ❤️ is red again, and the release pipeline now builds every channel before a tag is pushed.
+
+### Features
+
+- **Bare URLs are clickable, as on GitHub (#220, issue #209).** A URL written without link syntax, such as `https://github.com/aydiler/md-viewer/issues` in the middle of a sentence, now renders as a link and opens on click. It follows GitHub's extended-autolink rules: `https://`, `http://` and `www.` addresses are recognized, trailing punctuation such as `.`, `,` or `!` stays outside the link, a closing parenthesis is kept only when it balances one inside the URL (so `https://en.wikipedia.org/wiki/Foo_(bar)` links whole), and `www.` addresses open as `http://`. URLs inside existing links, inline code and code blocks are left alone, and search highlights and right-click copy work on them like on any other link. Not yet covered: email addresses, URLs inside headings, and URLs that contain a backslash escape.
+
+### Bug Fixes
+
+- **❤️ renders in color (#218).** Since 0.3.1 the color emoji font only claims characters that are emoji by default, so UI symbols keep their text glyphs. `❤️` is U+2764 followed by the emoji presentation selector U+FE0F, and U+2764 alone is not a default emoji, so it — and the `:heart:` shortcode — fell back to a white text heart. The selector now picks the color face for the character before it. A bare `❤` without the selector stays a text glyph, as intended.
+
+### Internal
+
+- **The release workflow has a dry run (#219, #221).** `gh workflow run release.yml --ref main` builds Linux, macOS, Windows and the snap on the release's own runner images and publishes nothing. It also builds the exact package `cargo publish` uploads, against epaint from crates.io, so a crates.io-only compile error like the one fixed in 0.3.1 (#215) now fails before a tag instead of after it.
+- **The vendored renderer moves to 0.28.5**, carrying #220's link detection.
+
 ## [0.3.1] - 2026-11-12
 
 Color emoji, a simple editor, tables that fill the pane, and three fixes for problems that only showed up on users' machines, never on the build machine.
