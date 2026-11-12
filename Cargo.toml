@@ -77,7 +77,14 @@ percent-encoding = "2.3"
 zbus = { version = "5.5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [features]
-default = []
+# `color-emoji` uses `FontData::emoji_only`, which only exists in the vendored
+# epaint (`crates/epaint`, wired in by `[patch.crates-io]`). `cargo publish`
+# ignores patches, so the crates.io package is built against stock epaint and
+# cannot use it: the release workflow's publish-crates job rewrites this
+# default to `[]` before publishing. Every source build (snap, AUR, release
+# binaries, local dev) keeps it on.
+default = ["color-emoji"]
+color-emoji = []
 # mcp = ["dep:egui-mcp-bridge"]
 
 [lints.rust]

@@ -264,6 +264,22 @@ jobs:
           t = re.sub(r'(?m)^egui-mcp-bridge\s*=\s*.*\n', '', t)
           p.write_text(t)
 
+      - name: Drop color-emoji from the published default features
+        # `color-emoji` needs `FontData::emoji_only`, which only the vendored
+        # epaint has. `cargo publish` ignores `[patch.crates-io]`, so the
+        # crates.io package builds against stock epaint and must not enable it.
+        # Fails if the line is missing, so a renamed feature cannot slip
+        # through to a publish that no longer compiles.
+        if: steps.check.outputs.proceed == 'true'
+        shell: python
+        run: |
+          import pathlib, re, sys
+          p = pathlib.Path("Cargo.toml")
+          t, n = re.subn(r'(?m)^default\s*=\s*\["color-emoji"\]', 'default = []', p.read_text())
+          if n != 1:
+              sys.exit(f"expected one `default = [\"color-emoji\"]` line, found {n}")
+          p.write_text(t)
+
       - name: Publish fork crates and md-viewer
         if: steps.check.outputs.proceed == 'true'
         env:

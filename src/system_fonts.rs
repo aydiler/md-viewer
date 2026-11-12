@@ -756,6 +756,7 @@ const EMOJI_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regula
 /// regular system fallbacks but before the monochrome emoji face.
 /// Only the CBDT `NotoColorEmoji.ttf` builds belong here; Fedora's COLRv1
 /// `Noto-COLRv1.ttf` is not handled by the swash bitmap path.
+#[cfg(feature = "color-emoji")]
 const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/noto/NotoColorEmoji.ttf", // Arch (noto-fonts-emoji)
     "/usr/share/fonts/TTF/NotoColorEmoji.ttf",  // Arch (older layout)
@@ -767,8 +768,12 @@ const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
 /// The color face is only useful with the vendored epaint patch that
 /// rasterizes color-bitmap glyphs via swash (ab_glyph alone renders them
 /// blank). With the patch, emoji render in full color; without it, the
-/// monochrome face still provides visible glyphs.
+/// monochrome face still provides visible glyphs. Builds without the
+/// `color-emoji` feature (the crates.io package) only get the monochrome face.
 fn install_emoji_fonts(definitions: &mut FontDefinitions) {
+    // `emoji_only` exists only in the vendored epaint (`[patch.crates-io]`),
+    // which `cargo publish` ignores; see the `color-emoji` feature in Cargo.toml.
+    #[cfg(feature = "color-emoji")]
     for path in COLOR_EMOJI_FONT_PATHS {
         match std::fs::read(path) {
             Ok(bytes) => {
@@ -1227,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "color-emoji")]
     #[ignore = "requires installed system fonts"]
     fn emoji_fallback_face_resolves_for_doc_emoji() {
         // Build the same definitions setup_fonts() would install: egui
@@ -1407,6 +1413,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "color-emoji")]
     #[ignore = "requires installed system fonts"]
     fn color_emoji_face_never_claims_ui_symbols() {
         let mut definitions = FontDefinitions::default();

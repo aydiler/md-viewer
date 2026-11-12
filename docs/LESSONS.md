@@ -184,11 +184,19 @@ egui::FontData::from_owned(font_data).into()
 ```
 **Files:** `src/main.rs`
 
-### Color emojis not supported in egui
-**Context:** Emojis render as monochrome outlines despite loading NotoColorEmoji
-**Root cause:** egui's font renderer (ab_glyph) doesn't support color font formats (COLR/CPAL, CBDT/CBLC)
-**Workaround:** None - this is an upstream limitation. Emojis will render as simple outlines.
-**Files:** `src/main.rs`
+### Color emojis need the vendored epaint (stock egui renders them blank)
+**Context:** Emojis rendered as monochrome outlines despite loading NotoColorEmoji.
+**Root cause:** stock epaint rasterizes with ab_glyph, which does not support color font formats (COLR/CPAL, CBDT/CBLC).
+**Fix (since 0.3.0):** `crates/epaint` is a vendored epaint 0.33.3, wired in via `[patch.crates-io]`, that rasterizes CBDT bitmap glyphs through swash. It also adds `FontData::emoji_only` so the color face only claims default-emoji characters and leaves UI symbols (▶ ⚠ ✔) to the text fonts. Only CBDT `NotoColorEmoji.ttf` builds work; Fedora's COLRv1 `Noto-COLRv1.ttf` does not.
+**Gotcha:** all of this is behind the `color-emoji` cargo feature, because the crates.io build cannot see the patch (next entry).
+**Files:** `crates/epaint/`, `src/system_fonts.rs` (`install_emoji_fonts`)
+
+### A field added by a `[patch]`ed crate breaks the crates.io build
+**Context:** Preparing 0.3.1. The color-emoji code set `FontData::emoji_only`, which exists only in the vendored epaint.
+**Problem:** `cargo publish` ignores `[patch.crates-io]` and verifies against the registry's epaint, so the published md-viewer did not compile (`error[E0609]: no field emoji_only on type FontData`). Every other channel builds from the git tree with the patch, so CI, snap, AUR and the release binaries all stayed green. Nothing failed except the one channel nobody builds locally. `scripts/check-fork-publishable.sh` only guards the egui_commonmark fork, which *is* published under its own name; epaint is patched in place and cannot be.
+**Fix:** a `color-emoji` feature, on by default in the repo. The release workflow's `publish-crates` job rewrites `default = ["color-emoji"]` to `default = []` before `cargo publish`, and fails if that line is missing. Without the feature, emoji fall back to the bundled monochrome Noto Emoji face.
+**General lesson:** anything a patched crate *adds* (a field, a function, a feature) is only reachable from code gated on a feature that the published manifest turns off. Before tagging, run `cargo publish --dry-run -p md-viewer`. It is the only local command that builds what crates.io users get.
+**Files:** `Cargo.toml` (`[features]`), `src/system_fonts.rs`, `.github/workflows/release.yml` (`publish-crates`), `docs/devlog/072-crates-color-emoji-gate.md`
 
 ### egui 0.33 Painter API changes
 **Context:** Implementing minimap with custom drawing
