@@ -2,6 +2,33 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.1] - 2026-11-12
+
+Color emoji, a simple editor, tables that fill the pane, and three fixes for problems that only showed up on users' machines, never on the build machine.
+
+### Features
+
+- **Color emoji in documents (#204).** Emoji now render in full color from the system's `NotoColorEmoji.ttf`. Stock egui cannot draw color glyphs, so md-viewer ships a vendored epaint 0.33.3 that rasterizes color-bitmap glyphs through swash. The color face only claims characters that are emoji by default, so UI symbols such as ▶ ⚠ ✔ keep their text glyphs. A bundled monochrome Noto Emoji face covers anything the color font lacks. The app chrome no longer uses emoji at all: the explorer draws vector file and folder icons.
+
+- **Preview / Edit toggle with Ctrl+S save (#205).** A segmented **Preview | Edit** switch in the tab bar turns the active tab into a plain Markdown text editor. **Ctrl+S** saves atomically (a temporary file, then a rename), a dot marks unsaved changes, and the file watcher never overwrites a buffer with unsaved edits. The scroll position carries across the switch in both directions.
+
+- **Tables fill the pane, and Full Width is the default (#211, contributed by [@nsrshishir](https://github.com/nsrshishir)).** Tables narrower than the pane stretch their columns proportionally to fill it, and re-fit whenever the pane width changes: window resize, the Full Width toggle, or a sidebar drag. This replaces the sticky column widths from 0.3.0 (#201). **Full Width** is now on unless you turned it off before, and **Ctrl+Shift+W** toggles it. Two bugs were fixed before merge: after the right sidebar snapped back to its minimum, a table could stay short of the pane until the next resize, and Ctrl+Shift+W also closed the current tab.
+
+### Bug Fixes
+
+- **A window on a hidden workspace no longer freezes when its file changes (#210, contributed by [@Emkai](https://github.com/Emkai)).** On Wayland, a reload while md-viewer sat on a non-visible workspace blocked the UI thread inside `eglSwapBuffers`. The driver waits there for a frame callback, and compositors do not send frame callbacks to hidden windows, so the compositor eventually reported the app as not responding. Driver vsync is now off on Wayland, where the compositor already prevents tearing and winit paces redraws on frame callbacks without blocking. X11 keeps vsync. It was found on Hyprland with Mesa and reproduced and verified on KWin with the NVIDIA driver.
+
+- **The snap opens the native file picker (#206, #213).** Inside the snap, File → Open fell back to a basic Tk dialog, because the check for the desktop file-chooser portal ran the `gdbus` command, which the snap does not contain. The check now queries the portal directly over D-Bus from inside the app.
+
+- **The bundled emoji font actually loads (#214).** The monochrome emoji font from #204 was read at runtime from a path that only existed on the machine that built the binary, so every distributed build silently lacked it. It is now embedded in the binary. Debian and Ubuntu's location for `NotoColorEmoji.ttf` was added to the search list.
+
+- **`cargo install md-viewer` builds again (#215).** The color-emoji code used a field that only exists in the vendored epaint. `cargo publish` ignores that patch, so the crates.io package could not compile. Color emoji is now the `color-emoji` cargo feature: on by default in every source build, and off in the published crate, which uses the bundled monochrome emoji instead.
+
+### Internal
+
+- **CI is pinned to `ubuntu-24.04` (#212).** `ubuntu-latest` had moved to 26.04, which would also have raised the glibc requirement of the Linux release binary. Package installs now retry and time out instead of hanging for 30 minutes when the Ubuntu mirrors are unreachable.
+- **The vendored renderer moves to 0.28.4**, carrying #211's table changes.
+
 ## [0.3.0] - 2026-09-13
 
 Fonts got a real settings surface, and wide tables stopped escaping the reading pane.
