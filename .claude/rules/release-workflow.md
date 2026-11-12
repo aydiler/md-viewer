@@ -21,7 +21,9 @@ See `docs/LESSONS.md`, "CHANGELOG.md is hand-curated".
 0. **Run the release dry run on `main` and wait for it to go green:**
    `gh workflow run release.yml --ref main`, then `gh run watch`. It builds
    Linux, macOS, Windows and the snap on the release's own runner images and
-   publishes nothing (every publish job shows *skipped*). Two releases were
+   publishes nothing (every publish job shows *skipped*). Its
+   `crates-package-check` job also builds the package `cargo publish` would
+   upload, against epaint from crates.io (devlog 077). Two releases were
    broken by things only the release workflow exercises: a retired runner image
    (`macos-14`, v0.3.1) and a crates.io-only build error (#215). Neither PR CI
    nor `cross-platform.yml` caught them before the tag.
