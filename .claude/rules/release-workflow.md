@@ -53,6 +53,10 @@ See `docs/LESSONS.md`, "CHANGELOG.md is hand-curated".
    three fork crates share it.
 
 4. **Prepend a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`,** by hand.
+   Add a matching `<release version="X.Y.Z" date="…">` at the top of
+   `<releases>` in `data/io.github.aydiler.md-viewer.metainfo.xml` (a few
+   user-facing bullets). CI's `version-sync` job fails if the newest metainfo
+   release differs from `Cargo.toml`.
 
 5. **Commit, then tag:** `git tag vX.Y.Z && git push origin vX.Y.Z`.
 

@@ -2,6 +2,12 @@ name: md-viewer
 base: core22
 version: '0.3.2'
 summary: Fast, lightweight markdown viewer for Linux
+title: md-viewer
+license: MIT
+contact: https://github.com/aydiler/md-viewer/issues
+issues: https://github.com/aydiler/md-viewer/issues
+source-code: https://github.com/aydiler/md-viewer
+website: https://github.com/aydiler/md-viewer
 description: |
   A fast, lightweight markdown viewer for Linux built with Rust and egui.
   Designed for distraction-free reading with excellent typography and syntax highlighting.
