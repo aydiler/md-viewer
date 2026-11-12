@@ -851,3 +851,45 @@ fn top_level_code_block_layout_remains_separate() {
     // This control is already green before the fix and protects the list-only gate.
     assert_vertical_order(&painted, &["TOP_BEFORE", "TOP_CODE", "TOP_AFTER"]);
 }
+
+/// #209: a bare URL in prose renders as a link (underlined), its trailing
+/// sentence punctuation does not, and a URL that pulldown-cmark splits into
+/// several text events (at `_` and `(`) is still linked as one piece.
+#[test]
+fn bare_urls_in_prose_render_as_links() {
+    let markdown = "See https://example.com/a. Also https://en.wikipedia.org/wiki/Foo_(bar) and `https://code.example.com` here.";
+    let (_, _, painted) = render_geometry(markdown, 900.0);
+    let linked: Vec<&str> = painted
+        .iter()
+        .filter(|entry| entry.underlined)
+        .map(|entry| entry.text.as_str())
+        .collect();
+
+    assert_eq!(
+        linked,
+        vec![
+            "https://example.com/a",
+            "https://en.wikipedia.org/wiki/Foo_(bar)"
+        ],
+        "painted text: {painted:#?}"
+    );
+}
+
+/// URLs inside headings, code blocks and existing Markdown links keep their
+/// current rendering: no second link is opened inside them.
+#[test]
+fn bare_urls_are_not_linked_inside_code_or_existing_links() {
+    let markdown = "[label https://x.example.com](https://dest.example.com)\n\n```\nhttps://block.example.com\n```\n";
+    let (_, _, painted) = render_geometry(markdown, 900.0);
+    let linked: Vec<&str> = painted
+        .iter()
+        .filter(|entry| entry.underlined)
+        .map(|entry| entry.text.as_str())
+        .collect();
+
+    assert_eq!(
+        linked,
+        vec!["label https://x.example.com"],
+        "painted text: {painted:#?}"
+    );
+}
