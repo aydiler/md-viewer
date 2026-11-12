@@ -13,7 +13,7 @@ env:
 jobs:
   validate:
     name: Validate tag matches versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -54,7 +54,7 @@ jobs:
     # the run still goes red under an obvious name, but the other channels
     # publish.
     name: crates.io token is valid
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -112,7 +112,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset_name: linux-x86_64
           - os: macos-14
@@ -128,9 +128,10 @@ jobs:
 
       - name: Install system dependencies (Linux only)
         if: runner.os == 'Linux'
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
+          sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
 
@@ -205,7 +206,7 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [validate, build, check-crates-token]
     timeout-minutes: 20
     permissions:
@@ -233,9 +234,10 @@ jobs:
         # md-viewer's `cargo publish` verify step compiles the packaged crate
         # against crates.io deps (no patch), which links eframe/rfd/etc. Same
         # apt set as the build job.
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang pkg-config libxcb1-dev libxcb-render0-dev \
+          sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
             libgtk-3-dev libfontconfig1-dev libdbus-1-dev
 
@@ -262,6 +264,22 @@ jobs:
           t = re.sub(r'(?m)^egui-mcp-bridge\s*=\s*.*\n', '', t)
           p.write_text(t)
 
+      - name: Drop color-emoji from the published default features
+        # `color-emoji` needs `FontData::emoji_only`, which only the vendored
+        # epaint has. `cargo publish` ignores `[patch.crates-io]`, so the
+        # crates.io package builds against stock epaint and must not enable it.
+        # Fails if the line is missing, so a renamed feature cannot slip
+        # through to a publish that no longer compiles.
+        if: steps.check.outputs.proceed == 'true'
+        shell: python
+        run: |
+          import pathlib, re, sys
+          p = pathlib.Path("Cargo.toml")
+          t, n = re.subn(r'(?m)^default\s*=\s*\["color-emoji"\]', 'default = []', p.read_text())
+          if n != 1:
+              sys.exit(f"expected one `default = [\"color-emoji\"]` line, found {n}")
+          p.write_text(t)
+
       - name: Publish fork crates and md-viewer
         if: steps.check.outputs.proceed == 'true'
         env:
@@ -270,7 +288,7 @@ jobs:
 
   publish-snap:
     name: Publish to Snap Store
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [validate, build]
     timeout-minutes: 30
     permissions:
@@ -334,7 +352,7 @@ jobs:
 
   publish-aur:
     name: Publish to AUR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [validate, build]
     timeout-minutes: 10
     permissions:
@@ -420,7 +438,7 @@ jobs:
 
   publish-aur-bin:
     name: Publish to AUR (-bin)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [validate, build]
     timeout-minutes: 10
     permissions:
@@ -551,7 +569,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Decoupled from publish-snap: the GH release page appears as soon as the
     # build matrix finishes (~12 min sooner). publish-aur-bin already pulls its
     # tarball from download-artifact (not the GH Release URL), so nothing else

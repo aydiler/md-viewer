@@ -154,7 +154,7 @@ fn paint_sidebar_resize_affordance(
 fn paint_file_icon(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    let stroke = egui::Stroke::new(1.2, ui.visuals().weak_text_color());
+    let stroke = egui::Stroke::new(1.2_f32, ui.visuals().weak_text_color());
     let body = egui::Rect::from_min_max(
         rect.left_top() + egui::vec2(2.0, 1.0),
         rect.right_bottom() - egui::vec2(2.0, 1.0),
@@ -177,7 +177,13 @@ fn paint_file_icon(ui: &mut egui::Ui, size: f32) {
     );
     painter.line_segment([body.left_top(), body.left_bottom()], stroke);
     painter.line_segment([body.left_bottom(), body.right_bottom()], stroke);
-    painter.line_segment([body.right_bottom(), body.right_top() + egui::vec2(0.0, fold)], stroke);
+    painter.line_segment(
+        [
+            body.right_bottom(),
+            body.right_top() + egui::vec2(0.0, fold),
+        ],
+        stroke,
+    );
 }
 
 /// Draw a small vector folder icon for directory rows in the explorer.
@@ -186,7 +192,7 @@ fn paint_folder_icon(ui: &mut egui::Ui, size: f32, expanded: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
-    let stroke = egui::Stroke::new(1.2, visuals.weak_text_color());
+    let stroke = egui::Stroke::new(1.2_f32, visuals.weak_text_color());
     let fill = if expanded {
         visuals.extreme_bg_color
     } else {
@@ -226,29 +232,42 @@ fn paint_folder_icon(ui: &mut egui::Ui, size: f32, expanded: bool) {
 /// Linux folder picker. Calling rfd without this interface fails like a user
 /// cancellation, so checking first lets us distinguish that case and use a
 /// local fallback without opening a second dialog after a real cancellation.
+///
+/// The probe runs in-process over the session bus. It used to shell out to
+/// `gdbus`, which the snap and its core22 base do not ship, so the probe
+/// always failed there and fell through to a Tkinter picker that strict
+/// confinement cannot run either (#206).
 #[cfg(target_os = "linux")]
 fn portal_file_chooser_available() -> bool {
-    Command::new("gdbus")
-        .args([
-            "introspect",
-            "--session",
-            "--dest",
-            "org.freedesktop.portal.Desktop",
-            "--object-path",
-            "/org/freedesktop/portal/desktop",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|output| {
-            output.status.success() && portal_introspection_has_file_chooser(&output.stdout)
-        })
-        .unwrap_or(false)
+    match portal_file_chooser_version() {
+        Ok(version) => {
+            log::debug!("XDG Desktop Portal FileChooser available (version {version})");
+            true
+        }
+        Err(error) => {
+            log::info!("XDG Desktop Portal FileChooser probe failed: {error}");
+            false
+        }
+    }
 }
 
+/// Read `org.freedesktop.portal.FileChooser`'s `version` property. Succeeds
+/// only if the portal service exists *and* implements the FileChooser
+/// interface; D-Bus activation starts the portal if it is not yet running.
 #[cfg(target_os = "linux")]
-fn portal_introspection_has_file_chooser(stdout: &[u8]) -> bool {
-    String::from_utf8_lossy(stdout).contains("org.freedesktop.portal.FileChooser")
+fn portal_file_chooser_version() -> zbus::Result<u32> {
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let reply = connection.call_method(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &("org.freedesktop.portal.FileChooser", "version"),
+    )?;
+    let value: zbus::zvariant::OwnedValue = reply.body().deserialize()?;
+    u32::try_from(value).map_err(zbus::Error::from)
 }
 
 #[cfg(target_os = "linux")]
@@ -1179,8 +1198,7 @@ impl Tab {
         } else {
             // Leaving edit: first-frame estimate for the view; the
             // renderer's own correctives refine it after.
-            self.pending_scroll_offset =
-                Some(ratio * self.pre_edit_view_content_height.max(1.0));
+            self.pending_scroll_offset = Some(ratio * self.pre_edit_view_content_height.max(1.0));
         }
         self.is_editing = to_edit;
         self.cache.clear_scrollable();
@@ -2421,7 +2439,7 @@ impl MarkdownApp {
             .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
-        let full_width_content = persisted.full_width_content.unwrap_or(false);
+        let full_width_content = persisted.full_width_content.unwrap_or(true);
         let math_scale = persisted.math_scale.unwrap_or(1.0).clamp(1.0, 2.0);
         let highlight_color = persisted
             .highlight_color
@@ -3222,7 +3240,6 @@ impl MarkdownApp {
 
         egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-
                 let text_edit = egui::TextEdit::singleline(&mut self.search.query)
                     .id(input_id)
                     .hint_text("Find in document")
@@ -3554,15 +3571,10 @@ impl MarkdownApp {
                                     };
                                     let response = ui.add(
                                         egui::Button::new(
-                                            egui::RichText::new(label)
-                                                .small()
-                                                .color(text_color),
+                                            egui::RichText::new(label).small().color(text_color),
                                         )
                                         .fill(if active {
-                                            ui.visuals()
-                                                .widgets
-                                                .inactive
-                                                .weak_bg_fill
+                                            ui.visuals().widgets.inactive.weak_bg_fill
                                         } else {
                                             egui::Color32::TRANSPARENT
                                         })
@@ -4088,54 +4100,57 @@ impl MarkdownApp {
                         ui.ctx().request_repaint();
                     }
                 } else {
-                let force_full_render =
-                    tab.pending_header_click_key.is_some() || correct_search_this_frame;
-                let pending = tab.pending_scroll_offset.take();
-                let default_width = content_default_width(self.full_width_content);
-                let content_width =
-                    content_width_limit(self.full_width_content, content_rect.width());
-                // Line heights follow the emulated viewer (GitHub 1.5/1.45,
-                // VS Code preview 1.6/1.36); the font preset owns the metrics.
-                let (preset_line_height, preset_code_line_height) = self.font_preset.line_heights();
-                scroll_output = Some(CommonMarkViewer::new()
-                    .default_implicit_uri_scheme(&tab.base_uri)
-                    .max_image_width(Some(800))
-                    .default_width(default_width)
-                    // Full Width governs the complete document layout. With
-                    // the reading cap active, tables reflow within it; their
-                    // horizontal scroller still handles minimum-width or
-                    // user-resized overflow (#110).
-                    .table_max_width(Some(content_width))
-                    .indentation_spaces(2)
-                    .use_strong_font_family(true)
-                    // Frontmatter is metadata, not prose: show it as a
-                    // key/value table rather than a thematic break plus a
-                    // paragraph of raw `key: value` lines (#117).
-                    .render_frontmatter(true)
-                    .math_scale(self.math_scale)
-                    .show_alt_text_on_hover(true)
-                    .syntax_theme_dark("base16-ocean.dark")
-                    .syntax_theme_light("base16-ocean.light")
-                    .line_height(preset_line_height)
-                    .code_line_height(preset_code_line_height)
-                    .paragraph_spacing(2.0)
-                    .heading_spacing_above(2.0)
-                    .heading_spacing_below(0.75)
-                    .content_version(tab.content_version)
-                    .pending_scroll_offset(pending)
-                    .force_full_render(force_full_render)
-                    .scroll_source(egui::scroll_area::ScrollSource {
-                        scroll_bar: true,
-                        drag: false,
-                        mouse_wheel: true,
-                    })
-                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content));
+                    let force_full_render =
+                        tab.pending_header_click_key.is_some() || correct_search_this_frame;
+                    let pending = tab.pending_scroll_offset.take();
+                    let default_width = content_default_width(self.full_width_content);
+                    let content_width =
+                        content_width_limit(self.full_width_content, content_rect.width());
+                    // Line heights follow the emulated viewer (GitHub 1.5/1.45,
+                    // VS Code preview 1.6/1.36); the font preset owns the metrics.
+                    let (preset_line_height, preset_code_line_height) =
+                        self.font_preset.line_heights();
+                    scroll_output = Some(
+                        CommonMarkViewer::new()
+                            .default_implicit_uri_scheme(&tab.base_uri)
+                            .max_image_width(Some(800))
+                            .default_width(default_width)
+                            // Full Width governs the complete document layout. With
+                            // the reading cap active, tables reflow within it; their
+                            // horizontal scroller still handles minimum-width or
+                            // user-resized overflow (#110).
+                            .table_max_width(Some(content_width))
+                            .indentation_spaces(2)
+                            .use_strong_font_family(true)
+                            // Frontmatter is metadata, not prose: show it as a
+                            // key/value table rather than a thematic break plus a
+                            // paragraph of raw `key: value` lines (#117).
+                            .render_frontmatter(true)
+                            .math_scale(self.math_scale)
+                            .show_alt_text_on_hover(true)
+                            .syntax_theme_dark("base16-ocean.dark")
+                            .syntax_theme_light("base16-ocean.light")
+                            .line_height(preset_line_height)
+                            .code_line_height(preset_code_line_height)
+                            .paragraph_spacing(2.0)
+                            .heading_spacing_above(2.0)
+                            .heading_spacing_below(0.75)
+                            .content_version(tab.content_version)
+                            .pending_scroll_offset(pending)
+                            .force_full_render(force_full_render)
+                            .scroll_source(egui::scroll_area::ScrollSource {
+                                scroll_bar: true,
+                                drag: false,
+                                mouse_wheel: true,
+                            })
+                            .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content),
+                    );
 
-                if let Some(so) = scroll_output.as_ref() {
-                    tab.scroll_offset = so.state.offset.y;
-                    tab.last_viewport_height = so.inner_rect.height();
-                    tab.last_content_height = so.content_size.y;
-                }
+                    if let Some(so) = scroll_output.as_ref() {
+                        tab.scroll_offset = so.state.offset.y;
+                        tab.last_viewport_height = so.inner_rect.height();
+                        tab.last_content_height = so.content_size.y;
+                    }
                 }
 
                 // If the renderer recorded an exact y for the active match, check
@@ -4783,7 +4798,8 @@ impl MarkdownApp {
                 // One canonical name per body-capable family, scanned once in
                 // the background at startup. While the scan is running, only
                 // "System Default" is offered.
-                if self.available_font_families.is_empty() && self.pending_font_family_scan.is_some()
+                if self.available_font_families.is_empty()
+                    && self.pending_font_family_scan.is_some()
                 {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -4820,39 +4836,39 @@ impl MarkdownApp {
                     .auto_shrink([false, true])
                     .max_height(300.0)
                     .show_rows(
-                    ui,
-                    row_height,
-                    match_count + 1, // + 1 for the pinned "System Default" row
-                    |ui, rows| {
-                        for row in rows {
-                            if row == 0 {
-                                let default_selected = self.selected_font_family.is_none();
-                                let default_btn =
-                                    ui.selectable_label(default_selected, "System Default");
-                                #[cfg(feature = "mcp")]
-                                self.mcp_bridge.register_widget(
-                                    "Font Dialog: System Default",
-                                    "button",
-                                    &default_btn,
-                                    Some(if default_selected { "selected" } else { "" }),
-                                );
-                                if default_btn.clicked() {
-                                    new_selection = Some(None);
+                        ui,
+                        row_height,
+                        match_count + 1, // + 1 for the pinned "System Default" row
+                        |ui, rows| {
+                            for row in rows {
+                                if row == 0 {
+                                    let default_selected = self.selected_font_family.is_none();
+                                    let default_btn =
+                                        ui.selectable_label(default_selected, "System Default");
+                                    #[cfg(feature = "mcp")]
+                                    self.mcp_bridge.register_widget(
+                                        "Font Dialog: System Default",
+                                        "button",
+                                        &default_btn,
+                                        Some(if default_selected { "selected" } else { "" }),
+                                    );
+                                    if default_btn.clicked() {
+                                        new_selection = Some(None);
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                let font_index = filtered_indices
+                                    .as_ref()
+                                    .map_or(row - 1, |indices| indices[row - 1]);
+                                let name = &self.available_font_families[font_index];
+                                let is_selected =
+                                    self.selected_font_family.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(is_selected, name).clicked() {
+                                    new_selection = Some(Some(name.clone()));
+                                }
                             }
-                            let font_index = filtered_indices
-                                .as_ref()
-                                .map_or(row - 1, |indices| indices[row - 1]);
-                            let name = &self.available_font_families[font_index];
-                            let is_selected =
-                                self.selected_font_family.as_deref() == Some(name.as_str());
-                            if ui.selectable_label(is_selected, name).clicked() {
-                                new_selection = Some(Some(name.clone()));
-                            }
-                        }
-                    },
-                );
+                        },
+                    );
             });
 
         self.show_font_dialog = open;
@@ -5227,10 +5243,8 @@ impl eframe::App for MarkdownApp {
                 .map(Receiver::try_recv);
             match received {
                 Some(Ok(names)) => {
-                    self.available_font_families_lower = names
-                        .iter()
-                        .map(|name| name.to_ascii_lowercase())
-                        .collect();
+                    self.available_font_families_lower =
+                        names.iter().map(|name| name.to_ascii_lowercase()).collect();
                     self.available_font_families = names;
                     self.pending_font_family_scan = None;
                     // The list may have landed while the font dialog was
@@ -5299,6 +5313,7 @@ impl eframe::App for MarkdownApp {
         let mut toggle_dark = false;
         let mut toggle_outline = false;
         let mut toggle_explorer = false;
+        let mut toggle_full_width = false;
         let mut quit_app = false;
         let mut zoom_factor_request: Option<f32> = None;
         let mut zoom_reset = false;
@@ -5363,8 +5378,12 @@ impl eframe::App for MarkdownApp {
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::E) {
                     toggle_explorer = true;
                 }
-                // Ctrl+W: Close current tab
-                if i.modifiers.ctrl && i.key_pressed(egui::Key::W) {
+                // Ctrl+Shift+W: Toggle full width
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::W) {
+                    toggle_full_width = true;
+                }
+                // Ctrl+W: Close current tab (not Ctrl+Shift+W, which toggles full width)
+                if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::W) {
                     close_tab = true;
                 }
                 // Ctrl+T: Open a file in a new tab
@@ -5497,6 +5516,9 @@ impl eframe::App for MarkdownApp {
         }
         if toggle_explorer {
             self.show_explorer = !self.show_explorer;
+        }
+        if toggle_full_width {
+            self.full_width_content = !self.full_width_content;
         }
         if quit_app {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -5753,7 +5775,8 @@ impl eframe::App for MarkdownApp {
                     } else {
                         "Full Width"
                     };
-                    let full_width_btn = ui.add(egui::Button::new(full_width_text));
+                    let full_width_btn =
+                        ui.add(egui::Button::new(full_width_text).shortcut_text("Ctrl+Shift+W"));
                     #[cfg(feature = "mcp")]
                     self.mcp_bridge.register_widget(
                         "Menu: View → Full Width",
@@ -6380,16 +6403,6 @@ mod tests {
     #[test]
     fn full_width_tables_use_the_available_content_width() {
         assert_eq!(content_width_limit(true, 900.0), 900);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn portal_introspection_detects_file_chooser_interface() {
-        let output = br#"interface org.freedesktop.portal.FileChooser {"#;
-        assert!(portal_introspection_has_file_chooser(output));
-        assert!(!portal_introspection_has_file_chooser(
-            b"interface org.freedesktop.portal.OpenURI {"
-        ));
     }
 
     #[cfg(target_os = "linux")]

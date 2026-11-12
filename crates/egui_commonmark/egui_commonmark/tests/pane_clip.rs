@@ -262,3 +262,67 @@ fn dragging_a_table_column_rightward_never_paints_past_the_pane() {
         );
     }
 }
+
+/// Render a table through `show_scrollable` at each pane width in turn (one
+/// frame each), then `settle` more frames at the last width, and return the
+/// right edge of the painted cell text.
+fn table_right_edge_after(widths: &[f32], settle: usize) -> f32 {
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    let markdown = format!(
+        "| Key | Description |\n|---|---|\n| signal | {} |\n| other | short |",
+        "SNAPCELL words ".repeat(20)
+    );
+    let mut last = Vec::new();
+    let frames: Vec<f32> = widths
+        .iter()
+        .copied()
+        .chain(std::iter::repeat(*widths.last().unwrap()).take(settle))
+        .collect();
+    for width in frames {
+        ctx.begin_pass(egui::RawInput::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            let pane = Rect::from_min_size(ui.max_rect().min, egui::vec2(width, ui.max_rect().height()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
+                CommonMarkViewer::new()
+                    .default_width(Some(width as usize))
+                    .table_max_width(Some(width as usize))
+                    .show_scrollable("table_snap_test", ui, &mut cache, &markdown);
+            });
+        });
+        let mut painted = Vec::new();
+        for c in ctx.end_pass().shapes {
+            collect(&c.shape, c.clip_rect, &mut painted);
+        }
+        last = painted;
+    }
+    last.iter()
+        .filter(|p| p.text.as_deref().is_some_and(|t| t.contains("SNAPCELL")))
+        .map(|p| p.rect.right().min(p.clip.right()))
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// #211: when the right sidebar is dragged past its minimum and snaps back,
+/// the pane narrows in one frame. The table re-fits to the new pane, but the
+/// separator-drag caps were computed from the previous (wider) frame's
+/// widths and clipped the re-fitted columns, leaving the table short until
+/// the next resize. Caps must not apply on a frame whose pane width changed.
+#[test]
+fn table_refits_fully_after_the_sidebar_snaps_back() {
+    let fresh = table_right_edge_after(&[500.0], 4);
+    let ramp: Vec<f32> = (0..=20).map(|i| 500.0 + i as f32 * 25.0).collect(); // 500 -> 1000 drag
+    let mut snapped = ramp.clone();
+    snapped.push(500.0); // one-frame snap back
+    let after_snap = table_right_edge_after(&snapped, 4);
+    let mut slow = ramp.clone();
+    slow.extend((0..=20).rev().map(|i| 500.0 + i as f32 * 25.0)); // gradual drag back
+    let after_slow = table_right_edge_after(&slow, 4);
+    assert!(
+        (after_snap - fresh).abs() < 1.0,
+        "after a one-frame snap the table ends at {after_snap:.1}, a fresh render at {fresh:.1}"
+    );
+    assert!(
+        (after_slow - fresh).abs() < 1.0,
+        "after a gradual drag back the table ends at {after_slow:.1}, a fresh render at {fresh:.1}"
+    );
+}

@@ -184,11 +184,19 @@ egui::FontData::from_owned(font_data).into()
 ```
 **Files:** `src/main.rs`
 
-### Color emojis not supported in egui
-**Context:** Emojis render as monochrome outlines despite loading NotoColorEmoji
-**Root cause:** egui's font renderer (ab_glyph) doesn't support color font formats (COLR/CPAL, CBDT/CBLC)
-**Workaround:** None - this is an upstream limitation. Emojis will render as simple outlines.
-**Files:** `src/main.rs`
+### Color emojis need the vendored epaint (stock egui renders them blank)
+**Context:** Emojis rendered as monochrome outlines despite loading NotoColorEmoji.
+**Root cause:** stock epaint rasterizes with ab_glyph, which does not support color font formats (COLR/CPAL, CBDT/CBLC).
+**Fix (since 0.3.0):** `crates/epaint` is a vendored epaint 0.33.3, wired in via `[patch.crates-io]`, that rasterizes CBDT bitmap glyphs through swash. It also adds `FontData::emoji_only` so the color face only claims default-emoji characters and leaves UI symbols (▶ ⚠ ✔) to the text fonts. Only CBDT `NotoColorEmoji.ttf` builds work; Fedora's COLRv1 `Noto-COLRv1.ttf` does not.
+**Gotcha:** all of this is behind the `color-emoji` cargo feature, because the crates.io build cannot see the patch (next entry).
+**Files:** `crates/epaint/`, `src/system_fonts.rs` (`install_emoji_fonts`)
+
+### A field added by a `[patch]`ed crate breaks the crates.io build
+**Context:** Preparing 0.3.1. The color-emoji code set `FontData::emoji_only`, which exists only in the vendored epaint.
+**Problem:** `cargo publish` ignores `[patch.crates-io]` and verifies against the registry's epaint, so the published md-viewer did not compile (`error[E0609]: no field emoji_only on type FontData`). Every other channel builds from the git tree with the patch, so CI, snap, AUR and the release binaries all stayed green. Nothing failed except the one channel nobody builds locally. `scripts/check-fork-publishable.sh` only guards the egui_commonmark fork, which *is* published under its own name; epaint is patched in place and cannot be.
+**Fix:** a `color-emoji` feature, on by default in the repo. The release workflow's `publish-crates` job rewrites `default = ["color-emoji"]` to `default = []` before `cargo publish`, and fails if that line is missing. Without the feature, emoji fall back to the bundled monochrome Noto Emoji face.
+**General lesson:** anything a patched crate *adds* (a field, a function, a feature) is only reachable from code gated on a feature that the published manifest turns off. Before tagging, run `cargo publish --dry-run -p md-viewer`. It is the only local command that builds what crates.io users get.
+**Files:** `Cargo.toml` (`[features]`), `src/system_fonts.rs`, `.github/workflows/release.yml` (`publish-crates`), `docs/devlog/072-crates-color-emoji-gate.md`
 
 ### egui 0.33 Painter API changes
 **Context:** Implementing minimap with custom drawing
@@ -353,6 +361,13 @@ let target_path = current_dir.join(path_part);
 let target_path = target_path.canonicalize()?;  // Resolves ../
 ```
 **Files:** `src/main.rs`
+
+### `env!("CARGO_MANIFEST_DIR")` in a runtime path is the build machine's path
+**Context:** #204 bundled a monochrome emoji font and loaded it with `std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoEmoji-Regular.ttf"))`.
+**Problem:** `env!` is expanded at compile time, so the string is wherever the checkout sat during the build: a CI runner directory for the snap, the tarball and `md-viewer-bin`, and a cargo-registry directory for `cargo install`. On every user's machine the read failed, and the only symptom was a `warn!`. It passed every local test because the path exists on the machine that built it.
+**Fix:** embed the asset with `include_bytes!("../assets/…")` and load it with `FontData::from_static`. Confirm the asset is in `cargo package --list`, or crates.io builds fail to compile. Embedding a font makes the binary a redistributor, so its license text goes into `THIRD_PARTY_NOTICES` (which ships in every channel), not only next to the asset.
+**Testing:** a test that reads the asset passes on the build machine whether the code is right or wrong. Prove the guard by mutating the loader to read a path that does not exist (what users see) and watching the test go red.
+**Files:** `src/system_fonts.rs` (`EMOJI_FONT_BYTES`, `install_emoji_fonts`), `docs/devlog/070-emoji-font-loading.md`
 
 ---
 
@@ -1727,6 +1742,8 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Wrong fix #2 (data loss):** `ui.set_clip_rect(clip ∩ max_rect)` inside a carve-out **erased HTML tables entirely**. In the HTML/main-wrap path the scope's `max_rect` is *degenerate* (`max.y == min.y` — zero height); layout overflowing `max_rect` is legal — only the painter clip forbids painting, so pre-change content painted fine and post-change the clip was a zero-height rect. Never clip to `max_rect`; it is a layout hint and may be degenerate.
 
 **The width policy that actually bit:** `TableBuilder` persists user-resized widths and never re-shrinks them; reset-on-any-bound-change fired on every sidebar nudge, and because fitted columns fill the pane, *any* shrink overflows → reset *every* time. Fix: `table_shrink_rescale_widths` — growth keeps, shrink-that-fits keeps, shrink-that-overflows **rescales the persisted widths proportionally** (floored at per-column minimums) with a `reset()` so they take effect. Bound history distinguishes a genuine shrink from a user-dragged column: egui_extras resize does **not** redistribute width (one column grows by the pointer delta), so drags overflow by choice and must never be punished by an overflow rule.
+
+**Superseded by #211 (2026-11-11).** Tables now re-fit to the pane on every pane-width change (window resize, Full Width toggle, sidebar drag) and stretch to fill it; Full Width is the default. The sticky-width policy described here no longer applies. #211 shipped with one fix worth remembering: on a frame where the pane width changed, the separator-drag caps (`column_caps`) were still derived from the *previous* frame's widths and clipped the freshly re-fitted columns. A large one-frame shrink (the right sidebar snapping back to its minimum) therefore left the table short of the pane until the next resize. Caps now apply only on frames with a steady pane width. Regression test: `table_refits_fully_after_the_sidebar_snaps_back` in `tests/pane_clip.rs`. General rule: any value derived from last frame's layout (caps, cached widths) must be dropped on the frame that invalidates that layout, not just the value the reset targets.
 
 **Testing technique (three traps this fix walked into):**
 1. **Verify red-before-green.** Two "passing" regression tests were vacuous: budget-capped columns never overflow at rest, and rendering the fixture inside a blockquote shrinks the table bound so it never overflowed. A clip test whose fixture never approaches the clip passes forever.

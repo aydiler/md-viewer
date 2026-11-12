@@ -45,6 +45,7 @@ The find bar also has on-screen `↑` and `↓` buttons next to the match count 
 | Ctrl+D | Toggle dark/light mode |
 | Ctrl+Shift+E | Toggle file explorer |
 | Ctrl+Shift+O | Toggle outline sidebar |
+| Ctrl+Shift+W | Toggle full width / reading column |
 | Ctrl++ / Ctrl+= | Zoom in |
 | Ctrl+- | Zoom out |
 | Ctrl+0 | Reset zoom to 100% |
