@@ -1445,6 +1445,53 @@ mod tests {
         }
     }
 
+    /// U+FE0F (VS16) requests emoji presentation for a character that is text
+    /// by default. `❤️` is `U+2764 U+FE0F`; without VS16 handling the color
+    /// face refuses U+2764 (not a default emoji) and the heart renders as a
+    /// white text glyph. A bare `❤` must stay text, and VS16 itself must not
+    /// draw anything.
+    #[test]
+    #[cfg(feature = "color-emoji")]
+    #[ignore = "requires installed system fonts"]
+    fn vs16_requests_the_color_face_for_text_default_characters() {
+        let mut definitions = FontDefinitions::default();
+        install_emoji_fonts(&mut definitions);
+        assert!(
+            definitions.font_data.contains_key("ColorEmoji"),
+            "no system NotoColorEmoji.ttf; the test would prove nothing"
+        );
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
+        let font_id = egui::FontId::proportional(16.0);
+        let glyphs = |text: &str| {
+            ctx.fonts_mut(|f| {
+                let job = egui::text::LayoutJob::simple(
+                    text.to_owned(),
+                    font_id.clone(),
+                    egui::Color32::WHITE,
+                    f32::INFINITY,
+                );
+                f.layout_job(job).rows[0]
+                    .glyphs
+                    .iter()
+                    .map(|g| (g.chr, g.uv_rect.colored, g.advance_width))
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Lay out the bare heart first, so a cache shared between the two
+        // paths would make the VS16 heart (or the bare one) come out wrong.
+        let bare = glyphs("\u{2764}");
+        let vs16 = glyphs("\u{2764}\u{FE0F}");
+        let bare_again = glyphs("\u{2764}");
+        eprintln!("bare={bare:?} vs16={vs16:?} bare_again={bare_again:?}");
+        assert!(!bare[0].1, "bare ❤ must stay a text glyph");
+        assert!(vs16[0].1, "❤ followed by VS16 must use the color face");
+        assert_eq!(vs16[1].0, '\u{FE0F}');
+        assert_eq!(vs16[1].2, 0.0, "VS16 must not take up space");
+        assert!(!bare_again[0].1, "VS16 lookup leaked into the bare-❤ cache");
+    }
+
     #[test]
     fn preset_mono_lists_lead_with_linux_generic_monospace_resolutions() {
         assert_eq!(

@@ -189,6 +189,7 @@ egui::FontData::from_owned(font_data).into()
 **Root cause:** stock epaint rasterizes with ab_glyph, which does not support color font formats (COLR/CPAL, CBDT/CBLC).
 **Fix (since 0.3.0):** `crates/epaint` is a vendored epaint 0.33.3, wired in via `[patch.crates-io]`, that rasterizes CBDT bitmap glyphs through swash. It also adds `FontData::emoji_only` so the color face only claims default-emoji characters and leaves UI symbols (▶ ⚠ ✔) to the text fonts. Only CBDT `NotoColorEmoji.ttf` builds work; Fedora's COLRv1 `Noto-COLRv1.ttf` does not.
 **Gotcha:** all of this is behind the `color-emoji` cargo feature, because the crates.io build cannot see the patch (next entry).
+**Gotcha 2, VS16:** `emoji_only` alone turns `❤️` (U+2764 U+FE0F) white, because U+2764 is not a default emoji. Layout now peeks for U+FE0F and asks only the emoji-only faces, with separate caches; the normal caches are keyed by `char` and checked before the gate, so sharing them makes every bare `❤` color too (devlog 074).
 **Files:** `crates/epaint/`, `src/system_fonts.rs` (`install_emoji_fonts`)
 
 ### A field added by a `[patch]`ed crate breaks the crates.io build

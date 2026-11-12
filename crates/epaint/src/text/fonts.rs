@@ -442,6 +442,10 @@ pub(super) struct CachedFamily {
     pub replacement_glyph: (FontFaceKey, GlyphInfo),
 
     pub glyph_info_cache: ahash::HashMap<char, (FontFaceKey, GlyphInfo)>,
+
+    /// Emoji-presentation (U+FE0F) lookups, cached apart from
+    /// `glyph_info_cache` because the same `char` resolves to a different face.
+    pub vs16_glyph_info_cache: ahash::HashMap<char, Option<(FontFaceKey, GlyphInfo)>>,
 }
 
 impl CachedFamily {
@@ -455,6 +459,7 @@ impl CachedFamily {
                 characters: None,
                 replacement_glyph: (FontFaceKey::INVALID, GlyphInfo::INVISIBLE),
                 glyph_info_cache: Default::default(),
+                vs16_glyph_info_cache: Default::default(),
             };
         }
 
@@ -463,6 +468,7 @@ impl CachedFamily {
             characters: None,
             replacement_glyph: (FontFaceKey::INVALID, GlyphInfo::INVISIBLE),
             glyph_info_cache: Default::default(),
+            vs16_glyph_info_cache: Default::default(),
         };
 
         const PRIMARY_REPLACEMENT_CHAR: char = '◻'; // white medium square
@@ -495,6 +501,32 @@ impl CachedFamily {
             }
         }
         None
+    }
+
+    /// Glyph lookup for `c` followed by U+FE0F: only the `emoji_only` faces in
+    /// this family are asked, so a color-emoji face wins over the text faces
+    /// that precede it in the chain. `None` means no emoji face has the glyph
+    /// and the caller should fall back to normal lookup.
+    pub(crate) fn glyph_info_emoji_presentation(
+        &mut self,
+        c: char,
+        fonts_by_id: &mut nohash_hasher::IntMap<FontFaceKey, FontImpl>,
+    ) -> Option<(FontFaceKey, GlyphInfo)> {
+        if let Some(cached) = self.vs16_glyph_info_cache.get(&c) {
+            return *cached;
+        }
+        let mut found = None;
+        for font_key in &self.fonts {
+            let font_impl = fonts_by_id.get_mut(font_key).expect("Nonexistent font ID");
+            if font_impl.is_emoji_only()
+                && let Some(glyph_info) = font_impl.glyph_info_emoji_presentation(c)
+            {
+                found = Some((*font_key, glyph_info));
+                break;
+            }
+        }
+        self.vs16_glyph_info_cache.insert(c, found);
+        found
     }
 }
 

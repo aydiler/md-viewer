@@ -187,6 +187,11 @@ pub struct FontImpl {
     /// Whether this face is restricted to default-emoji characters (see
     /// `is_default_emoji`), so color-emoji fonts never claim general symbols.
     emoji_only: bool,
+
+    /// Glyphs an `emoji_only` face supplies for characters that only become
+    /// emoji when followed by U+FE0F (e.g. `❤️`). Kept apart from
+    /// `glyph_info_cache` so a bare `❤` keeps resolving to a text face.
+    vs16_glyph_info_cache: ahash::HashMap<char, GlyphInfo>,
 }
 
 trait FontExt {
@@ -223,7 +228,36 @@ impl FontImpl {
             raw_bytes,
             font_index,
             emoji_only,
+            vs16_glyph_info_cache: Default::default(),
         }
+    }
+
+    /// Whether this face only claims default-emoji characters.
+    pub(super) fn is_emoji_only(&self) -> bool {
+        self.emoji_only
+    }
+
+    /// Glyph lookup for `c` when it is followed by U+FE0F (VARIATION
+    /// SELECTOR-16, "emoji presentation"). An `emoji_only` face may claim any
+    /// character it has a glyph for here, not just default emoji; other faces
+    /// behave exactly as in [`Self::glyph_info`].
+    pub(super) fn glyph_info_emoji_presentation(&mut self, c: char) -> Option<GlyphInfo> {
+        if !self.emoji_only || is_default_emoji(c) {
+            return self.glyph_info(c);
+        }
+        if let Some(glyph_info) = self.vs16_glyph_info_cache.get(&c) {
+            return Some(*glyph_info);
+        }
+        let glyph_id = self.ab_glyph_font.glyph_id(c);
+        if glyph_id.0 == 0 {
+            return None;
+        }
+        let glyph_info = GlyphInfo {
+            id: Some(glyph_id),
+            advance_width_unscaled: self.ab_glyph_font.h_advance_unscaled(glyph_id).into(),
+        };
+        self.vs16_glyph_info_cache.insert(c, glyph_info);
+        Some(glyph_info)
     }
 
     /// Code points that will always be replaced by the replacement character.
@@ -581,6 +615,14 @@ impl Font<'_> {
             .glyph_info_cache
             .insert(c, font_index_glyph_info);
         font_index_glyph_info
+    }
+
+    /// Like [`Self::glyph_info`], for a character followed by U+FE0F: prefer a
+    /// face that renders it as an emoji, falling back to normal lookup.
+    pub(crate) fn glyph_info_emoji_presentation(&mut self, c: char) -> (FontFaceKey, GlyphInfo) {
+        self.cached_family
+            .glyph_info_emoji_presentation(c, self.fonts_by_id)
+            .unwrap_or_else(|| self.glyph_info(c))
     }
 }
 

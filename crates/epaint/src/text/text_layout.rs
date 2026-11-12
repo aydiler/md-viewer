@@ -178,13 +178,21 @@ fn layout_section(
     let mut current_font = FontFaceKey::INVALID;
     let mut current_font_impl_metrics = ScaledMetrics::default();
 
-    for chr in job.text[byte_range.clone()].chars() {
+    let mut chars = job.text[byte_range.clone()].chars().peekable();
+    while let Some(chr) = chars.next() {
         if job.break_on_newline && chr == '\n' {
             out_paragraphs.push(Paragraph::from_section_index(section_index));
             paragraph = out_paragraphs.last_mut().unwrap();
             paragraph.empty_paragraph_height = line_height; // TODO(emilk): replace this hack with actually including `\n` in the glyphs?
         } else {
-            let (font_id, glyph_info) = font.glyph_info(chr);
+            // U+FE0F (VS16) after a character requests emoji presentation:
+            // `❤️` must come from the color-emoji face even though a bare `❤`
+            // is a text character.
+            let (font_id, glyph_info) = if chars.peek() == Some(&'\u{FE0F}') {
+                font.glyph_info_emoji_presentation(chr)
+            } else {
+                font.glyph_info(chr)
+            };
             let mut font_impl = font.fonts_by_id.get_mut(&font_id);
             if current_font != font_id {
                 current_font = font_id;
