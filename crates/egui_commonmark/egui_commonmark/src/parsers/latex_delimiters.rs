@@ -97,10 +97,45 @@ fn parse_owned(
     if frontmatter_enabled {
         options |= Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
     }
-    Parser::new_ext(text, options)
-        .into_offset_iter()
-        .map(|(event, range)| (event.into_static(), range))
-        .collect()
+    coalesce_adjacent_text(
+        Parser::new_ext(text, options)
+            .into_offset_iter()
+            .map(|(event, range)| (event.into_static(), range)),
+    )
+}
+
+/// pulldown-cmark splits one run of prose into several `Text` events at
+/// characters that *could* have started inline syntax (`_`, `~`, `[`, ...).
+/// A bare URL such as `https://en.wikipedia.org/wiki/Foo_(bar)` then arrives
+/// in pieces and no per-event scanner can recognize it (#209).
+///
+/// Merge consecutive `Text` events whose source ranges touch and whose text is
+/// the source verbatim (`text.len() == range.len()`), so the merged event is
+/// still an exact source mapping. A backslash escape leaves a gap between the
+/// pieces and is never merged; entity-decoded text differs in length and is
+/// never merged either.
+fn coalesce_adjacent_text(
+    events: impl Iterator<Item = (Event<'static>, Range<usize>)>,
+) -> Vec<(Event<'static>, Range<usize>)> {
+    let mut out: Vec<(Event<'static>, Range<usize>)> = Vec::new();
+    for (event, range) in events {
+        if let (Event::Text(next), Some((Event::Text(prev), prev_range))) = (&event, out.last_mut())
+        {
+            if next.len() == range.len()
+                && prev.len() == prev_range.len()
+                && prev_range.end == range.start
+            {
+                let mut joined = String::with_capacity(prev.len() + next.len());
+                joined.push_str(prev);
+                joined.push_str(next);
+                *prev = joined.into();
+                prev_range.end = range.end;
+                continue;
+            }
+        }
+        out.push((event, range));
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

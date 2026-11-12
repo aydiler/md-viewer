@@ -1616,6 +1616,98 @@ fn registered_auto_link_ranges(
 
     // Prefer a longer registered path when two candidates start at the same
     // byte, then discard any remaining overlap.
+    dedupe_link_ranges(matches)
+}
+
+/// GFM "extended autolinks" (#209): bare `https://`, `http://` and `www.`
+/// URLs in prose. pulldown-cmark only recognizes the `<https://...>` form.
+///
+/// Follows the GitHub Flavored Markdown spec: the link must start the text or
+/// follow whitespace or one of `* _ ~ (`; it needs a valid domain (at least
+/// one `.`, no `_` in the last two labels); it runs to whitespace or `<`; and
+/// trailing `?!.,:*_~'"`, an unmatched `)` and an `&entity;` suffix are not
+/// part of it. Email autolinks are not supported.
+fn bare_url_ranges(text: &str) -> Vec<(Range<usize>, String)> {
+    const PREFIXES: [&str; 3] = ["https://", "http://", "www."];
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut prev: Option<char> = None;
+    let mut skip_until = 0;
+
+    for (start, ch) in text.char_indices() {
+        let prev_ch = prev.replace(ch);
+        if start < skip_until || !matches!(ch, 'h' | 'H' | 'w' | 'W') {
+            continue;
+        }
+        if !prev_ch.is_none_or(|c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '(')) {
+            continue;
+        }
+        let Some(prefix) = PREFIXES.iter().find(|p| {
+            bytes
+                .get(start..start + p.len())
+                .is_some_and(|b| b.eq_ignore_ascii_case(p.as_bytes()))
+        }) else {
+            continue;
+        };
+
+        let end = text[start..]
+            .find(|c: char| c.is_whitespace() || c == '<')
+            .map_or(text.len(), |i| start + i);
+        let mut candidate = &text[start..end];
+
+        // Trailing punctuation, unmatched `)` and `&entity;` are not part of the link.
+        loop {
+            let before = candidate.len();
+            if let Some(stripped) = candidate.strip_suffix(|c: char| "?!.,:*_~'\"".contains(c)) {
+                candidate = stripped;
+            } else if candidate.ends_with(')')
+                && candidate.matches(')').count() > candidate.matches('(').count()
+            {
+                candidate = &candidate[..candidate.len() - 1];
+            } else if let Some(body) = candidate.strip_suffix(';') {
+                if let Some(amp) = body.rfind('&') {
+                    let name = &body[amp + 1..];
+                    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        candidate = &candidate[..amp];
+                    }
+                }
+            }
+            if candidate.len() == before {
+                break;
+            }
+        }
+
+        let after_prefix = if prefix.starts_with('w') {
+            0
+        } else {
+            prefix.len()
+        };
+        let domain_end = candidate[after_prefix..]
+            .find(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            .map_or(candidate.len(), |i| after_prefix + i);
+        let domain = &candidate[after_prefix..domain_end];
+        let labels: Vec<&str> = domain.split('.').collect();
+        let valid_domain = labels.len() >= 2
+            && labels.iter().all(|l| !l.is_empty())
+            && labels[labels.len() - 2..].iter().all(|l| !l.contains('_'));
+        if !valid_domain {
+            continue;
+        }
+
+        let destination = if after_prefix == 0 {
+            format!("http://{candidate}")
+        } else {
+            candidate.to_owned()
+        };
+        out.push((start..start + candidate.len(), destination));
+        skip_until = start + candidate.len();
+    }
+    out
+}
+
+/// Order link candidates by start (longer first on ties) and drop overlaps,
+/// so a span is never claimed by two links.
+fn dedupe_link_ranges(mut matches: Vec<(Range<usize>, String)>) -> Vec<(Range<usize>, String)> {
     matches.sort_by(|(left_range, _), (right_range, _)| {
         left_range
             .start
@@ -2911,7 +3003,9 @@ impl CommonMarkViewerInternal {
             && self.text_style.heading.is_none()
             && text.len() == span.len()
         {
-            let links = registered_auto_link_ranges(&text, cache.link_hooks());
+            let mut links = registered_auto_link_ranges(&text, cache.link_hooks());
+            links.extend(bare_url_ranges(&text));
+            let links = dedupe_link_ranges(links);
             if !links.is_empty() {
                 let mut cursor = 0;
                 for (range, destination) in links {
@@ -4742,6 +4836,110 @@ mod tests {
                 None,
             );
         });
+    }
+
+    fn urls(text: &str) -> Vec<(&str, String)> {
+        bare_url_ranges(text)
+            .into_iter()
+            .map(|(range, dest)| (&text[range], dest))
+            .collect()
+    }
+
+    #[test]
+    fn bare_url_in_prose_is_detected() {
+        // The sentence from #209's reporter.
+        let text = "report them at\nhttps://github.com/GHTaarn/UnicodeREPL.jl/issues or submit";
+        assert_eq!(
+            urls(text),
+            vec![(
+                "https://github.com/GHTaarn/UnicodeREPL.jl/issues",
+                "https://github.com/GHTaarn/UnicodeREPL.jl/issues".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn bare_url_trailing_punctuation_is_not_part_of_the_link() {
+        assert_eq!(
+            urls("see https://example.com/a."),
+            vec![("https://example.com/a", "https://example.com/a".into())]
+        );
+        assert_eq!(
+            urls("x https://example.com/a, y"),
+            vec![("https://example.com/a", "https://example.com/a".into())]
+        );
+        assert_eq!(
+            urls("(see https://example.com/a)"),
+            vec![("https://example.com/a", "https://example.com/a".into())]
+        );
+        assert_eq!(
+            urls("ok? https://example.com/?q=1!"),
+            vec![(
+                "https://example.com/?q=1",
+                "https://example.com/?q=1".into()
+            )]
+        );
+        assert_eq!(
+            urls("https://example.com/a&amp; x"),
+            vec![("https://example.com/a", "https://example.com/a".into())]
+        );
+    }
+
+    #[test]
+    fn bare_url_keeps_balanced_parentheses() {
+        let wiki = "https://en.wikipedia.org/wiki/Foo_(bar)";
+        assert_eq!(
+            urls(&format!("see {wiki} now")),
+            vec![(wiki, wiki.to_string())]
+        );
+        assert_eq!(urls(&format!("({wiki})")), vec![(wiki, wiki.to_string())]);
+    }
+
+    #[test]
+    fn www_url_gets_an_http_destination() {
+        assert_eq!(
+            urls("visit www.example.com/x today"),
+            vec![("www.example.com/x", "http://www.example.com/x".to_string())]
+        );
+        assert_eq!(
+            urls("WWW.Example.COM"),
+            vec![("WWW.Example.COM", "http://WWW.Example.COM".to_string())]
+        );
+    }
+
+    #[test]
+    fn bare_url_rejects_non_urls() {
+        assert!(urls("xhttps://example.com").is_empty());
+        assert!(urls("https:// alone").is_empty());
+        assert!(urls("https://").is_empty());
+        assert!(urls("www.").is_empty());
+        assert!(urls("the www. prefix").is_empty());
+        assert!(urls("https://exa_mple.com").is_empty());
+    }
+
+    #[test]
+    fn bare_url_handles_multiple_and_utf8_neighbours() {
+        assert_eq!(
+            urls("ä https://a.de/ö, ü www.b.org."),
+            vec![
+                ("https://a.de/ö", "https://a.de/ö".to_string()),
+                ("www.b.org", "http://www.b.org".to_string()),
+            ]
+        );
+        assert_eq!(
+            urls("*https://a.de*"),
+            vec![("https://a.de", "https://a.de".to_string())]
+        );
+    }
+
+    #[test]
+    fn registered_path_and_url_overlap_keeps_one_link() {
+        let mut links = vec![
+            (0..19, "https://a.de/x.md".to_string()),
+            (13..17, "x.md".to_string()),
+        ];
+        links = dedupe_link_ranges(links);
+        assert_eq!(links, vec![(0..19, "https://a.de/x.md".to_string())]);
     }
 
     #[test]
