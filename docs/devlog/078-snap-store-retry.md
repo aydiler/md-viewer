@@ -1,6 +1,6 @@
 # Snap job survives Snap Store flakiness
 
-**Status:** In progress
+**Status:** Complete — v0.3.2 on Snap Store stable, revision 25
 **Branch:** `ci/snap-store-retry`
 **Date:** 2026-11-12
 
@@ -60,6 +60,25 @@ them, so one dropped request ends the job.
   runner, no upload. Result recorded below.
 - After merge: `snap-publish.yml -f tag=v0.3.2 -f upload=true`, then the Snap
   Store info API shows 0.3.2 on stable.
+
+### Results
+
+- **Branch dry run (43248724504):** `setup` failed after all six
+  `snap install lxd` attempts over about 8 minutes. Retries inside one job do
+  not outlast an outage that long; they only cover single dropped requests.
+- **`snap-publish.yml` attempt 1 (43253515003):** same failure, same step.
+- **Attempt 2 (43263215974), 45 minutes later:** every step green with no
+  retry needed. The log shows `Revision 25 created for 'md-viewer' and released
+  to 'stable'`, and the store info API reports stable amd64 0.3.2, revision 25.
+  This was also the first time the script's `build` step ran on a GitHub
+  runner.
+- **Published snap checked:** downloaded from the store and unpacked.
+  `meta/snap.yaml` reports version 0.3.2 and base core22, and the newest glibc
+  symbol in `bin/md-viewer` is `GLIBC_2.35`, matching core22.
+
+What got the snap out was waiting for the store, then re-dispatching from main.
+The retries are still worth having for the single dropped requests seen in the
+probes, but they would not have saved this release on their own.
 
 ## Future Improvements
 
