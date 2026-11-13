@@ -2,6 +2,14 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+- **Long documents scroll to their real end, and the reading column stays put (#207, contributed by [@PhillipChaffee](https://github.com/PhillipChaffee)).** On math-heavy documents the scroll range stopped short of the end: the scroll clamp used the document height measured before formula images finished loading, so the last paragraphs could not be reached at all. The clamp now uses the size the current frame reports, the document ends with two lines of padding, and the scroll range no longer grows when scrolling past the end. With Full Width off, the reading column is centered and lists and headings wrap at its edge. The scrollbar is always shown, so it can no longer appear and disappear at the scroll edges, changing the column width each time.
+
+### Internal
+- **The test suite runs on Windows (#233).** CI previously only compiled the tests there. A Windows companion to the link-resolution table now pins drive-letter, `file:///C:/…` and UNC behaviour (#141), and the first run found one Unix-only test fixture, now fixed.
+
 ## [0.3.3] - 2026-11-13
 
 The tab bar can be hidden, email addresses and links in headings work, and text-style emoji stay monochrome.
