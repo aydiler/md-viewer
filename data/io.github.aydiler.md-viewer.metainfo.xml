@@ -84,6 +84,17 @@
   </provides>
 
   <releases>
+    <release version="0.3.3" date="2026-11-13">
+      <description>
+        <p>Reading and links:</p>
+        <ul>
+          <li>The tab bar can be hidden from the View menu; Ctrl+E switches between Preview and Edit</li>
+          <li>Plain email addresses become clickable links</li>
+          <li>Links inside headings are drawn inline at heading size, and bare URLs in headings are linked</li>
+          <li>Emoji followed by the text-presentation selector stay monochrome</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-11-12">
       <description>
         <p>Links and emoji:</p>
