@@ -2,6 +2,17 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.5] - 2026-11-13
+
+Thai and Hebrew text get proper fonts, and display formulas stop widening the reading column.
+
+### Bug Fixes
+- **Thai renders, and Hebrew is no longer set in a monospace face (#237).** The system font lookup can answer a script with a single fallback font that is useless for prose: on a stock Arch system Thai resolved to `Misc Fixed`, a bitmap font that cannot be loaded, so Thai showed as empty boxes even with Noto Sans Thai installed, and Hebrew resolved to `Liberation Mono`. Script fallbacks now skip monospace faces, then try fonts named after the script (`Noto Sans Thai`, `Noto Sans Hebrew`) and the generic sans-serif fonts, and keep a monospace answer only as a last resort. Arabic joining and right-to-left order are unchanged; they remain #108.
+- **Text after a display formula wraps at the reading column again (#236, #238).** With Full Width off, every paragraph after a `$$…$$` formula wrapped 8 px past the column for the rest of the document. The formula was surrounded by spacing calls that, in the renderer's horizontal row layout, added width rather than height; they are gone, and the formula is also centered exactly on the column now. Vertical layout is unchanged.
+
+### Internal
+- **The vendored renderer moves to 0.28.8**, carrying #238.
+
 ## [0.3.4] - 2026-11-13
 
 Long math-heavy documents scroll all the way to the end, and the reading column is centered.

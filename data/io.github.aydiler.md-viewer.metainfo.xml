@@ -84,6 +84,15 @@
   </provides>
 
   <releases>
+    <release version="0.3.5" date="2026-11-13">
+      <description>
+        <p>Text and layout fixes:</p>
+        <ul>
+          <li>Thai text renders instead of empty boxes, and Hebrew uses a proportional font instead of a monospace one</li>
+          <li>With Full Width off, text after a display formula wraps at the reading column again</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.4" date="2026-11-13">
       <description>
         <p>Scrolling and layout:</p>
