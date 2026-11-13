@@ -11,13 +11,13 @@ resolver = "3"
 [workspace.package]
 license = "MIT OR Apache-2.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.95"
 version = "0.28.8"
 repository = "https://github.com/aydiler/md-viewer"
 
 [workspace.dependencies]
-egui_extras = { version = "0.33", default-features = false }
-egui = { version = "0.33", default-features = false }
+egui_extras = { version = "0.37", default-features = false }
+egui = { version = "0.37", default-features = false }
 
 # Runtime lookup for recognized GitHub/gemoji shortcode names.
 emojis = "0.9.0"
