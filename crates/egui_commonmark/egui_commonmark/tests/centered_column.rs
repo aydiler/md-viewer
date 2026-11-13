@@ -192,3 +192,102 @@ fn centered_column_survives_resize_in_both_directions() {
         }
     }
 }
+/// Rects of painted textures (the formula's raster), however they are nested.
+#[cfg(feature = "math")]
+fn collect_textured(shape: &Shape, rects: &mut Vec<egui::Rect>) {
+    match shape {
+        Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() => rects.push(r.rect),
+        Shape::Mesh(m) if m.texture_id != egui::TextureId::default() => {
+            rects.push(egui::Rect::from_points(&m.vertices.iter().map(|v| v.pos).collect::<Vec<_>>()))
+        }
+        Shape::Vec(shapes) => {
+            for shape in shapes {
+                collect_textured(shape, rects);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// #236: a display formula must not widen the reading column. Its centered
+/// box used to be sized from the ambient width instead of the column, and
+/// every later paragraph then wrapped against the wider edge. Two identical
+/// paragraphs, one on each side of a narrow formula, must wrap identically.
+#[cfg(feature = "math")]
+#[test]
+fn prose_after_display_math_wraps_at_the_column() {
+    // Short words, so a wrap-width change of a few pixels moves a break.
+    let prose = "a bb ccc dd e fff gg hhhh i jj kkk l mm nnn o pp qqq r ss ttt ".repeat(4);
+    let doc = format!("{prose}\n\n$$x + y$$\n\n{prose}\n");
+
+    let ctx = Context::default();
+    let mut style = (*ctx.style()).clone();
+    style
+        .text_styles
+        .insert(TextStyle::Body, egui::FontId::proportional(16.0));
+    ctx.set_style(style);
+    let mut cache = CommonMarkCache::default();
+    let screen = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(PANE_WIDTH, 900.0));
+
+    let mut texts = Vec::new();
+    let mut image_rects = Vec::new();
+    let mut frames_with_formula = 0;
+    for _ in 0..500 {
+        let full = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    CommonMarkViewer::new()
+                        .default_width(Some(COLUMN_WIDTH))
+                        .table_max_width(Some(COLUMN_WIDTH))
+                        .show_scrollable("math-doc", ui, &mut cache, &doc);
+                });
+            },
+        );
+        texts.clear();
+        image_rects.clear();
+        for clipped in &full.shapes {
+            collect(&clipped.shape, &mut texts);
+            collect_textured(&clipped.shape, &mut image_rects);
+        }
+        if !image_rects.is_empty() {
+            frames_with_formula += 1;
+            if frames_with_formula >= 3 {
+                break;
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    assert!(
+        frames_with_formula >= 3,
+        "the formula never finished rendering; the test would compare placeholder layout"
+    );
+
+    let rows = |t: &PaintedText| -> Vec<String> {
+        t.galley
+            .rows
+            .iter()
+            .map(|r| r.row.glyphs.iter().map(|g| g.chr).collect::<String>())
+            .collect()
+    };
+    let paragraphs: Vec<&PaintedText> = texts.iter().filter(|t| t.text.contains("hhhh")).collect();
+    assert_eq!(paragraphs.len(), 2, "expected both paragraphs painted: {:?}",
+        texts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    let (before, after) = (rows(paragraphs[0]), rows(paragraphs[1]));
+    assert!(before.len() > 1, "the paragraph must wrap for the test to mean anything");
+    assert_eq!(before, after, "prose after the formula wraps differently");
+
+    // The formula stays centered in the column the prose occupies.
+    let left = paragraphs[0].pos.x;
+    let column_center = left + COLUMN_WIDTH as f32 / 2.0;
+    let formula = image_rects[0];
+    assert!(
+        (formula.center().x - column_center).abs() <= 2.0,
+        "formula centered at {:.1}, column center {column_center:.1}",
+        formula.center().x
+    );
+}
