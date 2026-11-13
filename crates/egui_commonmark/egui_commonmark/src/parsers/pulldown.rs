@@ -1626,7 +1626,7 @@ fn registered_auto_link_ranges(
 /// follow whitespace or one of `* _ ~ (`; it needs a valid domain (at least
 /// one `.`, no `_` in the last two labels); it runs to whitespace or `<`; and
 /// trailing `?!.,:*_~'"`, an unmatched `)` and an `&entity;` suffix are not
-/// part of it. Email autolinks are not supported.
+/// part of it. Email addresses are found by `email_autolink_ranges`.
 fn bare_url_ranges(text: &str) -> Vec<(Range<usize>, String)> {
     const PREFIXES: [&str; 3] = ["https://", "http://", "www."];
     let bytes = text.as_bytes();
@@ -1701,6 +1701,63 @@ fn bare_url_ranges(text: &str) -> Vec<(Range<usize>, String)> {
         };
         out.push((start..start + candidate.len(), destination));
         skip_until = start + candidate.len();
+    }
+    out
+}
+
+/// Find plain email addresses in prose and pair each with a `mailto:`
+/// destination.
+///
+/// Follows GitHub Flavored Markdown's extended email autolink: a local part of
+/// `[A-Za-z0-9.+_-]` not preceded by another such character or `/`, an `@`,
+/// then a domain of `[A-Za-z0-9_-]` labels joined by `.`, with at least one
+/// `.`. A trailing `.` is not part of the link, and an address whose last
+/// character is `-` or `_` is not linked at all.
+fn email_autolink_ranges(text: &str) -> Vec<(Range<usize>, String)> {
+    fn is_local(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_')
+    }
+    fn is_domain(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')
+    }
+
+    let bytes = text.as_bytes();
+    let mut out: Vec<(Range<usize>, String)> = Vec::new();
+    let mut search_from = 0;
+
+    while let Some(offset) = text[search_from..].find('@') {
+        let at = search_from + offset;
+        search_from = at + 1;
+
+        let mut start = at;
+        while start > 0 && is_local(bytes[start - 1]) {
+            start -= 1;
+        }
+        if start == at || (start > 0 && bytes[start - 1] == b'/') {
+            continue;
+        }
+        if out.last().is_some_and(|(range, _)| start < range.end) {
+            continue;
+        }
+
+        let mut end = at + 1;
+        while end < bytes.len() && is_domain(bytes[end]) {
+            end += 1;
+        }
+        while end > at + 1 && bytes[end - 1] == b'.' {
+            end -= 1;
+        }
+        let domain = &text[at + 1..end];
+        if !domain.contains('.')
+            || domain.split('.').any(str::is_empty)
+            || domain.ends_with(['-', '_'])
+        {
+            continue;
+        }
+
+        let address = &text[start..end];
+        out.push((start..end, format!("mailto:{address}")));
+        search_from = end;
     }
     out
 }
@@ -3005,6 +3062,7 @@ impl CommonMarkViewerInternal {
         {
             let mut links = registered_auto_link_ranges(&text, cache.link_hooks());
             links.extend(bare_url_ranges(&text));
+            links.extend(email_autolink_ranges(&text));
             let links = dedupe_link_ranges(links);
             if !links.is_empty() {
                 let mut cursor = 0;
@@ -4930,6 +4988,52 @@ mod tests {
             urls("*https://a.de*"),
             vec![("https://a.de", "https://a.de".to_string())]
         );
+    }
+
+    fn emails(text: &str) -> Vec<(&str, String)> {
+        email_autolink_ranges(text)
+            .into_iter()
+            .map(|(range, dest)| (&text[range], dest))
+            .collect()
+    }
+
+    #[test]
+    fn email_in_prose_is_detected() {
+        assert_eq!(
+            emails("write to foo.bar+tag@example.co.uk, or not"),
+            vec![(
+                "foo.bar+tag@example.co.uk",
+                "mailto:foo.bar+tag@example.co.uk".to_string()
+            )]
+        );
+        assert_eq!(
+            emails("(a_b-c@x.org). ä z@y.de."),
+            vec![
+                ("a_b-c@x.org", "mailto:a_b-c@x.org".to_string()),
+                ("z@y.de", "mailto:z@y.de".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn email_rejects_non_addresses() {
+        assert!(emails("@example.com").is_empty());
+        assert!(emails("user@localhost").is_empty());
+        assert!(emails("user@example.").is_empty());
+        assert!(emails("user@ex..com").is_empty());
+        assert!(emails("user@example.com-").is_empty());
+        assert!(emails("user@example.com_").is_empty());
+        assert!(emails("a@b@c").is_empty());
+        assert!(emails("https://x.org/u@y.com").is_empty());
+    }
+
+    #[test]
+    fn url_containing_an_at_sign_stays_one_link() {
+        let text = "see https://a.com/x@y.com now";
+        let mut links = bare_url_ranges(text);
+        links.extend(email_autolink_ranges(text));
+        let links = dedupe_link_ranges(links);
+        assert_eq!(links, vec![(4..25, "https://a.com/x@y.com".to_string())]);
     }
 
     #[test]
