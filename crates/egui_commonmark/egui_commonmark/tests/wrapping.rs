@@ -875,6 +875,25 @@ fn bare_urls_in_prose_render_as_links() {
     );
 }
 
+/// Plain email addresses become `mailto:` links like bare URLs do; one inside
+/// inline code stays literal.
+#[test]
+fn email_addresses_in_prose_render_as_links() {
+    let markdown = "Mail first.last@example.com. Not `code@example.com` though.";
+    let (_, _, painted) = render_geometry(markdown, 900.0);
+    let linked: Vec<&str> = painted
+        .iter()
+        .filter(|entry| entry.underlined)
+        .map(|entry| entry.text.as_str())
+        .collect();
+
+    assert_eq!(
+        linked,
+        vec!["first.last@example.com"],
+        "painted text: {painted:#?}"
+    );
+}
+
 /// URLs inside headings, code blocks and existing Markdown links keep their
 /// current rendering: no second link is opened inside them.
 #[test]

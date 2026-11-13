@@ -5,6 +5,7 @@ All notable changes to markdown-viewer will be documented in this file.
 ## [Unreleased]
 
 ### Features
+- **Email addresses are clickable.** A plain `name@example.com` in prose becomes a `mailto:` link, as on GitHub; addresses in code stay literal.
 - **Hide the tab bar (#208).** **View → Show Tab Bar** turns it off for single-document reading, and the choice is remembered. While the active document is in Edit mode the bar stays visible, because it holds the Preview | Edit toggle and the unsaved-changes marker. Edit mode is also reachable without the bar, from **View → Edit Mode** or **Ctrl+E**.
 
 ## [0.3.2] - 2026-11-12
