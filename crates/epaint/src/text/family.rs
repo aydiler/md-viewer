@@ -6,6 +6,33 @@ use crate::text::{
     font_provider::FontProviders,
 };
 
+/// md-viewer patch: how a grapheme cluster asks to be presented (UTS #51).
+///
+/// Stock epaint 0.37 resolves a cluster by its first char only, so `❤️`
+/// (U+2764 U+FE0F) got the same face as `❤`: whichever face in the chain has
+/// U+2764 first. With a color emoji face behind a text face that is a
+/// monochrome heart; with the color face first, every `✔` `▶` `⚠` turns into
+/// an emoji.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presentation {
+    /// Default emoji characters, U+FE0F, skin-tone sequences: prefer a face
+    /// with color glyphs.
+    Emoji,
+
+    /// Everything else, including U+FE0E: prefer a face without color glyphs.
+    Text,
+}
+
+impl Presentation {
+    fn of(cluster: &str) -> Self {
+        if crate::text::has_emoji_presentation(cluster) {
+            Self::Emoji
+        } else {
+            Self::Text
+        }
+    }
+}
+
 /// Index of a [`Family`] in `FontsImpl`.
 ///
 /// Cheaper to pass around and look up than a [`FontFamily`].
@@ -31,6 +58,12 @@ pub(crate) struct Family {
     /// Location-independent (fallback choice depends only on charmap support,
     /// not on variation coordinates).
     face_cache: ahash::HashMap<char, FontFaceKey>,
+
+    /// md-viewer patch: like [`Self::face_cache`], for clusters with emoji
+    /// presentation (see [`Presentation`]). `face_cache` then holds the
+    /// text-presentation answer. Two caches, because the same base char
+    /// (`❤` in `❤` and `❤️`) resolves differently per presentation.
+    emoji_face_cache: ahash::HashMap<char, FontFaceKey>,
 
     /// Lazily calculated: every supported char, and the names of the faces that have it.
     characters: Option<BTreeMap<char, Vec<String>>>,
@@ -69,6 +102,7 @@ impl Family {
             name: name.clone(),
             chain,
             face_cache: Default::default(),
+            emoji_face_cache: Default::default(),
             characters: None,
         }
     }
@@ -114,10 +148,16 @@ impl Family {
         let Some(base_char) = cluster.chars().next() else {
             return self.notdef_face();
         };
-        if let Some(font_key) = self.face_cache.get(&base_char) {
+        // md-viewer patch: honor emoji / text presentation (UTS #51).
+        let presentation = Presentation::of(cluster);
+        let cache = match presentation {
+            Presentation::Emoji => &self.emoji_face_cache,
+            Presentation::Text => &self.face_cache,
+        };
+        if let Some(font_key) = cache.get(&base_char) {
             return *font_key;
         }
-        self.resolve_slow(faces, providers, cluster, base_char)
+        self.resolve_slow(faces, providers, cluster, base_char, presentation)
     }
 
     #[cold]
@@ -127,11 +167,15 @@ impl Family {
         providers: &mut FontProviders,
         cluster: &str,
         c: char,
+        presentation: Presentation,
     ) -> FontFaceKey {
         let font_key = self
+            // md-viewer patch: first a face of the wanted kind (color glyphs
+            // for emoji presentation, none for text presentation)…
+            .find_face_for_char_with(c, faces, presentation)
             // All the installed fonts, i.e. the configured ones
             // and then the ones we have already discovered…
-            .find_face_for_char(c, faces)
+            .or_else(|| self.find_face_for_char(c, faces))
             // …and if none of them has the char, ask the providers for a new font:
             .or_else(|| self.discover(faces, providers, cluster))
             // No font has the char, so we will render the `.notdef` glyph ("tofu"):
@@ -143,8 +187,29 @@ impl Family {
                 );
                 self.notdef_face()
             });
-        self.face_cache.insert(c, font_key);
+        match presentation {
+            Presentation::Emoji => self.emoji_face_cache.insert(c, font_key),
+            Presentation::Text => self.face_cache.insert(c, font_key),
+        };
         font_key
+    }
+
+    /// md-viewer patch: the first face of the chain that supports `c` and
+    /// whose kind matches `presentation`: a color-glyph face for emoji
+    /// presentation, any other face for text presentation.
+    fn find_face_for_char_with(
+        &self,
+        c: char,
+        faces: &mut FaceStore,
+        presentation: Presentation,
+    ) -> Option<FontFaceKey> {
+        let want_color = presentation == Presentation::Emoji;
+        self.chain.iter().copied().find(|&key| {
+            faces.get_mut(key).is_some_and(|face| {
+                face.has_color_glyphs() == want_color
+                    && face.glyph_id_resolution(c).is_some()
+            })
+        })
     }
 
     /// The face whose `.notdef` glyph ("tofu") we render for chars no face has.

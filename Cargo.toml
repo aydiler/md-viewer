@@ -109,5 +109,8 @@ lto = "thin"
 codegen-units = 4
 
 [patch.crates-io]
+# Vendored epaint 0.37.0 plus a small patch: font fallback honors emoji/text
+# presentation (U+FE0F / U+FE0E). See crates/epaint/PATCH.md.
+epaint = { path = "crates/epaint", version = "0.37.0" }
 egui_commonmark_extended = { path = "crates/egui_commonmark/egui_commonmark", version = "0.28.8" }
 egui_commonmark_backend_extended = { path = "crates/egui_commonmark/egui_commonmark_backend", version = "0.28.8" }

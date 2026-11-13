@@ -490,6 +490,20 @@ impl FontFace {
             .filter_map(|(chr, _)| char::from_u32(chr).filter(|c| !self.ignore_character(*c)))
     }
 
+    /// md-viewer patch: does this face carry color glyph tables
+    /// (`COLR`, `sbix`, `CBDT`, `EBDT`)? Used by `Family::resolve_cluster` to
+    /// honor emoji / text presentation. Always `false` without `color_fonts`.
+    pub(super) fn has_color_glyphs(&self) -> bool {
+        #[cfg(feature = "color_fonts")]
+        {
+            self.font.borrow_dependent().has_color_glyphs
+        }
+        #[cfg(not(feature = "color_fonts"))]
+        {
+            false
+        }
+    }
+
     /// Resolve a `char` to a [`GlyphId`] within this face.
     ///
     /// Location-independent. Returns `None` when this face cannot represent
