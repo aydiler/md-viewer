@@ -1319,6 +1319,13 @@ Smooth ≤ ~3k events; borderline ~5–10k; laggy ~20k; near-unusable at 100k. A
 
 **Files:** `src/main.rs` (`Tab.correct_active_search_pending`, `scroll_to_active_match`, `render_tab_content` corrective block), `docs/devlog/031-search-scroll-lock.md`
 
+### `add_space` in a wrapping row is horizontal, and widens everything after it
+**Context:** #236. With Full Width off, every paragraph after a display formula wrapped 8 px past the reading column, for the rest of the document.
+**Root cause:** the display-math arm wrapped its `vertical_centered` image in `ui.add_space(8.0)`. The renderer's ui is a horizontal wrapping layout, so both gaps were horizontal: the trailing one pushed `max_rect().right()` from 800 to 808 and later rows wrapped against it; the leading one moved the formula 4 px off-center. Neither ever added vertical space.
+**Fix:** remove them; the `newline` calls around `DisplayMath` already separate the formula vertically.
+**Diagnostic:** print `ui.max_rect()` before and after the suspect block. The first guess (box sized from ambient width) was wrong, and a red test plus that one probe showed it in a single run.
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs` (`render_math_with_layout`), `crates/egui_commonmark/egui_commonmark/tests/centered_column.rs`, `docs/devlog/088-display-math-column.md`
+
 ### List-item block widgets need explicit wrapped-row boundaries
 **Context:** Issue #44 — fenced code blocks inside unordered, ordered, and nested list items overlapped text immediately before or after the block.
 

@@ -1990,7 +1990,14 @@ fn render_math_with_layout(
             } else if is_inline {
                 ui.add(egui::Image::new(egui::ImageSource::Texture(sized_texture)));
             } else {
-                ui.add_space(8.0);
+                // No `add_space` around this (#236). The enclosing ui is a
+                // horizontal wrapping layout, so the 8 px gaps that used to
+                // sit here were horizontal, never vertical: the leading one
+                // shifted the formula 4 px off-center, and the trailing one
+                // pushed the ui's right edge 8 px past the column, so every
+                // later paragraph wrapped against that wider edge. Vertical
+                // separation comes from the `newline` calls around the
+                // `DisplayMath` event.
                 ui.vertical_centered(|ui| {
                     ui.add(
                         egui::Image::new(egui::ImageSource::Texture(sized_texture))
@@ -1998,7 +2005,6 @@ fn render_math_with_layout(
                             .max_width(ui.available_width()),
                     );
                 });
-                ui.add_space(8.0);
             }
         }
         Some(MathState::Error(err_msg)) => {
