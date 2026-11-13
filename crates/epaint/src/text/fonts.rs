@@ -446,6 +446,10 @@ pub(super) struct CachedFamily {
     /// Emoji-presentation (U+FE0F) lookups, cached apart from
     /// `glyph_info_cache` because the same `char` resolves to a different face.
     pub vs16_glyph_info_cache: ahash::HashMap<char, Option<(FontFaceKey, GlyphInfo)>>,
+
+    /// Text-presentation (U+FE0E) lookups, cached apart from
+    /// `glyph_info_cache` for the same reason as `vs16_glyph_info_cache`.
+    pub vs15_glyph_info_cache: ahash::HashMap<char, Option<(FontFaceKey, GlyphInfo)>>,
 }
 
 impl CachedFamily {
@@ -460,6 +464,7 @@ impl CachedFamily {
                 replacement_glyph: (FontFaceKey::INVALID, GlyphInfo::INVISIBLE),
                 glyph_info_cache: Default::default(),
                 vs16_glyph_info_cache: Default::default(),
+                vs15_glyph_info_cache: Default::default(),
             };
         }
 
@@ -469,6 +474,7 @@ impl CachedFamily {
             replacement_glyph: (FontFaceKey::INVALID, GlyphInfo::INVISIBLE),
             glyph_info_cache: Default::default(),
             vs16_glyph_info_cache: Default::default(),
+            vs15_glyph_info_cache: Default::default(),
         };
 
         const PRIMARY_REPLACEMENT_CHAR: char = '◻'; // white medium square
@@ -526,6 +532,33 @@ impl CachedFamily {
             }
         }
         self.vs16_glyph_info_cache.insert(c, found);
+        found
+    }
+
+    /// Glyph lookup for `c` followed by U+FE0E (VARIATION SELECTOR-15, "text
+    /// presentation"): the `emoji_only` faces are skipped, so a default emoji
+    /// such as 🚀 comes from a monochrome face when one has it. `None` means no
+    /// text face has the glyph and the caller should fall back to normal
+    /// lookup.
+    pub(crate) fn glyph_info_text_presentation(
+        &mut self,
+        c: char,
+        fonts_by_id: &mut nohash_hasher::IntMap<FontFaceKey, FontImpl>,
+    ) -> Option<(FontFaceKey, GlyphInfo)> {
+        if let Some(cached) = self.vs15_glyph_info_cache.get(&c) {
+            return *cached;
+        }
+        let mut found = None;
+        for font_key in &self.fonts {
+            let font_impl = fonts_by_id.get_mut(font_key).expect("Nonexistent font ID");
+            if !font_impl.is_emoji_only()
+                && let Some(glyph_info) = font_impl.glyph_info(c)
+            {
+                found = Some((*font_key, glyph_info));
+                break;
+            }
+        }
+        self.vs15_glyph_info_cache.insert(c, found);
         found
     }
 }

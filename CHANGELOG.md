@@ -9,6 +9,9 @@ All notable changes to markdown-viewer will be documented in this file.
 - **Links in headings render inline, and bare URLs in headings are clickable.** A `[link](…)` inside a heading used to be drawn in body size on top of the words after it; it now flows with the heading text at heading size. Bare URLs in headings become links like they do in prose.
 - **Hide the tab bar (#208).** **View → Show Tab Bar** turns it off for single-document reading, and the choice is remembered. While the active document is in Edit mode the bar stays visible, because it holds the Preview | Edit toggle and the unsaved-changes marker. Edit mode is also reachable without the bar, from **View → Edit Mode** or **Ctrl+E**.
 
+### Bug Fixes
+- **Text-style emoji stay monochrome.** An emoji followed by U+FE0E (text presentation), such as `🚀︎`, is drawn from a monochrome face instead of in color, the counterpart of 0.3.2's `❤️` fix.
+
 ## [0.3.2] - 2026-11-12
 
 Bare URLs become links, ❤️ is red again, and the release pipeline now builds every channel before a tag is pushed.

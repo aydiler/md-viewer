@@ -624,6 +624,14 @@ impl Font<'_> {
             .glyph_info_emoji_presentation(c, self.fonts_by_id)
             .unwrap_or_else(|| self.glyph_info(c))
     }
+
+    /// Like [`Self::glyph_info`], for a character followed by U+FE0E: prefer a
+    /// face that renders it as text, falling back to normal lookup.
+    pub(crate) fn glyph_info_text_presentation(&mut self, c: char) -> (FontFaceKey, GlyphInfo) {
+        self.cached_family
+            .glyph_info_text_presentation(c, self.fonts_by_id)
+            .unwrap_or_else(|| self.glyph_info(c))
+    }
 }
 
 /// Metrics for a font at a specific screen-space scale.
