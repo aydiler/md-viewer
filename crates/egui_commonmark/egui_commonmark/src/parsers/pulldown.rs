@@ -1402,6 +1402,11 @@ pub struct CommonMarkViewerInternal {
     current_heading_text: String,
     /// Accumulate heading RichText fragments for single render at end
     current_heading_rich_texts: Vec<egui::RichText>,
+    /// Links inside the current heading, each with the number of
+    /// `current_heading_rich_texts` fragments that precede it. They are drawn
+    /// in order with the text when the heading ends, so they flow inline at
+    /// the heading's position instead of where the cursor stood mid-heading.
+    current_heading_links: Vec<(usize, crate::Link)>,
     /// Content-space Y of the first event rendered by the current slice.
     slice_start_y: f32,
     /// Screen-space Y of the root UI for the current full or sliced render.
@@ -1441,6 +1446,7 @@ impl CommonMarkViewerInternal {
             current_heading_source_start: None,
             current_heading_text: String::new(),
             current_heading_rich_texts: Vec::new(),
+            current_heading_links: Vec::new(),
             slice_start_y: 0.0,
             render_origin_y: 0.0,
         }
@@ -3043,6 +3049,17 @@ impl CommonMarkViewerInternal {
     }
 
     /// Expand eligible emoji shortcodes, then preserve source-based search semantics.
+    /// Draw a finished link, or, inside a heading, keep it for the heading's
+    /// single inline render in `end_tag(Heading)`.
+    fn finish_link(&mut self, link: crate::Link, ui: &mut Ui, cache: &mut CommonMarkCache) {
+        if self.text_style.heading.is_some() {
+            self.current_heading_links
+                .push((self.current_heading_rich_texts.len(), link));
+        } else {
+            link.end(ui, cache);
+        }
+    }
+
     fn event_text_with_highlights(
         &mut self,
         text: CowStr,
@@ -3057,7 +3074,6 @@ impl CommonMarkViewerInternal {
         if self.link.is_none()
             && self.image.is_none()
             && self.code_block.is_none()
-            && self.text_style.heading.is_none()
             && text.len() == span.len()
         {
             let mut links = registered_auto_link_ranges(&text, cache.link_hooks());
@@ -3089,7 +3105,7 @@ impl CommonMarkViewerInternal {
                         options,
                     );
                     if let Some(link) = self.link.take() {
-                        link.end(ui, cache);
+                        self.finish_link(link, ui, cache);
                     }
                     cursor = range.end;
                 }
@@ -3313,7 +3329,9 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::TagEnd::Heading { .. } => {
                 // Render all accumulated heading fragments at once, positioned at left edge
-                if !self.current_heading_rich_texts.is_empty() {
+                if !self.current_heading_rich_texts.is_empty()
+                    || !self.current_heading_links.is_empty()
+                {
                     let available = ui.available_rect_before_wrap();
                     let left_edge = ui.min_rect().left();
                     let heading_rect = egui::Rect::from_min_size(
@@ -3321,9 +3339,18 @@ impl CommonMarkViewerInternal {
                         egui::vec2(available.width() + (available.left() - left_edge), available.height()),
                     );
                     let rich_texts = std::mem::take(&mut self.current_heading_rich_texts);
+                    let mut links = std::mem::take(&mut self.current_heading_links)
+                        .into_iter()
+                        .peekable();
                     ui.scope_builder(egui::UiBuilder::new().max_rect(heading_rect), |ui| {
-                        for rt in rich_texts {
+                        for (index, rt) in rich_texts.into_iter().enumerate() {
+                            while let Some((_, link)) = links.next_if(|(at, _)| *at <= index) {
+                                link.end(ui, cache);
+                            }
                             ui.label(rt);
+                        }
+                        for (_, link) in links {
+                            link.end(ui, cache);
                         }
                     });
                 }
@@ -3442,7 +3469,7 @@ impl CommonMarkViewerInternal {
                     // the previous one. Empty links have no visible widget to
                     // render; keep the cursor where the image left it.
                     if !link.text.is_empty() {
-                        link.end(ui, cache);
+                        self.finish_link(link, ui, cache);
                     }
                 }
             }

@@ -894,7 +894,57 @@ fn email_addresses_in_prose_render_as_links() {
     );
 }
 
-/// URLs inside headings, code blocks and existing Markdown links keep their
+/// Links inside a heading, explicit or bare URL, are drawn inline with the
+/// heading text: on the same row, between their neighbours, at heading size.
+/// Before, the link was painted where the cursor stood mid-heading, in body
+/// size and on top of the following words.
+#[test]
+fn links_in_headings_render_inline_with_the_heading_text() {
+    let markdown = "## See [the docs](https://example.com/docs) for more\n\n## Visit https://example.com/bare today\n";
+    let (_, _, painted) = render_geometry(markdown, 900.0);
+    let find = |needle: &str| {
+        painted
+            .iter()
+            .find(|entry| entry.text == needle)
+            .unwrap_or_else(|| panic!("{needle:?} not painted: {painted:#?}"))
+    };
+
+    let linked: Vec<&str> = painted
+        .iter()
+        .filter(|entry| entry.underlined)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(
+        linked,
+        vec!["the docs", "https://example.com/bare"],
+        "painted text: {painted:#?}"
+    );
+
+    for (before, link, after) in [
+        ("See ", "the docs", " for more"),
+        ("Visit ", "https://example.com/bare", " today"),
+    ] {
+        let (before, link, after) = (find(before), find(link), find(after));
+        assert!(
+            (link.rect.center().y - before.rect.center().y).abs() < 2.0
+                && (after.rect.center().y - link.rect.center().y).abs() < 2.0,
+            "link not on the heading's row: {before:?} {link:?} {after:?}"
+        );
+        // On a wrapped row each label's galley starts at the row's left edge
+        // and carries the preceding fragments as leading offset, so the
+        // flow order shows in the right edges.
+        assert!(
+            before.rect.right() < link.rect.right() && link.rect.right() < after.rect.right(),
+            "link not between its neighbours: {before:?} {link:?} {after:?}"
+        );
+        assert!(
+            (link.rect.height() - before.rect.height()).abs() < 2.0,
+            "link not at heading size: {before:?} {link:?}"
+        );
+    }
+}
+
+/// URLs inside code blocks and existing Markdown links keep their
 /// current rendering: no second link is opened inside them.
 #[test]
 fn bare_urls_are_not_linked_inside_code_or_existing_links() {

@@ -6,6 +6,7 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ### Features
 - **Email addresses are clickable.** A plain `name@example.com` in prose becomes a `mailto:` link, as on GitHub; addresses in code stay literal.
+- **Links in headings render inline, and bare URLs in headings are clickable.** A `[link](…)` inside a heading used to be drawn in body size on top of the words after it; it now flows with the heading text at heading size. Bare URLs in headings become links like they do in prose.
 - **Hide the tab bar (#208).** **View → Show Tab Bar** turns it off for single-document reading, and the choice is remembered. While the active document is in Edit mode the bar stays visible, because it holds the Preview | Edit toggle and the unsaved-changes marker. Edit mode is also reachable without the bar, from **View → Edit Mode** or **Ctrl+E**.
 
 ## [0.3.2] - 2026-11-12
