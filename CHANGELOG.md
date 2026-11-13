@@ -2,18 +2,21 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
-## [Unreleased]
+## [0.3.3] - 2026-11-13
+
+The tab bar can be hidden, email addresses and links in headings work, and text-style emoji stay monochrome.
 
 ### Features
-- **Email addresses are clickable.** A plain `name@example.com` in prose becomes a `mailto:` link, as on GitHub; addresses in code stay literal.
-- **Links in headings render inline, and bare URLs in headings are clickable.** A `[link](…)` inside a heading used to be drawn in body size on top of the words after it; it now flows with the heading text at heading size. Bare URLs in headings become links like they do in prose.
-- **Hide the tab bar (#208).** **View → Show Tab Bar** turns it off for single-document reading, and the choice is remembered. While the active document is in Edit mode the bar stays visible, because it holds the Preview | Edit toggle and the unsaved-changes marker. Edit mode is also reachable without the bar, from **View → Edit Mode** or **Ctrl+E**.
+- **Email addresses are clickable (#228).** A plain `name@example.com` in prose becomes a `mailto:` link, as on GitHub; addresses in code stay literal.
+- **Links in headings render inline, and bare URLs in headings are clickable (#229).** A `[link](…)` inside a heading used to be drawn in body size on top of the words after it; it now flows with the heading text at heading size. Bare URLs in headings become links like they do in prose.
+- **Hide the tab bar (#208, #226).** **View → Show Tab Bar** turns it off for single-document reading, and the choice is remembered. While the active document is in Edit mode the bar stays visible, because it holds the Preview | Edit toggle and the unsaved-changes marker. Edit mode is also reachable without the bar, from **View → Edit Mode** or **Ctrl+E**.
 
 ### Bug Fixes
-- **Text-style emoji stay monochrome.** An emoji followed by U+FE0E (text presentation), such as `🚀︎`, is drawn from a monochrome face instead of in color, the counterpart of 0.3.2's `❤️` fix.
+- **Text-style emoji stay monochrome (#230).** An emoji followed by U+FE0E (text presentation), such as `🚀︎`, is drawn from a monochrome face instead of in color, the counterpart of 0.3.2's `❤️` fix.
 
 ### Internal
-- **The vendored renderer moves to 0.28.6**, carrying the email and heading-link changes and the macros test gate (#227–#229).
+- **The vendored renderer moves to 0.28.6 (#231)**, carrying the email and heading-link changes.
+- **The renderer's macro compile-fail tests run on stable only (#227)**, so `cargo test` in the renderer workspace no longer fails on nightly over reworded compiler messages.
 
 ## [0.3.2] - 2026-11-12
 
