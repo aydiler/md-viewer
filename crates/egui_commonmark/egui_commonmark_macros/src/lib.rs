@@ -236,7 +236,27 @@ fn resolve_backend_crate_import() -> proc_macro2::TokenStream {
 fn tests() {
     let t = trybuild::TestCases::new();
     t.pass("tests/pass/*.rs");
-    t.compile_fail("tests/fail/*.rs");
+    // The `.stderr` files pin compiler diagnostics, whose wording changes on
+    // nightly and beta long before it reaches stable. Compare them only on
+    // the stable channel (what CI runs); the `pass` cases run everywhere.
+    if rustc_is_stable() {
+        t.compile_fail("tests/fail/*.rs");
+    } else {
+        eprintln!("skipping compile_fail cases: diagnostics are pinned to stable rustc");
+    }
+}
+
+/// Whether the `rustc` cargo builds the trybuild cases with is a stable
+/// release. Honours `RUSTC` and the rustup toolchain cargo was invoked with
+/// (`cargo +nightly` exports `RUSTUP_TOOLCHAIN`, which `rustc` picks up).
+#[cfg(test)]
+fn rustc_is_stable() -> bool {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let Ok(output) = std::process::Command::new(rustc).arg("-V").output() else {
+        return true;
+    };
+    let version = String::from_utf8_lossy(&output.stdout);
+    !(version.contains("-nightly") || version.contains("-beta") || version.contains("-dev"))
 }
 
 #[cfg(test)]
