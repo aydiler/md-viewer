@@ -223,50 +223,65 @@ struct ScriptFallback {
     key: &'static str,
     script: [u8; 4],
     required_glyphs: &'static str,
+    /// The script's English name as it appears in family names ("Noto Sans
+    /// Thai", "Noto Sans CJK SC"). Only consulted when the platform's own
+    /// fallback list offers no usable proportional face; see
+    /// `select_script_fallback`.
+    name_hint: &'static str,
 }
 
 // ISO 15924 identifiers and coverage samples describe scripts, not font
-// families. The platform backend remains the sole source of family choices.
+// families. The platform backend's fallback list is asked first; the name hint
+// is a second source for when that list is unusable (fontconfig can answer
+// with a single bitmap or monospace family).
 const SCRIPT_FALLBACKS: &[ScriptFallback] = &[
     ScriptFallback {
         key: "SystemHanFallback",
         script: *b"Hani",
         required_glyphs: "中文测试繁體",
+        name_hint: "CJK",
     },
     ScriptFallback {
         key: "SystemHiraganaFallback",
         script: *b"Hira",
         required_glyphs: "かな",
+        name_hint: "CJK",
     },
     ScriptFallback {
         key: "SystemKatakanaFallback",
         script: *b"Kana",
         required_glyphs: "カナ",
+        name_hint: "CJK",
     },
     ScriptFallback {
         key: "SystemHangulFallback",
         script: *b"Hang",
         required_glyphs: "한글",
+        name_hint: "CJK",
     },
     ScriptFallback {
         key: "SystemArabicFallback",
         script: *b"Arab",
         required_glyphs: "اب",
+        name_hint: "Arabic",
     },
     ScriptFallback {
         key: "SystemHebrewFallback",
         script: *b"Hebr",
         required_glyphs: "אב",
+        name_hint: "Hebrew",
     },
     ScriptFallback {
         key: "SystemDevanagariFallback",
         script: *b"Deva",
         required_glyphs: "नमस्तेहिन्दी",
+        name_hint: "Devanagari",
     },
     ScriptFallback {
         key: "SystemThaiFallback",
         script: *b"Thai",
         required_glyphs: "สวัสดีภาษาไทย",
+        name_hint: "Thai",
     },
 ];
 
@@ -329,6 +344,27 @@ fn select_from_families(
     required_glyphs: &str,
     require_true_bold: bool,
 ) -> Option<SelectedFont> {
+    select_from_families_where(
+        collection,
+        source_cache,
+        family_ids,
+        weight,
+        required_glyphs,
+        require_true_bold,
+        &|_, _| true,
+    )
+}
+
+/// `select_from_families`, additionally rejecting faces `accept` refuses.
+fn select_from_families_where(
+    collection: &mut Collection,
+    source_cache: &mut SourceCache,
+    family_ids: &[FamilyId],
+    weight: FontWeight,
+    required_glyphs: &str,
+    require_true_bold: bool,
+    accept: &dyn Fn(&Blob<u8>, u32) -> bool,
+) -> Option<SelectedFont> {
     for family_id in family_ids {
         let Some(family) = collection.family(*family_id) else {
             continue;
@@ -351,7 +387,9 @@ fn select_from_families(
             let Some(blob) = font.load(Some(source_cache)) else {
                 continue;
             };
-            if !font_has_glyphs(&blob, font.index(), required_glyphs) {
+            if !font_has_glyphs(&blob, font.index(), required_glyphs)
+                || !accept(&blob, font.index())
+            {
                 continue;
             }
             return Some(SelectedFont {
@@ -377,6 +415,101 @@ fn fallback_family_ids(
         Some(locale) => collection.fallback_families((script, locale)).collect(),
         None => collection.fallback_families(script).collect(),
     }
+}
+
+fn face_is_proportional(blob: &Blob<u8>, index: u32) -> bool {
+    ttf_parser::Face::parse(blob.data(), index)
+        .map(|face| !face.is_monospaced())
+        .unwrap_or(false)
+}
+
+/// Families whose name contains `hint` as a whole word, best body-text
+/// candidates first: "Sans" before unmarked before "Serif" before "Mono", then
+/// shorter names (the base family before its "UI"/"Looped" variants).
+fn rank_script_named_families<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    hint: &str,
+) -> Vec<&'a str> {
+    let mut matching: Vec<&str> = names
+        .into_iter()
+        .filter(|name| name.split_whitespace().any(|word| word == hint))
+        .collect();
+    let class = |name: &str| {
+        let words: Vec<&str> = name.split_whitespace().collect();
+        if words.contains(&"Mono") {
+            3
+        } else if words.contains(&"Serif") {
+            2
+        } else if words.contains(&"Sans") {
+            0
+        } else {
+            1
+        }
+    };
+    matching.sort_by(|a, b| {
+        class(a)
+            .cmp(&class(b))
+            .then(a.len().cmp(&b.len()))
+            .then(a.cmp(b))
+    });
+    matching.dedup();
+    matching
+}
+
+/// Pick the face for one script fallback.
+///
+/// Fontique's fontconfig backend can answer a script with a single family that
+/// is useless for prose: on a stock Arch system Thai resolves to `Misc Fixed`
+/// (a PCF bitmap font that cannot be loaded, so Thai rendered as tofu while
+/// Noto Sans Thai sat installed) and Hebrew to `Liberation Mono` (so Hebrew
+/// prose was set in a monospace face). The platform list is still asked first,
+/// minus monospace faces; then families named after the script; then the
+/// generic sans-serif families. A monospace platform answer is kept as the
+/// last resort, which is what was installed before.
+fn select_script_fallback(
+    collection: &mut Collection,
+    source_cache: &mut SourceCache,
+    spec: &ScriptFallback,
+    locale: Option<&str>,
+) -> Option<SelectedFont> {
+    let platform = fallback_family_ids(collection, spec.script, locale);
+    let select = |collection: &mut Collection,
+                  source_cache: &mut SourceCache,
+                  families: &[FamilyId],
+                  proportional_only: bool| {
+        select_from_families_where(
+            collection,
+            source_cache,
+            families,
+            FontWeight::NORMAL,
+            spec.required_glyphs,
+            false,
+            if proportional_only {
+                &face_is_proportional
+            } else {
+                &|_, _| true
+            },
+        )
+    };
+    if let Some(selected) = select(collection, source_cache, &platform, true) {
+        return Some(selected);
+    }
+    let names: Vec<String> = collection.family_names().map(str::to_owned).collect();
+    let named: Vec<FamilyId> =
+        rank_script_named_families(names.iter().map(String::as_str), spec.name_hint)
+            .into_iter()
+            .filter_map(|name| collection.family_id(name))
+            .collect();
+    if let Some(selected) = select(collection, source_cache, &named, true) {
+        return Some(selected);
+    }
+    let sans: Vec<FamilyId> = collection
+        .generic_families(GenericFamily::SansSerif)
+        .collect();
+    if let Some(selected) = select(collection, source_cache, &sans, true) {
+        return Some(selected);
+    }
+    select(collection, source_cache, &platform, false)
 }
 
 fn installed_fonts_cover(installed: &[InstalledFont], glyphs: &str) -> bool {
@@ -534,15 +667,7 @@ fn install_regular_fonts(
         if installed_fonts_cover(&installed, spec.required_glyphs) {
             continue;
         }
-        let families = fallback_family_ids(collection, spec.script, locale);
-        let Some(selected) = select_from_families(
-            collection,
-            source_cache,
-            &families,
-            FontWeight::NORMAL,
-            spec.required_glyphs,
-            false,
-        ) else {
+        let Some(selected) = select_script_fallback(collection, source_cache, spec, locale) else {
             continue;
         };
         install_regular_font(
@@ -946,6 +1071,65 @@ mod tests {
     }
 
     #[test]
+    fn script_named_families_rank_sans_and_base_family_first() {
+        let names = [
+            "Noto Serif Thai",
+            "Noto Sans Thai Looped",
+            "Noto Sans Thai",
+            "Noto Sans Mono Thai",
+            "Thaiyai Display",
+            "Noto Rashi Hebrew",
+            "Noto Sans Hebrew",
+            "Noto Serif Hebrew",
+        ];
+        assert_eq!(
+            rank_script_named_families(names, "Thai"),
+            [
+                "Noto Sans Thai",
+                "Noto Sans Thai Looped",
+                "Noto Serif Thai",
+                "Noto Sans Mono Thai"
+            ],
+            "whole-word match only, Sans before Serif before Mono, base before variants"
+        );
+        assert_eq!(
+            rank_script_named_families(names, "Hebrew"),
+            ["Noto Sans Hebrew", "Noto Rashi Hebrew", "Noto Serif Hebrew"]
+        );
+        assert!(rank_script_named_families(names, "Arabic").is_empty());
+    }
+
+    /// Thai rendered as tofu and Hebrew in Liberation Mono because fontconfig
+    /// answered each script with one unusable family. Needs the Noto script
+    /// families installed.
+    #[test]
+    #[ignore = "requires installed Noto Sans Thai / Hebrew fonts"]
+    fn script_fallbacks_are_proportional_faces() {
+        let mut collection = Collection::new(CollectionOptions::default());
+        let mut source_cache = SourceCache::default();
+        let mut definitions = FontDefinitions::default();
+        let installed = install_regular_fonts(
+            &mut collection,
+            &mut source_cache,
+            &mut definitions,
+            Some("en-US"),
+            None,
+            None,
+        );
+        for key in ["SystemThaiFallback", "SystemHebrewFallback"] {
+            let font = installed
+                .iter()
+                .find(|font| font.key == key)
+                .unwrap_or_else(|| panic!("{key} was not installed"));
+            assert!(
+                face_is_proportional(&font.selected.blob, font.selected.index),
+                "{key} is monospace: {}",
+                font.selected.family
+            );
+        }
+    }
+
+    #[test]
     fn default_latin_precedes_script_bold_without_primary_system_sans() {
         let strong = build_strong_family(
             None,
@@ -1109,6 +1293,8 @@ mod tests {
             "한글",
             "नमस्तेहिन्दी",
             "สวัสดีภาษาไทย",
+            "عربي",
+            "עברית",
         ];
         let missing_regular: Vec<_> = samples
             .iter()
