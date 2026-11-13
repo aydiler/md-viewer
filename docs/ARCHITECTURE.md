@@ -64,7 +64,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 
 - **Keyboard document scrolling**: Plain document scroll keys are handled in `MarkdownApp::update` after mode-specific shortcuts are checked. `KeyboardScrollAction` maps Up/Down to fixed line steps and Page Up/Page Down to viewport-relative page steps through `keyboard_scroll_target`, which clamps against the active tab's `last_content_height`. The chosen target is assigned to the tab's `pending_scroll_offset`, so keyboard scrolling uses the same renderer-owned `ScrollArea` pipeline as outline and search jumps. Arrow keys are reserved for search-result navigation while the find bar is open, and document scrolling ignores Ctrl/Alt/Command-modified keypresses so it does not steal existing shortcuts.
 
-- **Wide table scrolling**: Wide markdown / HTML tables are wrapped in a nested `egui::ScrollArea::horizontal()` so columns wider than the content area can still be reached. Plain vertical wheel stays with the outer document scroller; table horizontal movement uses the bottom scrollbar, native horizontal input, or `Shift+vertical-wheel` (routed via `forward_shift_wheel_to_horizontal_scroll` in `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`) so the cursor crossing a wide table during normal scrolling does not change its horizontal offset.
+- **Wide table scrolling**: Wide markdown / HTML tables are wrapped in a nested `egui::ScrollArea::horizontal()` so columns wider than the content area can still be reached. Plain vertical wheel stays with the outer document scroller; table horizontal movement uses the bottom scrollbar, native horizontal input, or `Shift+vertical-wheel` (egui turns it into a horizontal delta via `horizontal_scroll_modifier`, which the table's ScrollArea consumes; `tests/shift_wheel_table.rs`) so the cursor crossing a wide table during normal scrolling does not change its horizontal offset.
 
 - **Global Allocator**: mimalloc for performance
 
@@ -72,7 +72,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 
 | Crate | Purpose |
 |-------|---------|
-| eframe/egui 0.33 | GUI framework (glow backend for Wayland) |
+| eframe/egui 0.37 | GUI framework (glow backend for Wayland); text shaping via harfrust |
 | egui_commonmark 0.22 | Markdown rendering with syntax highlighting |
 | notify 6.1 + notify-debouncer-mini 0.4 | File watching |
 | rfd | Native file dialogs |

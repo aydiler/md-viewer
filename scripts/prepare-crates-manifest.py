@@ -8,11 +8,13 @@ run verifies is the package the tag publishes.
 1. Strip the local-only MCP dependency. Anchored to start-of-line so commented
    `# mcp = ...` / `# egui-mcp-bridge = ...` lines stay untouched and the
    working tree stays clean (regression caught in the v0.1.9 publish).
-2. Drop `color-emoji` from the default features. It needs
-   `FontData::emoji_only`, which only the vendored epaint has; `cargo publish`
-   ignores `[patch.crates-io]`, so the crates.io package builds against stock
-   epaint (#215). Fails unless exactly one such line exists, so a renamed
-   feature cannot slip through to a publish that no longer compiles.
+
+Until the egui 0.37 upgrade (devlog 089) this also dropped a `color-emoji`
+default feature, which needed an API only the vendored epaint 0.33 had (#215).
+Stock epaint 0.37 draws color glyphs, so the feature is gone. `cargo publish`
+still ignores `[patch.crates-io]`, and `crates-package-check` builds the
+published package against stock epaint, so a future patch-only API in the app
+fails there rather than on crates.io.
 """
 import pathlib
 import re
@@ -24,9 +26,5 @@ text = path.read_text()
 text = re.sub(r'(?m)^mcp\s*=\s*\["dep:egui-mcp-bridge"\]', 'mcp = []', text)
 text = re.sub(r'(?m)^egui-mcp-bridge\s*=\s*.*\n', '', text)
 
-text, n = re.subn(r'(?m)^default\s*=\s*\["color-emoji"\]', 'default = []', text)
-if n != 1:
-    sys.exit(f'expected one `default = ["color-emoji"]` line in {path}, found {n}')
-
 path.write_text(text)
-print(f"{path}: MCP dependency stripped, color-emoji dropped from default features")
+print(f"{path}: MCP dependency stripped")

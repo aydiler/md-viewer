@@ -82,14 +82,11 @@ percent-encoding = "2.3"
 zbus = { version = "5.5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [features]
-# `color-emoji` uses `FontData::emoji_only`, which only exists in the vendored
-# epaint (`crates/epaint`, wired in by `[patch.crates-io]`). `cargo publish`
-# ignores patches, so the crates.io package is built against stock epaint and
-# cannot use it: the release workflow's publish-crates job rewrites this
-# default to `[]` before publishing. Every source build (snap, AUR, release
-# binaries, local dev) keeps it on.
-default = ["color-emoji"]
-color-emoji = []
+# No `color-emoji` feature since egui 0.37: stock epaint draws color glyphs
+# (`color_fonts`), so the crates.io build needs no gate. The vendored epaint
+# patch only changes *which* face a cluster picks (crates/epaint/PATCH.md) and
+# adds no API the app calls; `crates-package-check` builds against stock
+# epaint to keep it that way.
 # mcp = ["dep:egui-mcp-bridge"]
 
 [lints.rust]

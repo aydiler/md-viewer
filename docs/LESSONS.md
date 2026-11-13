@@ -192,6 +192,7 @@ egui::FontData::from_owned(font_data).into()
 **Files:** `src/main.rs`
 
 ### Color emojis need the vendored epaint (stock egui renders them blank)
+**Superseded by the egui 0.37 upgrade (devlog 089, 2026-11-13):** epaint 0.37 rasterizes CBDT, sbix and COLR glyphs itself (`color_fonts`), so the swash path and `FontData::emoji_only` are gone. What remains vendored is a small patch to font fallback, because stock 0.37 picks a face by a cluster's first char only: emoji-presentation clusters (default emoji, U+FE0F) prefer a face with color glyphs, everything else (U+FE0E, ▶ ⚠ ✔) prefers one without (`crates/epaint/PATCH.md`). The VS15/VS16 history below is the reason the patch exists.
 **Context:** Emojis rendered as monochrome outlines despite loading NotoColorEmoji.
 **Root cause:** stock epaint rasterizes with ab_glyph, which does not support color font formats (COLR/CPAL, CBDT/CBLC).
 **Fix (since 0.3.0):** `crates/epaint` is a vendored epaint 0.33.3, wired in via `[patch.crates-io]`, that rasterizes CBDT bitmap glyphs through swash. It also adds `FontData::emoji_only` so the color face only claims default-emoji characters and leaves UI symbols (▶ ⚠ ✔) to the text fonts. Only CBDT `NotoColorEmoji.ttf` builds work; Fedora's COLRv1 `Noto-COLRv1.ttf` does not.
@@ -201,6 +202,7 @@ egui::FontData::from_owned(font_data).into()
 **Files:** `crates/epaint/`, `src/system_fonts.rs` (`install_emoji_fonts`)
 
 ### A field added by a `[patch]`ed crate breaks the crates.io build
+**Superseded by the egui 0.37 upgrade (devlog 089, 2026-11-13):** the `color-emoji` feature and its manifest rewrite are gone; the app calls no API that only the patched epaint has, and the crates.io build gets color emoji from stock epaint. The general lesson stands, and `crates-package-check` still builds against stock epaint.
 **Context:** Preparing 0.3.1. The color-emoji code set `FontData::emoji_only`, which exists only in the vendored epaint.
 **Problem:** `cargo publish` ignores `[patch.crates-io]` and verifies against the registry's epaint, so the published md-viewer did not compile (`error[E0609]: no field emoji_only on type FontData`). Every other channel builds from the git tree with the patch, so CI, snap, AUR and the release binaries all stayed green. Nothing failed except the one channel nobody builds locally. `scripts/check-fork-publishable.sh` only guards the egui_commonmark fork, which *is* published under its own name; epaint is patched in place and cannot be.
 **Fix:** a `color-emoji` feature, on by default in the repo. The release workflow's `publish-crates` job rewrites `default = ["color-emoji"]` to `default = []` before `cargo publish`, and fails if that line is missing. Without the feature, emoji fall back to the bundled monochrome Noto Emoji face.
@@ -249,6 +251,7 @@ if !state.has_reached_primary || !state.has_reached_secondary {
 **Files:** `src/main.rs`, `docs/devlog/009-drag-scroll.md`
 
 ### Scroll during selection requires post-render state modification
+**Superseded by the egui 0.37 upgrade (devlog 089, 2026-11-13):** egui 0.37 keeps `scroll_area::State::offset` private and removed `raw_scroll_delta`; the workaround below was deleted. Measured on Xvfb: wheel during a drag-selection scrolls by the same amount on 0.33 with the workaround and on 0.37 without it, and the selection survives in both.
 **Context:** Mouse wheel scroll while selecting text
 **Problem:** Setting `scroll_area.vertical_scroll_offset()` BEFORE rendering breaks selection
 **Fix:** Modify scroll state AFTER `show_viewport()`:
@@ -1031,6 +1034,7 @@ broken repository.
 **Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs` (`CommonMarkCache::syntax_layouts`, `CodeBlock::end`)
 
 ### Vertical-wheel → horizontal table offset must be modifier-gated
+**Superseded by the egui 0.37 upgrade (devlog 089, 2026-11-13):** `forward_shift_wheel_to_horizontal_scroll` never acted. egui converts Shift+wheel into a horizontal delta during input processing (`InputOptions::horizontal_scroll_modifier`, default Shift, in 0.33 as in 0.37), so the helper's vertical delta was always 0 while Shift was held; the table's own `ScrollArea::horizontal` did the scrolling. Removed; `tests/shift_wheel_table.rs` pins Shift+wheel scrolling and plain wheel not scrolling, and goes red if egui's conversion is switched off.
 **Context:** Issue #4 wanted wheel-over-table to scroll wide tables horizontally without grabbing the bottom scrollbar. The first shipped fix (`forward_wheel_to_horizontal_scroll`) redirected any hovered-table `smooth_scroll_delta.y` into `out.state.offset.x`. Issue #22 then reported that ordinary document scrolling nudged wide tables left/right whenever the cursor crossed one — the cost of the unconditional redirect was higher than the benefit. PR #23 removed the helper entirely.
 **Current state (`forward_shift_wheel_to_horizontal_scroll`):** the helper is back but only acts when `ui.ctx().input(|i| i.modifiers.shift)` is true. Plain wheel always goes to the outer document scroller; Shift+wheel is the explicit opt-in for sideways table scrolling. Edge pass-through is preserved so Shift+wheel at the table's left/right edge keeps moving the page.
 **Why the gate works:** Shift is unused elsewhere in the document scroller's wheel handling (Ctrl is taken by zoom), and aligns with the common browser convention of Shift+wheel for horizontal scroll. Users who don't know about it still get correct default behavior (#22); those who want #4's UX have a discoverable opt-in.
@@ -1783,6 +1787,7 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Files:** `src/system_fonts.rs` (`scan_pickable_font_families`, `pickable_family_names`), `src/main.rs` (`pending_font_family_scan` poll), `docs/devlog/068-fonts-one-menu.md`
 
 ### Driver vsync on Wayland freezes a hidden window
+**Superseded by the egui 0.37 upgrade (devlog 089, 2026-11-13):** eframe 0.37 never blocks the swap on Wayland itself (egui#5136, decided from the display handle), so `wayland_session` and the `vsync` override were removed.
 **Context:** Hyprland showed "Application Not Responding" for md-viewer on a non-visible workspace whenever an open file changed.
 **Root cause:** With swap interval 1, Mesa's `eglSwapBuffers` blocks until the compositor's frame callback. Hyprland sends none to hidden workspaces, so the reload's repaint parked the UI thread in `wl_display_dispatch_queue` and pings went unanswered.
 **Fix:** `NativeOptions::vsync = false` on Wayland. The compositor already prevents tearing and winit paces `RedrawRequested` on frame callbacks without blocking. Keep vsync on X11.

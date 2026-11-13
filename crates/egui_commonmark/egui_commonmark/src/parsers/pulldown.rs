@@ -2577,7 +2577,7 @@ impl CommonMarkViewerInternal {
             self.line.try_insert_start(ui);
 
             let id = markdown_table_id(
-                self.source_id.unwrap_or_else(|| ui.id()),
+                self.source_id.unwrap_or_else(|| ui.scope_id()),
                 source_start.unwrap_or(self.curr_table),
             );
             self.curr_table += 1;
@@ -3638,7 +3638,7 @@ impl CommonMarkViewerInternal {
         max_width: f32,
     ) {
         if let Some(block) = self.code_block.take() {
-            let id = ui.id().with("_code_block").with(self.curr_code_block);
+            let id = ui.scope_id().with("_code_block").with(self.curr_code_block);
             self.curr_code_block += 1;
             block.end(ui, cache, options, max_width, id);
             self.line.try_insert_end(ui);
@@ -3652,7 +3652,7 @@ impl CommonMarkViewerInternal {
         options: &CommonMarkOptions,
         max_width: f32,
     ) {
-        let id = ui.id().with("_html_table").with(self.curr_table);
+        let id = ui.scope_id().with("_html_table").with(self.curr_table);
         self.curr_table += 1;
 
         let num_cols = table
@@ -4303,7 +4303,7 @@ mod tests {
     #[test]
     fn resizable_table_widths_stick_across_bound_changes() {
         let ctx = egui::Context::default();
-        let table_id = Id::new("responsive-table");
+        let table_id = Id::unique("responsive-table");
         let initial = render_resizable_table_widths(&ctx, table_id, 180.0, &[60.0, 80.0]);
         let same_bound = render_resizable_table_widths(&ctx, table_id, 180.0, &[90.0, 110.0]);
         assert_eq!(same_bound, initial, "stable bounds must retain cached widths");
@@ -4791,7 +4791,7 @@ mod tests {
     #[test]
     fn height_aware_cache_invalidates_only_when_its_layout_key_changes() {
         egui::__run_test_ui(|ui| {
-            let id = egui::Id::new("height-aware-cache");
+            let id = egui::Id::unique("height-aware-cache");
             let baseline = [100.0, 100.0];
             let desired = [200.0, 300.0];
             let minimums = [40.0, 40.0];
@@ -4825,7 +4825,7 @@ mod tests {
     #[test]
     fn dense_overflow_cache_does_not_remeasure_a_stable_layout() {
         egui::__run_test_ui(|ui| {
-            let id = egui::Id::new("dense-overflow-cache");
+            let id = egui::Id::unique("dense-overflow-cache");
             let minimums = [100.0, 100.0];
             let desired = [200.0, 400.0];
             let measurements = std::cell::Cell::new(0);
@@ -5032,7 +5032,7 @@ mod tests {
                 "| a | b |\n|---|---|\n| one | two |\n\n",
                 "Final paragraph.\n",
             );
-            let source_id = egui::Id::new("virtualization-regression");
+            let source_id = egui::Id::unique("virtualization-regression");
             let mut cache = CommonMarkCache::default();
             let options = CommonMarkOptions::default();
 
@@ -5637,7 +5637,7 @@ mod tests {
 
     #[test]
     fn markdown_table_identity_uses_document_and_source_position() {
-        let document = Id::new("document-a");
+        let document = Id::unique("document-a");
 
         assert_eq!(
             markdown_table_id(document, 120),
@@ -5649,7 +5649,7 @@ mod tests {
         );
         assert_ne!(
             markdown_table_id(document, 120),
-            markdown_table_id(Id::new("document-b"), 120)
+            markdown_table_id(Id::unique("document-b"), 120)
         );
     }
 

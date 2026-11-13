@@ -205,7 +205,7 @@ const VSCODE_MONO_FAMILIES: &[&str] = &["Droid Sans Mono", "Noto Sans Mono", "De
 /// `TextStyle::Body`.
 fn apply_text_size_class(ctx: &egui::Context, size: TextSizeClass) {
     let base = size.px();
-    ctx.style_mut(|style| {
+    ctx.global_style_mut(|style| {
         use egui::{FontId, TextStyle};
         style
             .text_styles
@@ -877,11 +877,9 @@ fn install_preset_mono_font(
 /// checkout path, so every distributed binary silently lacked it.
 const EMOJI_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/NotoEmoji-Regular.ttf");
 
-/// System color-emoji face (CBDT/CBLC bitmap font), appended after the
-/// regular system fallbacks but before the monochrome emoji face.
-/// Only the CBDT `NotoColorEmoji.ttf` builds belong here; Fedora's COLRv1
-/// `Noto-COLRv1.ttf` is not handled by the swash bitmap path.
-#[cfg(feature = "color-emoji")]
+/// System color-emoji face, appended after the regular system fallbacks but
+/// before the monochrome emoji face. epaint 0.37 (`color_fonts`) rasterizes
+/// CBDT, sbix and COLR glyphs itself.
 const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/noto/NotoColorEmoji.ttf", // Arch (noto-fonts-emoji)
     "/usr/share/fonts/TTF/NotoColorEmoji.ttf",  // Arch (older layout)
@@ -890,25 +888,19 @@ const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
 
 /// Install emoji faces into the fallback chains.
 ///
-/// The color face is only useful with the vendored epaint patch that
-/// rasterizes color-bitmap glyphs via swash (ab_glyph alone renders them
-/// blank). With the patch, emoji render in full color; without it, the
-/// monochrome face still provides visible glyphs. Builds without the
-/// `color-emoji` feature (the crates.io package) only get the monochrome face.
+/// Which face draws a character is decided by its presentation (UTS #51):
+/// the vendored epaint's font fallback sends emoji-presentation clusters
+/// (default emoji, U+FE0F) to a color face and everything else, including
+/// U+FE0E and symbols such as ▶ ⚠ ✔, to a face without color glyphs
+/// (`crates/epaint/PATCH.md`). The crates.io build, on stock epaint, still
+/// draws color emoji but without that presentation handling.
 fn install_emoji_fonts(definitions: &mut FontDefinitions) {
-    // `emoji_only` exists only in the vendored epaint (`[patch.crates-io]`),
-    // which `cargo publish` ignores; see the `color-emoji` feature in Cargo.toml.
-    #[cfg(feature = "color-emoji")]
     for path in COLOR_EMOJI_FONT_PATHS {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let mut data = FontData::from_owned(bytes);
-                // Restrict to default-emoji characters so the color face
-                // never claims general symbols (▶ ⚠ ✔ …) used by the UI.
-                data.emoji_only = true;
                 definitions
                     .font_data
-                    .insert("ColorEmoji".to_owned(), data.into());
+                    .insert("ColorEmoji".to_owned(), FontData::from_owned(bytes).into());
                 for family in [FontFamily::Proportional, FontFamily::Monospace] {
                     if let Some(chain) = definitions.families.get_mut(&family) {
                         // Insert ahead of epaint's built-in monochrome emoji
@@ -1304,7 +1296,7 @@ mod tests {
             .iter()
             .filter(|sample| !context.fonts_mut(|fonts| fonts.has_glyphs(&strong, sample)))
             .collect();
-        let _ = context.end_pass();
+        context.end_pass().drop_without_applying_deltas();
         assert!(
             missing_regular.is_empty(),
             "regular chain lacks {missing_regular:?}"
@@ -1379,7 +1371,8 @@ mod tests {
             .unwrap() = vec!["NotoEmoji".to_owned()];
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
-        ctx.run(egui::RawInput::default(), |_ctx| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         let font_id = egui::FontId::proportional(16.0);
         for ch in [
             '\u{1F7E2}',
@@ -1418,7 +1411,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "color-emoji")]
     #[ignore = "requires installed system fonts"]
     fn emoji_fallback_face_resolves_for_doc_emoji() {
         // Build the same definitions setup_fonts() would install: egui
@@ -1434,7 +1426,8 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
         // Fonts aren't built until the first Context::run() pass.
-        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         let font_id = egui::FontId::proportional(16.0);
         // Debug: font_data keys and family list as egui sees them.
         ctx.fonts(|f| {
@@ -1456,17 +1449,19 @@ mod tests {
         let defaults = FontDefinitions::default();
         let mut with_ours = FontDefinitions::default();
         install_emoji_fonts(&mut with_ours);
-        for (label, defs_source) in [
-            ("builtin:NotoEmoji-Regular", &defaults),
-            ("bundled:NotoEmoji", &with_ours),
-        ] {
+        // egui 0.37's defaults no longer bundle NotoEmoji-Regular (only with
+        // epaint's `monochrome_emoji_fonts`), so only our bundled copy is
+        // checked here.
+        let _ = &defaults;
+        for (label, defs_source) in [("bundled:NotoEmoji", &with_ours)] {
             let name = label.split(':').nth(1).unwrap();
             let mut single = defs_source.clone();
             single.font_data.retain(|k, _| k == name);
             *single.families.get_mut(&FontFamily::Proportional).unwrap() = vec![name.to_owned()];
             let ctx2 = egui::Context::default();
             ctx2.set_fonts(single);
-            let _ = ctx2.run(egui::RawInput::default(), |_ctx| {});
+            ctx2.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
             let font_id = egui::FontId::proportional(16.0);
             let results: Vec<bool> = ctx2.fonts_mut(|f| {
                 [
@@ -1569,7 +1564,7 @@ mod tests {
                         }
                     }
                 }
-                (uv.colored, peak)
+                (glyph.is_color, peak)
             });
             eprintln!(
                 "{ch:?}: colored flag = {colored}, {want_channel} channel peak = {channel_peak}"
@@ -1608,38 +1603,45 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "color-emoji")]
     #[ignore = "requires installed system fonts"]
     fn color_emoji_face_never_claims_ui_symbols() {
+        // The real chain the app installs: egui defaults, then the emoji faces.
         let mut definitions = FontDefinitions::default();
         install_emoji_fonts(&mut definitions);
-        if !definitions.font_data.contains_key("ColorEmoji") {
-            eprintln!("skip: this test needs the system color emoji font (Linux Noto paths)");
-            return;
-        }
-        definitions.font_data.retain(|k, _| k == "ColorEmoji");
-        *definitions
-            .families
-            .get_mut(&FontFamily::Proportional)
-            .unwrap() = vec!["ColorEmoji".to_owned()];
+        assert!(
+            definitions.font_data.contains_key("ColorEmoji"),
+            "no system color emoji font; the test would prove nothing"
+        );
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
-        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         let font_id = egui::FontId::proportional(16.0);
-        // Default-emoji characters resolve through the color face...
+        let is_color = |ch: char| {
+            ctx.fonts_mut(|f| {
+                let job = egui::text::LayoutJob::simple(
+                    ch.to_string(),
+                    font_id.clone(),
+                    egui::Color32::WHITE,
+                    f32::INFINITY,
+                );
+                f.layout_job(job).rows[0].glyphs[0].is_color
+            })
+        };
+        // Default-emoji characters render from the color face...
         for ch in ['\u{1F7E2}', '\u{1F534}', '\u{26AA}', '\u{2705}'] {
-            let ok = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
-            assert!(ok, "{ch} should come from ColorEmoji");
+            assert!(is_color(ch), "{ch} should render in color");
         }
         // ...but general UI symbols must not, even though Noto Color Emoji
-        // maps them — they belong to regular text faces.
+        // maps them: they are text-presentation characters, and the vendored
+        // epaint's fallback prefers a face without color glyphs for those
+        // (crates/epaint/PATCH.md). Stock 0.37 would take the first face.
         for ch in [
             '\u{25B6}', '\u{25BC}', '\u{26A0}', '\u{2714}', '\u{2192}', '\u{2713}',
         ] {
-            let claimed = ctx.fonts_mut(|f| f.has_glyph(&font_id, ch));
             assert!(
-                !claimed,
-                "{ch} (UI symbol) must not be claimed by the color emoji face"
+                !is_color(ch),
+                "{ch} (UI symbol) must not render from the color emoji face"
             );
         }
     }
@@ -1650,7 +1652,6 @@ mod tests {
     /// white text glyph. A bare `❤` must stay text, and VS16 itself must not
     /// draw anything.
     #[test]
-    #[cfg(feature = "color-emoji")]
     #[ignore = "requires installed system fonts"]
     fn vs16_requests_the_color_face_for_text_default_characters() {
         let mut definitions = FontDefinitions::default();
@@ -1661,7 +1662,8 @@ mod tests {
         );
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
-        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         let font_id = egui::FontId::proportional(16.0);
         let glyphs = |text: &str| {
             ctx.fonts_mut(|f| {
@@ -1674,7 +1676,7 @@ mod tests {
                 f.layout_job(job).rows[0]
                     .glyphs
                     .iter()
-                    .map(|g| (g.chr, g.uv_rect.colored, g.advance_width))
+                    .map(|g| (g.chr, g.is_color, g.advance_width))
                     .collect::<Vec<_>>()
             })
         };
@@ -1692,7 +1694,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "color-emoji")]
     #[ignore = "requires installed system fonts"]
     fn fe0e_requests_a_text_face_and_zwj_takes_no_space() {
         let mut definitions = FontDefinitions::default();
@@ -1703,7 +1704,8 @@ mod tests {
         );
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
-        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         let font_id = egui::FontId::proportional(16.0);
         let glyphs = |text: &str| {
             ctx.fonts_mut(|f| {
@@ -1716,7 +1718,7 @@ mod tests {
                 f.layout_job(job).rows[0]
                     .glyphs
                     .iter()
-                    .map(|g| (g.chr, g.uv_rect.colored, g.advance_width))
+                    .map(|g| (g.chr, g.is_color, g.advance_width))
                     .collect::<Vec<_>>()
             })
         };
@@ -1729,10 +1731,12 @@ mod tests {
         eprintln!("bare={bare:?} fe0e={text:?} bare_again={bare_again:?} zwj={zwj:?}");
         assert!(bare[0].1, "bare 🚀 is a default emoji and stays color");
         assert!(!text[0].1, "🚀 followed by FE0E must use a text face");
-        assert_eq!(text[1].0, '\u{FE0E}');
+        // egui 0.37 reports each glyph of a cluster with the cluster's base
+        // char, so the selector is identified by position, not by `chr`.
+        assert_eq!(text.len(), 2, "🚀 + FE0E lays out as two glyphs: {text:?}");
         assert_eq!(text[1].2, 0.0, "FE0E must not take up space");
         assert!(bare_again[0].1, "FE0E lookup leaked into the bare-🚀 cache");
-        assert_eq!(zwj[1].0, '\u{200D}');
+        assert_eq!(zwj.len(), 3, "👨 ZWJ 👩 lays out as three glyphs: {zwj:?}");
         assert_eq!(zwj[1].2, 0.0, "ZWJ must not take up space");
         assert!(zwj[0].1 && zwj[2].1, "ZWJ neighbours stay color emoji");
     }

@@ -579,7 +579,7 @@ impl<'f> CommonMarkViewer<'f> {
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
         prepare_show(cache, ui.ctx());
         parsers::pulldown::CommonMarkViewerInternal::new().show_scrollable(
-            Id::new(source_id),
+            Id::unique(source_id),
             ui,
             cache,
             &self.options,

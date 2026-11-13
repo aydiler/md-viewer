@@ -273,9 +273,9 @@ jobs:
           key: publish-crates
 
       - name: Prepare the crates.io manifest
-        # Strips the local-only MCP dependency and drops `color-emoji` from the
-        # default features (#215). Shared with `crates-package-check`, so the
-        # dry run verifies exactly the manifest this job publishes.
+        # Strips the local-only MCP dependency. Shared with
+        # `crates-package-check`, so the dry run verifies exactly the manifest
+        # this job publishes.
         if: steps.check.outputs.proceed == 'true'
         run: python3 scripts/prepare-crates-manifest.py
 
