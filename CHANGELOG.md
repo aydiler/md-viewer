@@ -12,6 +12,9 @@ All notable changes to markdown-viewer will be documented in this file.
 ### Bug Fixes
 - **Text-style emoji stay monochrome.** An emoji followed by U+FE0E (text presentation), such as `🚀︎`, is drawn from a monochrome face instead of in color, the counterpart of 0.3.2's `❤️` fix.
 
+### Internal
+- **The vendored renderer moves to 0.28.6**, carrying the email and heading-link changes and the macros test gate (#227–#229).
+
 ## [0.3.2] - 2026-11-12
 
 Bare URLs become links, ❤️ is red again, and the release pipeline now builds every channel before a tag is pushed.
