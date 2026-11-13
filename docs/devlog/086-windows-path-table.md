@@ -2,7 +2,7 @@
 
 **Status:** Complete
 **Branch:** `test/windows-path-table`
-**Date:** 2026-11-14
+**Date:** 2026-11-13
 
 ## Why
 

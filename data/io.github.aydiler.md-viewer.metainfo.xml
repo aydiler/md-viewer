@@ -84,6 +84,16 @@
   </provides>
 
   <releases>
+    <release version="0.3.4" date="2026-11-13">
+      <description>
+        <p>Scrolling and layout:</p>
+        <ul>
+          <li>Long documents with formulas scroll all the way to their last line</li>
+          <li>With Full Width off, the reading column is centered and lists and headings wrap at its edge</li>
+          <li>The scrollbar is always shown, so the column no longer shifts at the scroll edges</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.3" date="2026-11-13">
       <description>
         <p>Reading and links:</p>
