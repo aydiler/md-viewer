@@ -32,3 +32,17 @@ jobs:
       # unchecked. Still `check`, not `test`: this job is a portability guard,
       # and running the suite on three platforms is a separate decision.
       - run: cargo check --locked --all-targets
+
+  test-windows:
+    # Runs the app's test suite on Windows, so `#[cfg(windows)]` tests such as
+    # the #141 Windows path table execute somewhere instead of only compiling.
+    name: cargo test (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
