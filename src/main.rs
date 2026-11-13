@@ -6749,6 +6749,71 @@ mod tests {
         }
     }
 
+    /// Windows companion to the table above (#141 point 4). Drive-letter,
+    /// UNC and `file://host` destinations only mean something on Windows, so
+    /// they are characterized where `Path` and `Url::to_file_path` actually
+    /// apply Windows rules. Like #188 this pins current behavior rather than
+    /// changing it; every mismatch is reported at once, so one CI run shows
+    /// the whole Windows answer.
+    #[test]
+    #[cfg(windows)]
+    fn local_destination_resolution_is_characterized_on_windows() {
+        let dir = Path::new(r"C:\base\doc");
+        type Row<'a> = (&'a str, bool, Result<Option<&'a str>, ()>);
+        let table: &[Row<'_>] = &[
+            // relative destinations, either separator, join the document dir
+            ("guide.md", true, Ok(Some(r"C:\base\doc\guide.md"))),
+            (r"sub\guide.md", true, Ok(Some(r"C:\base\doc\sub\guide.md"))),
+            ("sub/guide.md", true, Ok(Some(r"C:\base\doc\sub/guide.md"))),
+            // a drive letter is a path, not a one-letter URI scheme
+            (r"C:\docs\guide.md", true, Ok(Some(r"C:\docs\guide.md"))),
+            ("C:/docs/guide.md", true, Ok(Some("C:/docs/guide.md"))),
+            // file:// URIs convert through Url::to_file_path
+            (
+                "file:///C:/docs/guide.md",
+                true,
+                Ok(Some(r"C:\docs\guide.md")),
+            ),
+            (
+                "file:///C:/docs/a%20b.md",
+                true,
+                Ok(Some(r"C:\docs\a b.md")),
+            ),
+            // UNC: a backslash share path is absolute; a file URI with a host
+            // names the same share on Windows (on Unix it is external)
+            (
+                r"\\server\share\guide.md",
+                true,
+                Ok(Some(r"\\server\share\guide.md")),
+            ),
+            (
+                "file://server/share/guide.md",
+                true,
+                Ok(Some(r"\\server\share\guide.md")),
+            ),
+            // the scheme boundary holds on Windows too
+            ("//evil.com/guide.md", false, Ok(None)),
+            ("https://example.com/guide.md", false, Ok(None)),
+            ("data:text/plain,x.md", false, Ok(None)),
+        ];
+
+        let mut mismatches = Vec::new();
+        for (destination, expect_local, expect_resolved) in table {
+            let local = is_local_markdown_link(destination);
+            let resolved = resolve_local_link_path(destination, dir)
+                .map(|path| path.map(|p| p.display().to_string()))
+                .map_err(|_| ());
+            let expected = expect_resolved.map(|p| p.map(str::to_owned));
+            if local != *expect_local || resolved != expected {
+                mismatches.push(format!(
+                    "{destination:?}: local={local} (want {expect_local}), \
+                     resolved={resolved:?} (want {expected:?})"
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
+    }
+
     /// The invariant that closes the dead-click class: whatever the gate lets
     /// through must be something the resolver either turns into a path or
     /// complains about. It must never answer "nothing to open", because such a
@@ -6863,7 +6928,13 @@ mod tests {
         assert!(tab.navigate_to_path(&home).unwrap());
 
         // same divergence for file:// destinations
-        let uri = format!("file://{}", guide.canonicalize().unwrap().display());
+        // Build the URI with `Url::from_file_path`, not `format!("file://{}")`:
+        // on Windows `canonicalize` returns a verbatim `\\?\C:\…` path and the
+        // space stays unencoded, so a pasted string is not a valid file URI
+        // there (it failed the first time this test ran on windows-latest).
+        let uri = url::Url::from_file_path(guide.canonicalize().unwrap())
+            .unwrap()
+            .to_string();
         assert_eq!(
             tab.resolve_link(&uri).unwrap(),
             Some(guide.canonicalize().unwrap()),
