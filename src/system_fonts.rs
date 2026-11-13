@@ -1493,6 +1493,52 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "color-emoji")]
+    #[ignore = "requires installed system fonts"]
+    fn fe0e_requests_a_text_face_and_zwj_takes_no_space() {
+        let mut definitions = FontDefinitions::default();
+        install_emoji_fonts(&mut definitions);
+        assert!(
+            definitions.font_data.contains_key("ColorEmoji"),
+            "no system NotoColorEmoji.ttf; the test would prove nothing"
+        );
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        let _ = ctx.run(egui::RawInput::default(), |_ctx| {});
+        let font_id = egui::FontId::proportional(16.0);
+        let glyphs = |text: &str| {
+            ctx.fonts_mut(|f| {
+                let job = egui::text::LayoutJob::simple(
+                    text.to_owned(),
+                    font_id.clone(),
+                    egui::Color32::WHITE,
+                    f32::INFINITY,
+                );
+                f.layout_job(job).rows[0]
+                    .glyphs
+                    .iter()
+                    .map(|g| (g.chr, g.uv_rect.colored, g.advance_width))
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Bare first, then FE0E, then bare again: a cache shared between the
+        // two lookups would turn one of the bare rockets monochrome.
+        let bare = glyphs("\u{1F680}");
+        let text = glyphs("\u{1F680}\u{FE0E}");
+        let bare_again = glyphs("\u{1F680}");
+        let zwj = glyphs("\u{1F468}\u{200D}\u{1F469}");
+        eprintln!("bare={bare:?} fe0e={text:?} bare_again={bare_again:?} zwj={zwj:?}");
+        assert!(bare[0].1, "bare 🚀 is a default emoji and stays color");
+        assert!(!text[0].1, "🚀 followed by FE0E must use a text face");
+        assert_eq!(text[1].0, '\u{FE0E}');
+        assert_eq!(text[1].2, 0.0, "FE0E must not take up space");
+        assert!(bare_again[0].1, "FE0E lookup leaked into the bare-🚀 cache");
+        assert_eq!(zwj[1].0, '\u{200D}');
+        assert_eq!(zwj[1].2, 0.0, "ZWJ must not take up space");
+        assert!(zwj[0].1 && zwj[2].1, "ZWJ neighbours stay color emoji");
+    }
+
+    #[test]
     fn preset_mono_lists_lead_with_linux_generic_monospace_resolutions() {
         assert_eq!(
             FontPreset::Github.mono_families()[..2],

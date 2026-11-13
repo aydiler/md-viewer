@@ -187,11 +187,12 @@ fn layout_section(
         } else {
             // U+FE0F (VS16) after a character requests emoji presentation:
             // `❤️` must come from the color-emoji face even though a bare `❤`
-            // is a text character.
-            let (font_id, glyph_info) = if chars.peek() == Some(&'\u{FE0F}') {
-                font.glyph_info_emoji_presentation(chr)
-            } else {
-                font.glyph_info(chr)
+            // is a text character. U+FE0E (VS15) requests text presentation:
+            // `🚀︎` comes from a monochrome face when one has the glyph.
+            let (font_id, glyph_info) = match chars.peek() {
+                Some('\u{FE0F}') => font.glyph_info_emoji_presentation(chr),
+                Some('\u{FE0E}') => font.glyph_info_text_presentation(chr),
+                _ => font.glyph_info(chr),
             };
             let mut font_impl = font.fonts_by_id.get_mut(&font_id);
             if current_font != font_id {
