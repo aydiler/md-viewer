@@ -2341,6 +2341,7 @@ struct MarkdownApp {
     // Last zoom level handed to set_zoom_factor; skips redundant writes
     last_applied_zoom_level: Option<f32>,
     last_window_title: String,
+    selftest_frames: usize,
     title_dirty: bool,
     /// Cached set of open tab paths for file explorer highlighting (avoids per-frame syscalls)
     open_tab_paths: HashSet<PathBuf>,
@@ -2598,6 +2599,7 @@ impl MarkdownApp {
             last_applied_dark_mode: None,
             last_applied_zoom_level: None,
             last_window_title: String::new(),
+            selftest_frames: 0,
             title_dirty: true,
             open_tab_paths: HashSet::new(),
             lightbox: None,
@@ -5117,6 +5119,16 @@ impl MarkdownApp {
     }
 }
 
+/// Frame milestones for the `MDV_SELFTEST` harness: scroll injection and
+/// the scroll-walk start at [`SELFTEST_SETTLE_FRAME`]; the geometry dump
+/// begins (and the walk ends) at [`SELFTEST_DUMP_FRAME`]; the app exits at
+/// [`SELFTEST_EXIT_FRAME`]. The gaps between them are settle time — enough
+/// frames for fonts, panels, and async math textures to land before any
+/// scroll state is measured.
+const SELFTEST_SETTLE_FRAME: usize = 30;
+const SELFTEST_DUMP_FRAME: usize = 120;
+const SELFTEST_EXIT_FRAME: usize = 140;
+
 impl eframe::App for MarkdownApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         #[cfg(feature = "mcp")]
@@ -6228,6 +6240,59 @@ impl eframe::App for MarkdownApp {
         // Capture AccessKit output for MCP bridge
         #[cfg(feature = "mcp")]
         self.mcp_bridge.capture_output(ctx);
+
+        // Live-app self test harness. `MDV_SELFTEST=1` runs the real app —
+        // real fonts, zoom, side panels, async math — for a fixed number of
+        // frames (milestones: SELFTEST_SETTLE_FRAME, SELFTEST_DUMP_FRAME,
+        // SELFTEST_EXIT_FRAME), then dumps the scroll geometry of the active
+        // tab to stderr and exits without saving state.
+        // `MDV_SELFTEST_SCROLL=<pts>` injects a pending scroll offset at the
+        // settle frame so the dump proves the offset can reach the true
+        // document bottom (and reveals any clamp that snaps it back short).
+        // `MDV_SELFTEST_SCROLLWALK=<from>:<to>:<steps>` instead walks the
+        // pending offset frame by frame from the settle frame to the dump
+        // frame, simulating a wheel scroll across the given range — this
+        // exposes extent behavior that only appears while the viewport moves.
+        if std::env::var("MDV_SELFTEST").is_ok() {
+            self.selftest_frames += 1;
+            let frame = self.selftest_frames;
+            if let Ok(target) = std::env::var("MDV_SELFTEST_SCROLL") {
+                if frame == SELFTEST_SETTLE_FRAME {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.pending_scroll_offset = Some(target.parse().unwrap_or(3000.0));
+                    }
+                }
+            }
+            if let Ok(walk) = std::env::var("MDV_SELFTEST_SCROLLWALK") {
+                if (SELFTEST_SETTLE_FRAME..SELFTEST_DUMP_FRAME).contains(&frame) {
+                    let parts: Vec<f32> = walk.split(':').filter_map(|p| p.parse().ok()).collect();
+                    if parts.len() == 3 {
+                        let (from, to, steps) = (parts[0], parts[1], parts[2].max(1.0));
+                        let t = ((frame - SELFTEST_SETTLE_FRAME) as f32 / steps).min(1.0);
+                        let offset = from + (to - from) * t;
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.pending_scroll_offset = Some(offset);
+                        }
+                    }
+                }
+            }
+            if frame >= SELFTEST_DUMP_FRAME {
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    eprintln!(
+                        "SELFTEST f={} content={:.1} viewport={:.1} offset={:.1} max_by_content={:.1}",
+                        frame,
+                        tab.last_content_height,
+                        tab.last_viewport_height,
+                        tab.scroll_offset,
+                        (tab.last_content_height - tab.last_viewport_height).max(0.0)
+                    );
+                }
+            }
+            if frame >= SELFTEST_EXIT_FRAME {
+                std::process::exit(0);
+            }
+            ctx.request_repaint();
+        }
     }
 }
 

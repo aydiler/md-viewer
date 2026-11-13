@@ -949,6 +949,22 @@ const TABLE_OVERFLOW_FRACTION: f32 = 0.30;
 const TABLE_OVERFLOW_KNEE: f32 = 0.90;
 const MAX_TABLE_MEASURED_CELLS: usize = 4_096;
 
+/// Trailing breathing room below the last block, in body-line heights. Added
+/// after the event loop so the scrollable extent ends with padding instead of
+/// the final line sitting flush against the pane bottom, and added again when
+/// a bottom slice raises the extent floor, so the measured and learned
+/// extents stay consistent. Scales with the body font to stay proportional
+/// at every text size.
+const TRAILING_PADDING_BODY_LINES: f32 = 2.0;
+
+/// Tolerance (in points) when deciding whether a slice reached the measured
+/// document bottom: the viewport's bottom edge may exceed `page_size` by up
+/// to this much and still count as non-overshoot. Without it, float drift
+/// between the measured extent and the viewport edge would classify a legit
+/// bottom paint as an overshoot and the extent floor would never learn from
+/// it — leaving the true document tail unreachable.
+const OVERSHOOT_EPSILON: f32 = 1.0;
+
 fn table_floors_overflow(minimum_total: f32, visible_column_budget: f32) -> bool {
     minimum_total > visible_column_budget + 0.01
 }
@@ -1413,6 +1429,11 @@ pub struct CommonMarkViewerInternal {
     /// Nested table/list/blockquote UIs must not replace this origin when
     /// converting navigation positions into document coordinates.
     render_origin_y: f32,
+    /// Right edge of the reading column for the current pass. Wide unwrapped
+    /// widgets (inline math images) expand the enclosing ui's max_rect to the
+    /// pane, so flow sub-UIs must not derive their bound from `max_rect` —
+    /// they read this instead. `INFINITY` keeps the old behavior if unset.
+    column_right: f32,
     /// Raw text of the frontmatter block being collected. `Some` only between
     /// `Tag::MetadataBlock` and its end, so ordinary text is unaffected.
     frontmatter: Option<String>,
@@ -1449,6 +1470,7 @@ impl CommonMarkViewerInternal {
             current_heading_links: Vec::new(),
             slice_start_y: 0.0,
             render_origin_y: 0.0,
+            column_right: f32::INFINITY,
         }
     }
 }
@@ -1844,7 +1866,21 @@ impl CommonMarkViewerInternal {
         // `ScrollArea::begin`). `max_rect` *is* the viewport, so cap the
         // document column at its right edge.
         let max_width = max_width.min((ui.max_rect().right() - scroll_area_left).max(0.0));
-        let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
+        // Center the content column in the viewport: allocate the bootstrap
+        // region at a centered left edge. The margin is recorded below as
+        // `left_offset` (`content_origin_x - scroll_area_left`) and the
+        // viewport-slice pass re-anchors slices at the same column, so the
+        // two passes stay aligned. Zero margin in full-width mode and when
+        // the pane is narrower than the column.
+        let column_margin = ((ui.available_width() - max_width) / 2.0).max(0.0);
+        let column_rect = egui::Rect::from_min_size(
+            egui::pos2(ui.cursor().left() + column_margin, ui.cursor().top()),
+            egui::vec2(max_width, 0.0),
+        );
+        self.column_right = column_rect.right();
+        let re = ui.scope_builder(
+            egui::UiBuilder::new().max_rect(column_rect).layout(layout),
+            |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
@@ -1955,6 +1991,11 @@ impl CommonMarkViewerInternal {
                 }
             }
 
+            // Trailing breathing room below the last block: see
+            // TRAILING_PADDING_BODY_LINES.
+            let body_height = ui.text_style_height(&TextStyle::Body);
+            ui.add_space(TRAILING_PADDING_BODY_LINES * body_height);
+
             if let Some(source_id) = split_points_id {
                 let content_height = (ui.next_widget_position().y - content_origin_y).max(0.0);
                 let scroll_cache = scroll_cache(cache, &source_id);
@@ -2025,6 +2066,7 @@ impl CommonMarkViewerInternal {
                 // longer valid for this content. Drop them so the first
                 // post-change frame falls into the bootstrap branch below.
                 sc.page_size = None;
+                sc.observed_extent_bottom = 0.0;
                 sc.split_points.clear();
             }
             // Width/zoom/theme change: y-coordinates are invalid for the
@@ -2033,6 +2075,7 @@ impl CommonMarkViewerInternal {
                 layout_invalidated = true;
                 sc.layout_signature = layout_sig;
                 sc.page_size = None;
+                sc.observed_extent_bottom = 0.0;
                 sc.split_points.clear();
                 sc.available_size = available_size;
             }
@@ -2040,6 +2083,7 @@ impl CommonMarkViewerInternal {
                 layout_invalidated = true;
                 sc.layout_revision = layout_revision;
                 sc.page_size = None;
+                sc.observed_extent_bottom = 0.0;
                 sc.split_points.clear();
             }
             // An unknown navigation target may require painting every event
@@ -2054,6 +2098,7 @@ impl CommonMarkViewerInternal {
             // can still refresh page_size without rebuilding the split list.
             if force_full_render {
                 sc.page_size = None;
+                sc.observed_extent_bottom = 0.0;
             }
         }
         // Header positions are content-keyed; new content means the cached
@@ -2067,7 +2112,13 @@ impl CommonMarkViewerInternal {
         let make_scroll_area = |pending_scroll_offset: Option<f32>| {
             let mut sa = egui::ScrollArea::vertical()
                 .id_salt(scroll_id)
-                .auto_shrink([false, true]);
+                .auto_shrink([false, true])
+                // A permanent bar keeps the content width identical between
+                // passes and frames: a needed-only bar appearing/disappearing
+                // at the scroll edges flips the column width, which flips the
+                // layout signature and re-measures the document — two nearby
+                // extents alternating is visible as flicker at the bottom.
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
             if let Some(offset) = pending_scroll_offset {
                 sa = sa.vertical_scroll_offset(offset);
             }
@@ -2160,9 +2211,10 @@ impl CommonMarkViewerInternal {
             // `content_left` (which carries the content margin / indentation)
             // used to extend the slice past the pane and over the sidebar.
             let max_width = max_width.min((ui.max_rect().right() - content_left).max(0.0));
+            self.column_right = content_left + max_width;
 
             let (first_event_index, first_end_y, events_range,
-                 diag_viewport_min_y, diag_viewport_max_y) = {
+                 diag_viewport_min_y, diag_viewport_max_y, slice_reached_end) = {
                 let scroll_cache = scroll_cache(cache, &source_id);
 
                 // Resume after the last complete block above the viewport.
@@ -2206,7 +2258,8 @@ impl CommonMarkViewerInternal {
                 );
 
                 (first_event_index, first_end_position.y, events_range,
-                 viewport.min.y, viewport.max.y)
+                 viewport.min.y, viewport.max.y,
+                 last_event_index >= num_rows)
             };
 
             // Match egui's show_rows strategy: size the parent to the full
@@ -2227,7 +2280,7 @@ impl CommonMarkViewerInternal {
                 egui::vec2(max_width, 0.0),
             );
 
-            ui.scope_builder(
+            let slice_re = ui.scope_builder(
                 egui::UiBuilder::new().max_rect(slice_rect).layout(layout),
                 |ui| {
                     self.slice_start_y = first_end_y;
@@ -2268,11 +2321,64 @@ impl CommonMarkViewerInternal {
                     }
                 },
             );
+
+            // Extent floor. The bootstrap's `page_size` is the base measurement, but
+            // async-grown content (math textures) and the slice pass's relayout
+            // can paint the tail deeper than measured; the reported extent must
+            // follow the painted reality or the last lines are unreachable. The
+            // floor only learns from NON-OVERSHOOT bottom slices, and the
+            // overshoot test is against the bootstrap's `page_size` alone —
+            // never against the mutable floor: the floor grows to bless
+            // whatever offset an over-eager scroll reached, and the guard would
+            // then accept the next over-scroll too (a ratchet). With the
+            // page_size anchor, an over-scroll can raise the extent at most
+            // once (the one legit latch at the measured bottom), and the
+            // overshoot's own paint is span-neutral (it moves up with the
+            // child origin), so it cannot feed back. The child's coordinates
+            // are absolute, so content y = child y minus the child's origin.
+            let child_origin = ui.max_rect().top();
+            let page_size_y = scroll_cache(cache, &source_id)
+                .page_size
+                .as_ref()
+                .map_or(0.0, |s| s.y);
+            let mut reported_extent = {
+                let sc = scroll_cache(cache, &source_id);
+                page_size_y.max(sc.observed_extent_bottom)
+            };
+            if slice_reached_end && viewport.max.y <= page_size_y + OVERSHOOT_EPSILON {
+                let padding =
+                    TRAILING_PADDING_BODY_LINES * ui.text_style_height(&TextStyle::Body);
+                let content_bottom = slice_re.response.rect.bottom() - child_origin;
+                let floor = content_bottom + padding;
+                if floor > reported_extent {
+                    scroll_cache(cache, &source_id).observed_extent_bottom = floor;
+                    reported_extent = floor;
+                }
+            }
+            if reported_extent > 0.0 {
+                // The child's min_rect spans from its origin (pane top minus
+                // the scroll offset — negative when scrolled) to the deepest
+                // painted widget, and `content_size` is that span. Raising the
+                // extent must therefore target the ABSOLUTE y of the content
+                // bottom (`child_origin + extent`), not the extent itself:
+                // expanding to the bare extent counted the scrolled-out gap
+                // between the origin and the paint as content, so content_size
+                // grew with the scroll offset and the overshoot clamp — fed by
+                // content_size — never clamped: scrolling past the bottom kept
+                // "extending" the document.
+                let cursor_top = ui.next_widget_position().y;
+                let target_abs = child_origin + reported_extent;
+                ui.set_height((target_abs - cursor_top).max(0.0));
+            }
         });
         // The absolutely positioned slice preserves the bootstrap content extent.
 
-        // Scroll-overshoot clamp.
-        let real_max_scroll = (page_size.y - out.inner_rect.height()).max(0.0);
+        // Scroll-overshoot clamp. The bound must be the extent the frame actually
+        // reports (`content_size`), not the cached `page_size`: content that
+        // grew after measurement (async math textures) is taller than
+        // `page_size`, and clamping against the stale value snaps the offset
+        // back every frame — the reader cannot reach the document bottom.
+        let real_max_scroll = (out.content_size.y - out.inner_rect.height()).max(0.0);
         let clamped = out.state.offset.y > real_max_scroll;
         if clamped {
             let mut state = out.state;
@@ -2348,20 +2454,36 @@ impl CommonMarkViewerInternal {
             ui.label(" ".repeat(options.indentation_spaces));
             self.line.should_start_newline = true;
             self.line.should_end_newline = false;
-            // Required to ensure that the content is aligned with the identation
-            ui.horizontal_wrapped(|ui| {
-                while let Some((_, (e, src_span))) = events_iter.next() {
-                    self.process_event(
-                        ui,
-                        &mut events_iter,
-                        e,
-                        src_span,
-                        cache,
-                        options,
-                        max_width,
-                    );
-                }
-            });
+            // Required to ensure that the content is aligned with the identation.
+            // Bounded flow scope: see the list-item path for why this must not be
+            // a bare `horizontal_wrapped`.
+            let def_flow_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.cursor().left(), ui.cursor().top()),
+                egui::pos2(
+                    self.column_right
+                        .min(ui.max_rect().right())
+                        .max(ui.cursor().left()),
+                    ui.max_rect().bottom(),
+                ),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(def_flow_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true)),
+                |ui| {
+                    while let Some((_, (e, src_span))) = events_iter.next() {
+                        self.process_event(
+                            ui,
+                            &mut events_iter,
+                            e,
+                            src_span,
+                            cache,
+                            options,
+                            max_width,
+                        );
+                    }
+                },
+            );
             self.line.should_end_newline = true;
 
             // Only end the definition items line if it is not the last element in the list
@@ -2395,20 +2517,40 @@ impl CommonMarkViewerInternal {
             let mut events_iter = item_events.into_iter().enumerate().peekable();
 
             // Required to ensure that the content of the list item is aligned with
-            // the * or - when wrapping
-            ui.horizontal_wrapped(|ui| {
-                while let Some((_, (e, src_span))) = events_iter.next() {
-                    self.process_event(
-                        ui,
-                        &mut events_iter,
-                        e,
-                        src_span,
-                        cache,
-                        options,
-                        max_width,
-                    );
-                }
-            });
+            // the * or - when wrapping. `horizontal_wrapped` sizes its child from
+            // `next_space`, which on some pane/scrollbar states hands the flow a
+            // max_rect wider than the reading column; egui's main-wrap label path
+            // then re-wraps every segment at that full width and rows overhang the
+            // column into the sidebar. Bound the flow to the enclosing column
+            // explicitly: same layout, but a max_rect that cannot exceed the
+            // parent's right edge.
+            let flow_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.cursor().left(), ui.cursor().top()),
+                egui::pos2(
+                    self.column_right
+                        .min(ui.max_rect().right())
+                        .max(ui.cursor().left()),
+                    ui.max_rect().bottom(),
+                ),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(flow_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true)),
+                |ui| {
+                    while let Some((_, (e, src_span))) = events_iter.next() {
+                        self.process_event(
+                            ui,
+                            &mut events_iter,
+                            e,
+                            src_span,
+                            cache,
+                            options,
+                            max_width,
+                        );
+                    }
+                },
+            );
         }
     }
 
@@ -3016,7 +3158,11 @@ impl CommonMarkViewerInternal {
             );
             let format = job.sections.first().map(|section| section.format.clone());
             self.list.flush_pending_markers(ui, format);
-            ui.label(rich_text);
+            // Pin the wrap width to the reading column explicitly instead of
+            // trusting the ambient ui width: prose may never overflow the
+            // column, whatever ui state the bootstrap/slice passes hand down.
+            job.wrap.max_width = options.max_width(ui).min(ui.available_width());
+            ui.add(egui::Label::new(job));
         }
     }
 
@@ -3347,7 +3493,17 @@ impl CommonMarkViewerInternal {
                             while let Some((_, link)) = links.next_if(|(at, _)| *at <= index) {
                                 link.end(ui, cache);
                             }
-                            ui.label(rt);
+                            // Headings wrap at the reading column too, not
+                            // the pane width (same pin as prose).
+                            let mut job = egui::text::LayoutJob::default();
+                            rt.append_to(
+                                &mut job,
+                                ui.style(),
+                                egui::FontSelection::Default,
+                                ui.text_valign(),
+                            );
+                            job.wrap.max_width = max_width.min(ui.available_width());
+                            ui.add(egui::Label::new(job));
                         }
                         for (_, link) in links {
                             link.end(ui, cache);

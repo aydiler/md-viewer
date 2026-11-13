@@ -1945,7 +1945,6 @@ fn render_math_with_layout(
                 // lift = text_descent − image_descent. `image_descent` is exact
                 // per formula; `text_descent` is the body-font descent below the
                 // line box, a shape-independent fraction of line height.
-                let img = egui::Image::new(egui::ImageSource::Texture(sized_texture));
                 // Compute the text descent EXACTLY from egui's own metrics
                 // instead of a tuned constant. epaint places a glyph's baseline
                 // at `font_ascent` below the row top and adds the line-height
@@ -1969,9 +1968,25 @@ fn render_math_with_layout(
                 let text_descent = line_height - font_ascent;
                 let image_descent = (1.0 - *baseline_ratio) * size.y;
                 let lift = (text_descent - image_descent).max(0.0);
+                // Wide formulas must not lay out past the reading column: an
+                // unwrapped inline image wider than the remaining space expands
+                // the enclosing ui's max_rect to the pane, which lets later
+                // main-wrap flow rows drift past the column, and the image
+                // itself clips at the pane edge. Fit the formula to the
+                // recorded column width — NOT the ambient width: the bootstrap
+                // and slice passes see different ambient widths (scrollbar
+                // allowance, flow indents), and a fit derived from the ambient
+                // makes the same formula taller in one pass than the other, so
+                // the slice's tail drifts from the measured extent and the
+                // scroll bottom flickers.
+                let avail_w = options.max_width(ui).max(1.0);
+                let fit_scale = (avail_w / size.x).min(1.0);
+                let draw_size = egui::vec2(size.x * fit_scale, size.y * fit_scale);
+                let sized_texture = egui::load::SizedTexture::new(texture.id(), draw_size);
+                let img = egui::Image::new(egui::ImageSource::Texture(sized_texture));
                 let (rect, _) = ui
-                    .allocate_exact_size(egui::vec2(size.x, size.y + lift), egui::Sense::hover());
-                img.paint_at(ui, egui::Rect::from_min_size(rect.min, *size));
+                    .allocate_exact_size(egui::vec2(draw_size.x, draw_size.y + lift), egui::Sense::hover());
+                img.paint_at(ui, egui::Rect::from_min_size(rect.min, draw_size));
             } else if is_inline {
                 ui.add(egui::Image::new(egui::ImageSource::Texture(sized_texture)));
             } else {
