@@ -175,6 +175,13 @@ fn setup_fonts(ctx: &egui::Context) {
 **Scope:** This is automatic fallback only. User-configurable font paths are a separate feature because they need UI/persistence/design work.
 **Files:** `src/main.rs`
 
+### fontconfig's per-script fallback can be one unusable family
+**Context:** While measuring #108, Thai rendered as tofu with Noto Sans Thai installed, and Hebrew prose was set in Liberation Mono.
+**Root cause:** fontique 0.11.1's fontconfig backend answered `fallback_families((script, locale))` with a single family per script: `Misc Fixed` (a PCF bitmap font, not loadable) for Thai and `Liberation Mono` for Hebrew. The installer took the first face covering the sample, so Thai got nothing and Hebrew got a monospace face.
+**Fix:** `select_script_fallback` (`src/system_fonts.rs`): platform list without monospace faces, then families named after the script (`name_hint`, Sans first, base family before variants), then generic sans-serif, then the platform's monospace answer as a last resort.
+**Testing gotcha:** a mutant must not touch a helper the assertion itself calls. Making `face_is_proportional` always true left the "is monospace" assertion green, because the assertion used the same function.
+**Files:** `src/system_fonts.rs`, `docs/devlog/087-script-font-fallback.md`
+
 ### egui 0.33 FontData requires Arc wrapper
 **Context:** Compiler error when adding fonts
 **Problem:** `fonts.font_data.insert()` expects `Arc<FontData>`, not `FontData`
