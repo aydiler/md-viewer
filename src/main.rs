@@ -6928,7 +6928,13 @@ mod tests {
         assert!(tab.navigate_to_path(&home).unwrap());
 
         // same divergence for file:// destinations
-        let uri = format!("file://{}", guide.canonicalize().unwrap().display());
+        // Build the URI with `Url::from_file_path`, not `format!("file://{}")`:
+        // on Windows `canonicalize` returns a verbatim `\\?\C:\…` path and the
+        // space stays unencoded, so a pasted string is not a valid file URI
+        // there (it failed the first time this test ran on windows-latest).
+        let uri = url::Url::from_file_path(guide.canonicalize().unwrap())
+            .unwrap()
+            .to_string();
         assert_eq!(
             tab.resolve_link(&uri).unwrap(),
             Some(guide.canonicalize().unwrap()),
