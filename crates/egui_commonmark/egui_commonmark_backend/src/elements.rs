@@ -182,7 +182,7 @@ fn first_line_baseline(
         text: "x".to_owned(),
         sections: vec![egui::text::LayoutSection {
             leading_space: 0.0,
-            byte_range: 0..1,
+            byte_range: egui::text::ByteIndex(0)..egui::text::ByteIndex(1),
             format,
         }],
         first_row_min_height: ui.cursor().height(),

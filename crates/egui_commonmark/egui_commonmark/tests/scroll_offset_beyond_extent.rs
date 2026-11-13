@@ -8,6 +8,10 @@
 //! inspects every painted shape, which is the only way to see the frame the
 //! issue describes.
 
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use egui::{Context, Pos2, Rect, Shape, Vec2};
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 
@@ -30,8 +34,8 @@ fn render_frame(ctx: &Context, cache: &mut CommonMarkCache, md: &str) -> Frame {
         )),
         ..Default::default()
     };
-    let full = ctx.run(input, |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    let full = ctx.run_frame(input, |ctx| {
+        egui::CentralPanel::default().show_ctx(ctx, |ui| {
             ui.set_max_width(VIEWPORT_WIDTH);
             out = Some(
                 CommonMarkViewer::new()
@@ -101,7 +105,7 @@ fn offset_beyond_extent_frame_still_paints_visible_content() {
         !visible_texts(&settled).is_empty(),
         "sanity: settled frame shows content"
     );
-    let viewport_bottom = settled.out.state.offset.y + settled.out.inner_rect.height();
+    let viewport_bottom = settled.out.state.unclamped_offset().y + settled.out.inner_rect.height();
     assert!(
         viewport_bottom <= content_height + 0.5,
         "sanity: settled offset within extent (bottom {viewport_bottom:.1} of {content_height:.1})"
@@ -112,9 +116,7 @@ fn offset_beyond_extent_frame_still_paints_visible_content() {
     // fallback) shortens the document while the offset sits deep; here it is
     // injected directly so the critical frame is deterministic.
     let stale_offset = content_height + 2000.0;
-    let mut stale = settled.out.state;
-    stale.offset = Vec2::new(0.0, stale_offset);
-    stale.store(&ctx, settled.out.id);
+    common::store_offset(&ctx, settled.out.id, settled.out.state, Vec2::new(0.0, stale_offset));
 
     // The frame under test: egui computes the viewport from the stored offset
     // before the renderer selects its slice (scroll_area.rs: `viewport =
@@ -126,7 +128,7 @@ fn offset_beyond_extent_frame_still_paints_visible_content() {
     eprintln!(
         "critical frame: offset_in {:.1} offset_out {:.1} content {:.1} viewport [{:.1}..{:.1}] texts_total {} texts_visible {}",
         stale_offset,
-        critical.out.state.offset.y,
+        critical.out.state.unclamped_offset().y,
         content_height,
         viewport.min.y,
         viewport.max.y,

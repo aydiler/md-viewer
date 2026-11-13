@@ -3,6 +3,10 @@
 //! overlapped surrounding text at narrow widths. See pulldown.rs
 //! `inline_code_wrap_segments`.
 
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use egui::{Context, Rect, Shape, TextStyle};
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 
@@ -87,11 +91,11 @@ fn render_geometry_inner(
 ) -> (Rect, f32, Vec<PaintedText>) {
     let ctx = Context::default();
     if let Some(size) = body_size {
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         style
             .text_styles
             .insert(TextStyle::Body, egui::FontId::proportional(size));
-        ctx.set_style(style);
+        ctx.set_global_style(style);
     }
     let mut cache = CommonMarkCache::default();
     for hook in hooks {
@@ -111,7 +115,7 @@ fn render_geometry_inner(
             screen_rect: Some(screen),
             ..Default::default()
         });
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             let response = CommonMarkViewer::new()
                 .default_width(Some(content_width as usize))
                 .table_max_width(Some(content_width as usize))
@@ -120,7 +124,7 @@ fn render_geometry_inner(
                 .show(ui, &mut cache, markdown);
             body_rect = response.response.rect;
         });
-        let output = ctx.end_pass();
+        let output = ctx.end_frame();
 
         // Only final-pass positions represent the settled layout.
         if pass == 1 {
@@ -130,7 +134,7 @@ fn render_geometry_inner(
         }
     }
 
-    let body_id = TextStyle::Body.resolve(&ctx.style());
+    let body_id = TextStyle::Body.resolve(&ctx.global_style());
     let row_height = ctx.fonts_mut(|fonts| fonts.row_height(&body_id));
     (body_rect, row_height, painted)
 }
@@ -229,9 +233,17 @@ fn dense_markdown_table_uses_bounded_scrollable_width_for_wrapping() {
         .find(|entry| entry.text.contains("DENSE_MARKDOWN"))
         .unwrap();
 
-    assert!(description.rect.width() > 150.0, "{description:?}");
-    assert!(description.rows <= 6, "{description:?}");
-    assert!(body.height() < 180.0, "{body:?}");
+    // Without Phase 2 the description column stays at its 82 px word floor
+    // (~74 px of text) and wraps to ~16 rows. The knee rule picks the first
+    // overflow step that reaches 90% of the best height reduction: with egui
+    // 0.37's pixel-snapped 20 px rows that is +64 px (row_max_total 346 →
+    // 166, the target being exactly 166): a 146 px column, 138 px of text,
+    // 7 rows. With 0.33's 19.5 px rows +64 fell 2 px short and +96 won
+    // (163 px of text, 6 rows).
+    assert!(description.rect.width() > 130.0, "{description:?}");
+    assert!(description.rows <= 7, "{description:?}");
+    // ~16 rows (~340 px) without Phase 2; 183 px with the 7-row knee choice.
+    assert!(body.height() < 200.0, "{body:?}");
 }
 
 #[test]
@@ -374,14 +386,14 @@ fn table_cell_height_after_widths(markdown: &str, widths: &[f32], marker: &str) 
         // table state rather than the frame that invalidated it.
         for pass in 0..2 {
             ctx.begin_pass(Default::default());
-            egui::CentralPanel::default().show(&ctx, |ui| {
+            egui::CentralPanel::default().show_ctx(&ctx, |ui| {
                 ui.set_width(width);
                 CommonMarkViewer::new()
                     .default_width(Some(width as usize))
                     .table_max_width(Some(width as usize))
                     .show(ui, &mut cache, markdown);
             });
-            let output = ctx.end_pass();
+            let output = ctx.end_frame();
             if pass == 1 {
                 let mut painted = Vec::new();
                 for clipped in output.shapes {
@@ -659,7 +671,7 @@ fn render_scrollable(
     let mut inner_rect = egui::Rect::NOTHING;
     for pass in 0..3 {
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             ui.set_width(width);
             ui.set_height(height);
             let pending = if pass == 1 { scroll_offset } else { None };
@@ -668,7 +680,7 @@ fn render_scrollable(
                 .show_scrollable("scrollable_test", ui, &mut cache, markdown);
             inner_rect = out.inner_rect;
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
     }
     inner_rect
 }
@@ -710,7 +722,7 @@ fn deep_scroll_keeps_content_extent_and_paints_visible_text() {
 
     for pass in 0..=offsets.len() {
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             ui.set_width(540.0);
             ui.set_height(220.0);
             let out = CommonMarkViewer::new().show_scrollable(
@@ -725,12 +737,15 @@ fn deep_scroll_keeps_content_extent_and_paints_visible_text() {
                 viewport_content_heights.push(out.content_size.y);
             }
             if let Some(fraction) = offsets.get(pass) {
-                let mut state = out.state;
-                state.offset.y = initial_content_height * fraction;
-                state.store(ui.ctx(), out.id);
+                common::store_offset(
+                    ui.ctx(),
+                    out.id,
+                    out.state,
+                    egui::vec2(0.0, initial_content_height * fraction),
+                );
             }
         });
-        let output = ctx.end_pass();
+        let output = ctx.end_frame();
 
         if pass > 0 {
             let mut visible_text = 0;

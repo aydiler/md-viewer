@@ -8,6 +8,10 @@
 //! the dot's centre must land within a pixel of `baseline − x-height/2`,
 //! computed from the first item-text glyph's own metrics (never a constant).
 
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use std::sync::Arc;
 
 use egui::{Context, Pos2, Shape, TextStyle};
@@ -55,11 +59,11 @@ struct Render {
 
 fn render(markdown: &str, width: f32, body_size: f32, line_box: LineBox) -> Render {
     let ctx = Context::default();
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style
         .text_styles
         .insert(TextStyle::Body, egui::FontId::proportional(body_size));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 
     let mut cache = CommonMarkCache::default();
     let mut out = Render {
@@ -71,8 +75,8 @@ fn render(markdown: &str, width: f32, body_size: f32, line_box: LineBox) -> Rend
     for pass in 0..2 {
         out.texts.clear();
         out.dots.clear();
-        let full = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let full = ctx.run_frame(Default::default(), |ctx| {
+            egui::CentralPanel::default().show_ctx(ctx, |ui| {
                 ui.set_max_width(width);
                 let viewer = CommonMarkViewer::new();
                 let viewer = viewer

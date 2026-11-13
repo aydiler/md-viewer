@@ -34,6 +34,10 @@ pub struct ScrollableCache {
     /// measured `page_size` — the document extent came out wrong and blocks
     /// such as tables rendered narrower and horizontally offset.
     pub content_geometry: Option<ContentGeometry>,
+    /// Scroll-overshoot clamp found after last frame's paint, applied on the
+    /// next frame through the ScrollArea's offset builder (egui 0.37 keeps
+    /// `scroll_area::State::offset` private).
+    pub pending_clamp: Option<f32>,
     /// Extent floor in content coordinates: the deepest painted bottom (plus
     /// trailing breathing room) observed from a bottom-reaching slice that was
     /// NOT overshooting. Async-grown content (math textures) and the slice

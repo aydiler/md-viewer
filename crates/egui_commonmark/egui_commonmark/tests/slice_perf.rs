@@ -1,4 +1,8 @@
 //! Confirms the viewport-slice path is active and cheaper than a full paint.
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use egui::Context;
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 use std::time::Instant;
@@ -32,7 +36,7 @@ fn slice_paint_is_cheaper_than_full_paint() {
     for pass in 0..14 {
         let start = Instant::now();
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             ui.set_width(700.0);
             ui.set_height(500.0);
             let out = CommonMarkViewer::new().show_scrollable("perf", ui, &mut cache, &md);
@@ -41,12 +45,10 @@ fn slice_paint_is_cheaper_than_full_paint() {
             }
             // Park deep in the document and stay there.
             if pass >= 1 {
-                let mut st = out.state;
-                st.offset.y = initial_h * 0.6;
-                st.store(ui.ctx(), out.id);
+                common::store_offset(ui.ctx(), out.id, out.state, egui::vec2(0.0, initial_h * 0.6));
             }
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         if pass == 0 { bootstrap_ms = ms; }
         if pass >= 4 { slice_times.push(ms); }   // let it settle first

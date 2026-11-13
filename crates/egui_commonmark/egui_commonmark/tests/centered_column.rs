@@ -5,6 +5,10 @@
 //! at the column width — never past the pane's right edge (which visually
 //! clips under the scrollbar / outline sidebar).
 
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use std::sync::Arc;
 
 use egui::{Context, Pos2, Shape, TextStyle};
@@ -45,19 +49,19 @@ culpa qui officia deserunt mollit anim id est laborum.";
 /// through the viewport-slice pass (page_size is cached after frame one).
 fn render_two_frames() -> (Vec<PaintedText>, Vec<PaintedText>) {
     let ctx = Context::default();
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style
         .text_styles
         .insert(TextStyle::Body, egui::FontId::proportional(16.0));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 
     let mut cache = CommonMarkCache::default();
     let mut bootstrap = Vec::new();
     let mut slice = Vec::new();
 
     for frame in 0..2 {
-        let full = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let full = ctx.run_frame(Default::default(), |ctx| {
+            egui::CentralPanel::default().show_ctx(ctx, |ui| {
                 ui.set_max_width(PANE_WIDTH);
                 CommonMarkViewer::new()
                     .default_width(Some(COLUMN_WIDTH))
@@ -124,11 +128,11 @@ fn centered_column_bootstraps_and_slices_within_column() {
 #[test]
 fn centered_column_survives_resize_in_both_directions() {
     let ctx = Context::default();
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style
         .text_styles
         .insert(TextStyle::Body, egui::FontId::proportional(16.0));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 
     let mut cache = CommonMarkCache::default();
     let rect = |w: f32| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 900.0));
@@ -142,13 +146,13 @@ fn centered_column_survives_resize_in_both_directions() {
             4 => 900.0,  // shrank — slice with stale cache
             _ => 900.0,  // settled narrow
         };
-        let full = ctx.run(
+        let full = ctx.run_frame(
             egui::RawInput {
                 screen_rect: Some(rect(pane)),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show_ctx(ctx, |ui| {
                     CommonMarkViewer::new()
                         .default_width(Some(COLUMN_WIDTH))
                         .table_max_width(Some(COLUMN_WIDTH))
@@ -221,11 +225,11 @@ fn prose_after_display_math_wraps_at_the_column() {
     let doc = format!("{prose}\n\n$$x + y$$\n\n{prose}\n");
 
     let ctx = Context::default();
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style
         .text_styles
         .insert(TextStyle::Body, egui::FontId::proportional(16.0));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
     let mut cache = CommonMarkCache::default();
     let screen = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(PANE_WIDTH, 900.0));
 
@@ -233,13 +237,13 @@ fn prose_after_display_math_wraps_at_the_column() {
     let mut image_rects = Vec::new();
     let mut frames_with_formula = 0;
     for _ in 0..500 {
-        let full = ctx.run(
+        let full = ctx.run_frame(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show_ctx(ctx, |ui| {
                     CommonMarkViewer::new()
                         .default_width(Some(COLUMN_WIDTH))
                         .table_max_width(Some(COLUMN_WIDTH))
