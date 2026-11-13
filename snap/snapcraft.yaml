@@ -1,6 +1,6 @@
 name: md-viewer
 base: core22
-version: '0.3.3'
+version: '0.3.4'
 summary: Fast, lightweight markdown viewer for Linux
 title: md-viewer
 license: MIT
