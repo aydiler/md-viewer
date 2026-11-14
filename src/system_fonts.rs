@@ -1740,6 +1740,49 @@ mod tests {
         assert!(zwj[0].1 && zwj[2].1, "ZWJ neighbours stay color emoji");
     }
 
+    /// #108: a mixed-direction line is laid out in visual order (UAX #9).
+    ///
+    /// This needs the vendored epaint's bidi layout (emilk/egui#8822, see
+    /// `crates/epaint/PATCH.md`); stock epaint 0.37 keeps logical order. Only
+    /// glyph positions matter, so egui's default fonts are enough: a missing
+    /// glyph still gets a position, and the bidi levels come from the chars.
+    #[test]
+    fn mixed_direction_line_is_in_visual_order() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        let text = "English \u{627}\u{644}\u{639}\u{631}\u{628}\u{64A}\u{629} 123 \u{5E2}\u{5D1}\u{5E8}\u{5D9}\u{5EA} end.";
+        let glyphs = ctx.fonts_mut(|f| {
+            let job = egui::text::LayoutJob::simple(
+                text.to_owned(),
+                egui::FontId::proportional(16.0),
+                egui::Color32::WHITE,
+                f32::INFINITY,
+            );
+            f.layout_job(job).rows[0]
+                .glyphs
+                .iter()
+                .map(|g| (g.chr, g.pos.x))
+                .collect::<Vec<_>>()
+        });
+        let x = |c: char| {
+            glyphs
+                .iter()
+                .find(|(chr, _)| *chr == c)
+                .unwrap_or_else(|| panic!("no glyph for {c:?}: {glyphs:?}"))
+                .1
+        };
+        // Logical order: English, Arabic (ا…ة), 123, Hebrew (ע…ת), end.
+        // Visual order, left to right: English, Hebrew, 123, Arabic, end.
+        assert!(x('E') < x('\u{5EA}'), "English starts the line");
+        assert!(x('\u{5EA}') < x('\u{5E2}'), "Hebrew word reads right to left");
+        assert!(x('\u{5E2}') < x('1'), "Hebrew (later in logical order) sits left of 123");
+        assert!(x('1') < x('3'), "digits stay left to right");
+        assert!(x('3') < x('\u{629}'), "Arabic (earlier in logical order) sits right of 123");
+        assert!(x('\u{629}') < x('\u{627}'), "Arabic word reads right to left");
+        assert!(x('\u{627}') < x('d'), "the line ends with English");
+    }
+
     #[test]
     fn preset_mono_lists_lead_with_linux_generic_monospace_resolutions() {
         assert_eq!(

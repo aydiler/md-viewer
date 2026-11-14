@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 | Component | Technology |
 |-----------|------------|
 | Language | Rust |
-| GUI Framework | egui 0.37 + eframe (glow backend), vendored epaint 0.37 with a small font-fallback patch |
+| GUI Framework | egui 0.37 + eframe (glow backend), vendored epaint 0.37 with a font-fallback patch and upstream bidi layout (emilk/egui#8822; see `crates/epaint/PATCH.md`) |
 | Markdown | egui_commonmark 0.22 (vendored with custom typography) |
 | File Watching | notify 6.1 + notify-debouncer-mini |
 | File Dialogs | rfd |

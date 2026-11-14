@@ -73,6 +73,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 | Crate | Purpose |
 |-------|---------|
 | eframe/egui 0.37 | GUI framework (glow backend for Wayland); text shaping via harfrust |
+| epaint 0.37 (vendored) | Text layout; carries the emoji-presentation patch and upstream bidi layout (emilk/egui#8822): mixed-direction lines in visual order. RTL paragraphs are not right-aligned yet (devlog 090) |
 | egui_commonmark 0.22 | Markdown rendering with syntax highlighting |
 | notify 6.1 + notify-debouncer-mini 0.4 | File watching |
 | rfd | Native file dialogs |
