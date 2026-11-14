@@ -1804,3 +1804,11 @@ An empty first list is the assertion worth making. It also explains rises in the
 - **A workaround can be what you are measuring.** The old scroll-while-selecting workaround re-applied every wheel delta, so 0.33 scrolled 2× egui's speed. Removing it, because its API is gone, halved scrolling; `line_scroll_speed = 80` restores it. And `forward_shift_wheel_to_horizontal_scroll` never acted at all: egui converts Shift+wheel to a horizontal delta before app code sees it.
 - **Opt-in eframe features.** `clipboard` and `links` became opt-in. Without them, copy and link opening fail with no error.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/common/mod.rs`, `src/main.rs`, `Cargo.toml`, `docs/devlog/089-egui-0.37.md`
+
+### Bidi in md-viewer: what the vendored epaint fixes and what it cannot
+**Context:** #108, mixed-direction lines. egui has no released bidi support; the epaint part of emilk/egui#8822 (cumulative, contains #8818) is applied to `crates/epaint` (devlog 090).
+- **The renderer's tests do not exercise the vendored epaint.** The `crates/egui_commonmark` workspace has no `[patch]`, so its tests build against crates.io epaint. Run them with `--config 'patch.crates-io.epaint.path="<abs>/crates/epaint"'` (then revert the lockfile it rewrites), or put the test in the app crate, as `mixed_direction_line_is_in_visual_order` is.
+- **Don't judge direction from a screenshot.** One seemed to show RTL paragraphs with an LTR base. The layout data (`row.rtl_paragraph`, glyph x) said the opposite. Probe the galley.
+- **Alignment is a renderer problem, not an epaint one.** The whole document flows through one wrapping left-to-right `Ui`, so a galley always starts at the row's left edge, whatever its rows' internal alignment. Right-aligning RTL paragraphs needs per-paragraph scopes in the renderer.
+- **Stock egui 0.37 works with the patched epaint.** Selection and copy across a mixed line come out right, because the direction-aware `Row` hit-testing is in epaint.
+**Files:** `crates/epaint/PATCH.md`, `src/system_fonts.rs`, `docs/devlog/090-bidi.md`

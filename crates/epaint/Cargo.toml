@@ -343,3 +343,8 @@ check-cfg = ["cfg(web_sys_unstable_apis)"]
 
 [lints.rustdoc]
 all = "warn"
+
+[dependencies.unicode-bidi]
+version = "0.3.18"
+default-features = false
+features = ["hardcoded-data", "std"]
