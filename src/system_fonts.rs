@@ -1446,16 +1446,15 @@ mod tests {
             );
         });
         // Isolate which individual face supplies each glyph: one font per chain.
-        let defaults = FontDefinitions::default();
         let mut with_ours = FontDefinitions::default();
         install_emoji_fonts(&mut with_ours);
         // egui 0.37's defaults no longer bundle NotoEmoji-Regular (only with
         // epaint's `monochrome_emoji_fonts`), so only our bundled copy is
         // checked here.
-        let _ = &defaults;
-        for (label, defs_source) in [("bundled:NotoEmoji", &with_ours)] {
-            let name = label.split(':').nth(1).unwrap();
-            let mut single = defs_source.clone();
+        {
+            let label = "bundled:NotoEmoji";
+            let name = "NotoEmoji";
+            let mut single = with_ours.clone();
             single.font_data.retain(|k, _| k == name);
             *single.families.get_mut(&FontFamily::Proportional).unwrap() = vec![name.to_owned()];
             let ctx2 = egui::Context::default();

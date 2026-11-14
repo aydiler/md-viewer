@@ -32,7 +32,7 @@ eframe = { version = "0.37", default-features = false, features = [
     "clipboard",
     "links",
 ] }
-egui = { version = "0.37" }
+egui = { version = "0.37", features = ["experimental"] }  # StyleProvider: ChromeButtonStyle in main.rs
 # Only for `color_fonts`: COLR/sbix/CBDT/EBDT color glyphs (color emoji).
 epaint = { version = "0.37", features = ["color_fonts"] }
 

@@ -102,6 +102,28 @@ fn content_default_width(full_width_content: bool) -> Option<usize> {
 /// per-click distance md-viewer has always had (see `MarkdownApp::new`).
 const WHEEL_LINE_SCROLL_SPEED: f32 = 80.0;
 
+/// Button theme that sizes button text with `TextStyle::Button`.
+///
+/// egui 0.37's default button theme sets button text from `TextStyle::Body`.
+/// md-viewer sets `Body` to the document size (16 px), so every button,
+/// menu entry, tab and outline row grew from 13 px to 16 px with the
+/// upgrade. This wraps the default theme and only swaps the font back to
+/// `Button`; everything else (frames, colors, states) stays egui's
+/// (devlog 089).
+struct ChromeButtonStyle(egui::theme::DefaultStyle);
+
+impl egui::theme::StyleProvider<egui::widget_style::ButtonStyle> for ChromeButtonStyle {
+    fn style(
+        &mut self,
+        args: &egui::widget_style::StyleArgs<'_>,
+    ) -> egui::widget_style::ButtonStyle {
+        let mut style: egui::widget_style::ButtonStyle =
+            egui::theme::StyleProvider::style(&mut self.0, args);
+        style.atom_layout.text_style.font_id = egui::TextStyle::Button.resolve(args.style);
+        style
+    }
+}
+
 fn content_width_limit(full_width_content: bool, available_width: f32) -> usize {
     let available_width = available_width.max(0.0) as usize;
     content_default_width(full_width_content)
@@ -2455,7 +2477,15 @@ impl MarkdownApp {
 
             // Reduce resize grab radius to prevent overlap with adjacent scrollbars
             style.interaction.resize_grab_radius_side = SIDEBAR_RESIZE_GRAB_RADIUS;
+
+            // egui 0.37 enlarged the default button padding (4,1 -> 8,2) and
+            // widget height (18 -> 20). Keep 0.33's compact chrome
+            // (devlog 089).
+            style.spacing.button_padding = egui::vec2(4.0, 1.0);
+            style.spacing.interact_size.y = 18.0;
         });
+        cc.egui_ctx
+            .replace_widget_theme(ChromeButtonStyle(egui::theme::DefaultStyle));
 
         let dark_mode = persisted
             .dark_mode
