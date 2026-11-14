@@ -1775,11 +1775,23 @@ mod tests {
         // Logical order: English, Arabic (ا…ة), 123, Hebrew (ע…ת), end.
         // Visual order, left to right: English, Hebrew, 123, Arabic, end.
         assert!(x('E') < x('\u{5EA}'), "English starts the line");
-        assert!(x('\u{5EA}') < x('\u{5E2}'), "Hebrew word reads right to left");
-        assert!(x('\u{5E2}') < x('1'), "Hebrew (later in logical order) sits left of 123");
+        assert!(
+            x('\u{5EA}') < x('\u{5E2}'),
+            "Hebrew word reads right to left"
+        );
+        assert!(
+            x('\u{5E2}') < x('1'),
+            "Hebrew (later in logical order) sits left of 123"
+        );
         assert!(x('1') < x('3'), "digits stay left to right");
-        assert!(x('3') < x('\u{629}'), "Arabic (earlier in logical order) sits right of 123");
-        assert!(x('\u{629}') < x('\u{627}'), "Arabic word reads right to left");
+        assert!(
+            x('3') < x('\u{629}'),
+            "Arabic (earlier in logical order) sits right of 123"
+        );
+        assert!(
+            x('\u{629}') < x('\u{627}'),
+            "Arabic word reads right to left"
+        );
         assert!(x('\u{627}') < x('d'), "the line ends with English");
     }
 
