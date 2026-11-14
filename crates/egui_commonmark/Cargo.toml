@@ -29,6 +29,8 @@ document-features = { version = "0.2" }
 
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-segmentation = "1.12"
+# First strong character of a paragraph decides its direction (#108).
+unicode-bidi = { version = "0.3.18", default-features = false, features = ["hardcoded-data", "std"] }
 
 
 [patch.crates-io]
