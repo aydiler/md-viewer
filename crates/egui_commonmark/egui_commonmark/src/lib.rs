@@ -253,7 +253,7 @@ impl<'f> CommonMarkViewer<'f> {
     ///                 }
     ///             });
     ///
-    ///     let uri = format!("{}.svg", egui::Id::from(math.to_string()).value());
+    ///     let uri = format!("{}.svg", egui::IdSalt::new(math).value());
     ///     ui.add(
     ///          egui::Image::new(egui::ImageSource::Bytes {
     ///             uri: uri.into(),
@@ -572,14 +572,14 @@ impl<'f> CommonMarkViewer<'f> {
     #[cfg(feature = "pulldown_cmark")]
     pub fn show_scrollable(
         self,
-        source_id: impl std::hash::Hash,
+        source_id: impl std::hash::Hash + std::fmt::Debug,
         ui: &mut egui::Ui,
         cache: &mut CommonMarkCache,
         text: &str,
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
         prepare_show(cache, ui.ctx());
         parsers::pulldown::CommonMarkViewerInternal::new().show_scrollable(
-            Id::new(source_id),
+            Id::unique(source_id),
             ui,
             cache,
             &self.options,

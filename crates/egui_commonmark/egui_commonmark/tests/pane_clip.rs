@@ -20,6 +20,10 @@
 //! renderer-owned ScrollArea; `.show()` never creates the pane-bounded
 //! geometry and cannot reproduce any of this.
 
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use egui::{Context, Rect};
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 
@@ -107,7 +111,7 @@ fn render_doc_frame(
         events,
         ..Default::default()
     });
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default().show_ctx(ctx, |ui| {
         // Production constrains the document viewport with panels plus
         // margins; emulate it with an explicit scope (the default test
         // surface is huge, so the panel itself is not a pane).
@@ -123,7 +127,7 @@ fn render_doc_frame(
             *pane_right = out.inner_rect.right();
         });
     });
-    ctx.end_pass().shapes
+    ctx.end_frame().shapes
 }
 
 #[test]
@@ -281,7 +285,7 @@ fn table_right_edge_after(widths: &[f32], settle: usize) -> f32 {
         .collect();
     for width in frames {
         ctx.begin_pass(egui::RawInput::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             let pane = Rect::from_min_size(ui.max_rect().min, egui::vec2(width, ui.max_rect().height()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
                 CommonMarkViewer::new()
@@ -291,7 +295,7 @@ fn table_right_edge_after(widths: &[f32], settle: usize) -> f32 {
             });
         });
         let mut painted = Vec::new();
-        for c in ctx.end_pass().shapes {
+        for c in ctx.end_frame().shapes {
             collect(&c.shape, c.clip_rect, &mut painted);
         }
         last = painted;

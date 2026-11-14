@@ -84,7 +84,7 @@ mermaid = ["egui_commonmark_backend_extended/mermaid"]
 math = ["egui_commonmark_backend_extended/math"]
 
 [dev-dependencies]
-eframe = { version = "0.33", default-features = false, features = [
+eframe = { version = "0.37", default-features = false, features = [
     "default_fonts",
     "glow",
     "wayland",
@@ -93,6 +93,10 @@ eframe = { version = "0.33", default-features = false, features = [
 
 image = { version = "0.25", default-features = false, features = ["png"] }
 egui_commonmark_macros_extended = { workspace = true } # Tests won't build otherswise
+# Tests inject scroll offsets: egui 0.37 keeps `scroll_area::State::offset`
+# private, so tests/common round-trips the state through serde instead.
+egui = { workspace = true, features = ["serde"] }
+serde_json = "1"
 
 [package.metadata.docs.rs]
 features = ["better_syntax_highlighting", "document-features", "macros"]

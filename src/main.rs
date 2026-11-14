@@ -98,6 +98,32 @@ fn content_default_width(full_width_content: bool) -> Option<usize> {
     }
 }
 
+/// Points scrolled per mouse-wheel line: 2x egui's native default, the
+/// per-click distance md-viewer has always had (see `MarkdownApp::new`).
+const WHEEL_LINE_SCROLL_SPEED: f32 = 80.0;
+
+/// Button theme that sizes button text with `TextStyle::Button`.
+///
+/// egui 0.37's default button theme sets button text from `TextStyle::Body`.
+/// md-viewer sets `Body` to the document size (16 px), so every button,
+/// menu entry, tab and outline row grew from 13 px to 16 px with the
+/// upgrade. This wraps the default theme and only swaps the font back to
+/// `Button`; everything else (frames, colors, states) stays egui's
+/// (devlog 089).
+struct ChromeButtonStyle(egui::theme::DefaultStyle);
+
+impl egui::theme::StyleProvider<egui::widget_style::ButtonStyle> for ChromeButtonStyle {
+    fn style(
+        &mut self,
+        args: &egui::widget_style::StyleArgs<'_>,
+    ) -> egui::widget_style::ButtonStyle {
+        let mut style: egui::widget_style::ButtonStyle =
+            egui::theme::StyleProvider::style(&mut self.0, args);
+        style.atom_layout.text_style.font_id = egui::TextStyle::Button.resolve(args.style);
+        style
+    }
+}
+
 fn content_width_limit(full_width_content: bool, available_width: f32) -> usize {
     let available_width = available_width.max(0.0) as usize;
     content_default_width(full_width_content)
@@ -129,7 +155,7 @@ fn paint_sidebar_resize_affordance(
     if !hover && !resizing {
         return;
     }
-    let visuals = &ctx.style().visuals;
+    let visuals = &ctx.global_style().visuals;
     let stroke = if resizing {
         visuals.widgets.active.bg_stroke
     } else {
@@ -137,7 +163,7 @@ fn paint_sidebar_resize_affordance(
     };
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new(panel_id).with("resize_affordance"),
+        egui::Id::unique(panel_id).with("resize_affordance"),
     ));
     painter.rect_filled(
         egui::Rect::from_min_max(
@@ -1135,6 +1161,11 @@ struct Tab {
     /// Scroll ratio (0..=1) captured when entering edit mode, applied to the
     /// editor's ScrollArea on its first frame.
     pending_edit_scroll: Option<f32>,
+    /// The editor offset computed from `pending_edit_scroll` once the editor's
+    /// content height is known, applied through the ScrollArea's offset
+    /// builder on the following frame (egui 0.37 keeps `State::offset`
+    /// private; the old direct `State` store also took effect one frame later).
+    pending_edit_offset: Option<f32>,
     /// View-mode content height captured when entering edit mode; converts
     /// the edit scroll ratio back to an absolute offset when leaving edit.
     pre_edit_view_content_height: f32,
@@ -1163,7 +1194,7 @@ impl Tab {
 
         let saved_content = content.clone();
         Ok(Self {
-            id: egui::Id::new(&path),
+            id: egui::Id::unique(&path),
             path,
             content,
             cache,
@@ -1187,6 +1218,7 @@ impl Tab {
             saved_content,
             save_flash: None,
             pending_edit_scroll: None,
+            pending_edit_offset: None,
             pre_edit_view_content_height: 0.0,
         })
     }
@@ -1262,7 +1294,7 @@ impl Tab {
         self.content = content;
         self.saved_content = self.content.clone();
         self.path = path;
-        self.id = egui::Id::new(&self.path);
+        self.id = egui::Id::unique(&self.path);
         self.cache = CommonMarkCache::default();
         self.content_version = self.content_version.wrapping_add(1);
         if reset_scroll {
@@ -2115,10 +2147,8 @@ fn run_native_once(args: &Args) -> eframe::Result<()> {
             // StartupWMClass in the distributed .desktop file.
             .with_app_id("md-viewer")
             .with_drag_and_drop(true),
-        vsync: !wayland_session(
-            std::env::var_os("WAYLAND_DISPLAY").as_deref(),
-            std::env::var_os("WAYLAND_SOCKET").as_deref(),
-        ),
+        // No vsync override: eframe 0.37 itself never blocks the swap on
+        // Wayland (egui#5136), which is what devlog 073 fixed here for 0.33.
         ..Default::default()
     };
 
@@ -2168,17 +2198,6 @@ fn fall_back_to_x11_if_wayland_socket_is_dead() {
 
 #[cfg(not(unix))]
 fn fall_back_to_x11_if_wayland_socket_is_dead() {}
-
-/// Driver vsync blocks the swap until the compositor's frame callback, which
-/// never arrives for a window on a hidden workspace, so the UI thread stops
-/// answering pings. On Wayland the compositor prevents tearing and winit
-/// already paces redraws on frame callbacks without blocking.
-fn wayland_session(display: Option<&OsStr>, socket: Option<&OsStr>) -> bool {
-    cfg!(all(unix, not(target_os = "macos")))
-        && [display, socket]
-            .into_iter()
-            .any(|value| value.is_some_and(|v| !v.is_empty()))
-}
 
 /// Resolve the filesystem path of the Wayland socket from `WAYLAND_DISPLAY`
 /// and `XDG_RUNTIME_DIR`, mirroring libwayland's lookup rules: an absolute
@@ -2312,6 +2331,11 @@ struct MarkdownApp {
     watch_enabled: bool,
     error_message: Option<String>,
     is_dragging: bool,
+    /// The document area (the `CentralPanel` rect) as of this frame. The
+    /// lightbox backdrop and the drop overlay cover exactly this area; egui
+    /// 0.33's `Context::available_rect()` returned it after the panels were
+    /// laid out, and egui 0.37 removed that method.
+    document_rect: egui::Rect,
     // File watcher state (inotify for local, poll for GVFS/remote)
     watcher: Option<FileWatcher>,
     watcher_rx: Option<Receiver<Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>>>,
@@ -2405,9 +2429,16 @@ impl MarkdownApp {
         // Disable egui's built-in Ctrl+/- zoom — we handle zoom ourselves
         cc.egui_ctx
             .options_mut(|opt| opt.zoom_with_keyboard = false);
+        // One mouse-wheel click scrolls twice egui's default (40 pt per line).
+        // Up to 0.3.5 that speed came, by accident, from a scroll-during-
+        // selection workaround that re-applied every wheel delta on top of
+        // egui's own scrolling; egui 0.37 removed the API it used. Keeping the
+        // speed users know (devlog 089). Trackpad pixel deltas stay 1x.
+        cc.egui_ctx
+            .options_mut(|opt| opt.input_options.line_scroll_speed = WHEEL_LINE_SCROLL_SPEED);
 
         // Set constant styles once at init (never changes at runtime)
-        cc.egui_ctx.style_mut(|style| {
+        cc.egui_ctx.global_style_mut(|style| {
             // Constant floating-scrollbar geometry (#139).
             //
             // egui's floating bar animates its width between `floating_width`
@@ -2446,11 +2477,19 @@ impl MarkdownApp {
 
             // Reduce resize grab radius to prevent overlap with adjacent scrollbars
             style.interaction.resize_grab_radius_side = SIDEBAR_RESIZE_GRAB_RADIUS;
+
+            // egui 0.37 enlarged the default button padding (4,1 -> 8,2) and
+            // widget height (18 -> 20). Keep 0.33's compact chrome
+            // (devlog 089).
+            style.spacing.button_padding = egui::vec2(4.0, 1.0);
+            style.spacing.interact_size.y = 18.0;
         });
+        cc.egui_ctx
+            .replace_widget_theme(ChromeButtonStyle(egui::theme::DefaultStyle));
 
         let dark_mode = persisted
             .dark_mode
-            .unwrap_or_else(|| cc.egui_ctx.style().visuals.dark_mode);
+            .unwrap_or_else(|| cc.egui_ctx.global_style().visuals.dark_mode);
         let zoom_level = persisted.zoom_level.unwrap_or(1.0).clamp(0.5, 3.0);
         let show_outline = persisted.show_outline.unwrap_or(true);
         let show_tab_bar = persisted.show_tab_bar.unwrap_or(true);
@@ -2583,6 +2622,7 @@ impl MarkdownApp {
             watch_enabled: watch,
             error_message: startup_error,
             is_dragging: false,
+            document_rect: egui::Rect::NOTHING,
             watcher: None,
             watcher_rx: None,
             watcher_retry_count: 0,
@@ -3241,13 +3281,13 @@ impl MarkdownApp {
     }
 
     /// Outcome of rendering the find bar (consumed after panel renders, before global input handler runs)
-    fn render_search_bar(&mut self, ctx: &egui::Context) -> SearchBarOutcome {
+    fn render_search_bar(&mut self, ui: &mut egui::Ui) -> SearchBarOutcome {
         let mut outcome = SearchBarOutcome::default();
         if !self.search.is_open {
             return outcome;
         }
 
-        let input_id = egui::Id::new("search_input");
+        let input_id = egui::Id::unique("search_input");
         let total_matches = self
             .tabs
             .get(self.active_tab)
@@ -3255,7 +3295,7 @@ impl MarkdownApp {
             .unwrap_or(0);
         let active_idx = self.search.active_match_index;
 
-        egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
+        egui::Panel::top("search_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let text_edit = egui::TextEdit::singleline(&mut self.search.query)
                     .id(input_id)
@@ -3662,7 +3702,10 @@ impl MarkdownApp {
 
     /// Render the outline sidebar (right panel)
     /// Rendered at top level for proper layout space allocation
-    fn render_outline(&mut self, ctx: &egui::Context) {
+    fn render_outline(&mut self, ui: &mut egui::Ui) {
+        // egui 0.37: panels are shown in the root `Ui`, not on the `Context`.
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
@@ -3680,19 +3723,19 @@ impl MarkdownApp {
 
         let is_dragging = ctx.input(|i| i.pointer.any_down());
 
-        let panel = egui::SidePanel::right("outline")
+        let panel = egui::Panel::right("outline")
             .resizable(true)
-            .default_width(self.outline_width)
-            .width_range(SIDEBAR_MIN_WIDTH..=f32::INFINITY)
+            .default_size(self.outline_width)
+            .size_range(SIDEBAR_MIN_WIDTH..=f32::INFINITY)
             .frame(
-                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                egui::Frame::side_top_panel(&ctx.global_style()).inner_margin(egui::Margin {
                     left: 8,
                     right: 0,
                     top: 8,
                     bottom: 0,
                 }),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // Expand/Collapse All buttons (only if there are nested headers)
                 let has_nested = any_header_has_children(&tab.outline_headers);
                 if has_nested {
@@ -3849,7 +3892,8 @@ impl MarkdownApp {
             ctx,
             panel.response.rect.left(),
             panel.response.rect.y_range(),
-            egui::Id::new("outline"),
+            // Panel::id in egui 0.37: parent scope id combined with the salt.
+            ui.scope_id().with_salt(egui::IdSalt::new("outline")),
         );
 
         // Register all collected widgets with MCP bridge
@@ -4069,8 +4113,6 @@ impl MarkdownApp {
                 ..Default::default()
             })
             .show(ui, |ui| {
-                // Capture scroll input for manual handling during selection
-                let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
                 // The renderer owns the ScrollArea now (via show_scrollable),
@@ -4089,8 +4131,12 @@ impl MarkdownApp {
                     // The TextEdit's own ScrollArea handles the wheel natively;
                     // scroll_output stays None so the view-mode hacks below skip.
                     let pending_edit = tab.pending_edit_scroll.take();
-                    let edit_out = egui::ScrollArea::vertical()
-                        .id_salt(tab.id.with("edit-scroll"))
+                    let mut edit_area =
+                        egui::ScrollArea::vertical().id_salt(tab.id.with("edit-scroll"));
+                    if let Some(offset) = tab.pending_edit_offset.take() {
+                        edit_area = edit_area.vertical_scroll_offset(offset);
+                    }
+                    let edit_out = edit_area
                         .auto_shrink(false)
                         .max_width(content_rect.width())
                         .show(ui, |ui| {
@@ -4099,21 +4145,19 @@ impl MarkdownApp {
                                     .inner_margin(egui::Margin::symmetric(4_i8, 2_i8));
                                 frame.show(ui, |ui| {
                                     egui::TextEdit::multiline(&mut tab.content)
-                                        .id_salt(ui.id().with("edit"))
+                                        .id_salt(ui.scope_id().with("edit"))
                                         .desired_width(content_rect.width() - 8.0)
                                         .desired_rows(24)
-                                        .frame(false)
+                                        .frame(egui::Frame::NONE)
                                         .ui(ui);
                                 });
                             });
                         });
-                    tab.scroll_offset = edit_out.state.offset.y;
+                    tab.scroll_offset = edit_out.state.unclamped_offset().y;
                     tab.last_viewport_height = edit_out.inner_rect.height();
                     tab.last_content_height = edit_out.content_size.y;
                     if let Some(ratio) = pending_edit {
-                        let mut state = edit_out.state;
-                        state.offset.y = ratio * edit_out.content_size.y.max(1.0);
-                        state.store(ui.ctx(), edit_out.id);
+                        tab.pending_edit_offset = Some(ratio * edit_out.content_size.y.max(1.0));
                         ui.ctx().request_repaint();
                     }
                 } else {
@@ -4157,14 +4201,14 @@ impl MarkdownApp {
                             .force_full_render(force_full_render)
                             .scroll_source(egui::scroll_area::ScrollSource {
                                 scroll_bar: true,
-                                drag: false,
+                                drag: egui::scroll_area::DragScroll::Never,
                                 mouse_wheel: true,
                             })
                             .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content),
                     );
 
                     if let Some(so) = scroll_output.as_ref() {
-                        tab.scroll_offset = so.state.offset.y;
+                        tab.scroll_offset = so.state.unclamped_offset().y;
                         tab.last_viewport_height = so.inner_rect.height();
                         tab.last_content_height = so.content_size.y;
                     }
@@ -4184,7 +4228,7 @@ impl MarkdownApp {
                     if let Some(actual_y) = tab.cache.active_search_y() {
                         // View-mode only: scroll_output is None while editing.
                         if let Some(so) = scroll_output.as_ref() {
-                            let current_scroll = so.state.offset.y;
+                            let current_scroll = so.state.unclamped_offset().y;
                             let viewport_top = current_scroll;
                             let viewport_bottom = current_scroll + tab.last_viewport_height;
                             // Consider "not visible" if outside the viewport with a small margin
@@ -4215,38 +4259,11 @@ impl MarkdownApp {
                     if let Some(actual_y) = tab.cache.get_header_position(&key) {
                         // View-mode only: scroll_output is None while editing.
                         if let Some(so) = scroll_output.as_ref() {
-                            let current_scroll = so.state.offset.y;
+                            let current_scroll = so.state.unclamped_offset().y;
                             let want_scroll = (actual_y - 50.0).max(0.0);
                             if (want_scroll - current_scroll).abs() > 2.0 {
                                 tab.pending_scroll_offset = Some(want_scroll);
                             }
-                        }
-                    }
-                }
-
-                // Manual scroll handling for mouse wheel during text selection.
-                // View-mode only: in edit mode the TextEdit's own ScrollArea
-                // handles the wheel natively and scroll_output is None.
-                let pointer_over_content = ui.ctx().input(|i| {
-                    i.pointer
-                        .hover_pos()
-                        .is_some_and(|pos| content_rect.contains(pos))
-                });
-                if raw_scroll.abs() > 0.0 && pointer_over_content {
-                    if let Some(so) = scroll_output.as_mut() {
-                        let current_offset = so.state.offset.y;
-                        let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
-                        let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
-
-                        // Don't store at boundaries (can break selection)
-                        let would_hit_top = new_offset < 0.5;
-                        let would_hit_bottom = new_offset > max_scroll - 0.5;
-                        let offset_changed = (new_offset - current_offset).abs() > 0.5;
-
-                        if offset_changed && !would_hit_top && !would_hit_bottom {
-                            so.state.offset.y = new_offset;
-                            so.state.store(ui.ctx(), so.id);
-                            ui.ctx().request_repaint();
                         }
                     }
                 }
@@ -4272,26 +4289,29 @@ impl MarkdownApp {
 
     /// Render the file explorer sidebar
     /// Returns actions for files to open or close
-    fn render_file_explorer(&mut self, ctx: &egui::Context) -> ExplorerAction {
+    fn render_file_explorer(&mut self, ui: &mut egui::Ui) -> ExplorerAction {
+        // egui 0.37: panels are shown in the root `Ui`, not on the `Context`.
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
         let mut action = ExplorerAction::default();
 
         if !self.show_explorer {
             return action;
         }
 
-        let panel = egui::SidePanel::left("file_explorer")
+        let panel = egui::Panel::left("file_explorer")
             .resizable(true)
-            .default_width(self.explorer_width)
-            .width_range(SIDEBAR_MIN_WIDTH..=f32::INFINITY)
+            .default_size(self.explorer_width)
+            .size_range(SIDEBAR_MIN_WIDTH..=f32::INFINITY)
             .frame(
-                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                egui::Frame::side_top_panel(&ctx.global_style()).inner_margin(egui::Margin {
                     left: 8,
                     right: EXPLORER_RIGHT_RESIZE_GUTTER,
                     top: 8,
                     bottom: 8,
                 }),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // Header with folder name - OUTSIDE ScrollArea
                 if let Some(root) = &self.file_explorer.root {
                     let folder_name = root
@@ -4423,7 +4443,7 @@ impl MarkdownApp {
             ctx,
             panel.response.rect.right(),
             panel.response.rect.y_range(),
-            egui::Id::new("file_explorer"),
+            ui.scope_id().with_salt(egui::IdSalt::new("file_explorer")),
         );
 
         action
@@ -4899,13 +4919,13 @@ impl MarkdownApp {
             return;
         };
 
-        let screen_rect = ctx.available_rect();
+        let screen_rect = self.document_rect;
         let mut should_close = false;
 
         // 1. Semi-transparent backdrop (visual only, drawn below Tooltip layers)
         ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("lightbox_backdrop"),
+            egui::Id::unique("lightbox_backdrop"),
         ))
         .rect_filled(
             screen_rect,
@@ -4916,7 +4936,7 @@ impl MarkdownApp {
         // 2. Full-screen input sink at Tooltip order — blocks all input to lower layers.
         //    Clicking on the sink (outside image/close) closes the lightbox.
         let oid = lightbox.open_id;
-        egui::Area::new(egui::Id::new("lightbox_sink").with(oid))
+        egui::Area::new(egui::Id::unique("lightbox_sink").with(oid))
             .order(egui::Order::Tooltip)
             .movable(false)
             .fixed_pos(screen_rect.min)
@@ -4998,7 +5018,7 @@ impl MarkdownApp {
             lightbox.scroll_offset = offset;
         }
 
-        egui::Area::new(egui::Id::new("lightbox_image").with(oid))
+        egui::Area::new(egui::Id::unique("lightbox_image").with(oid))
             .order(egui::Order::Tooltip)
             .movable(false)
             .fixed_pos(area_pos)
@@ -5011,12 +5031,13 @@ impl MarkdownApp {
                     display_size.x > area_size.x,
                     display_size.y > area_size.y,
                 ])
-                .id_salt(egui::Id::new("lightbox_scroll").with(oid))
+                .id_salt(egui::Id::unique("lightbox_scroll").with(oid))
                 .max_width(area_size.x)
                 .max_height(area_size.y)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .scroll_source(egui::scroll_area::ScrollSource {
-                    drag: true,
+                    // Mouse drag pans the zoomed image (not only on touch).
+                    drag: egui::scroll_area::DragScroll::Always,
                     ..Default::default()
                 });
 
@@ -5061,12 +5082,12 @@ impl MarkdownApp {
 
                 // Sync tracking: captures drag-to-scroll changes on non-zoom frames
                 if pre_offset.is_none() {
-                    lightbox.scroll_offset = scroll_output.state.offset;
+                    lightbox.scroll_offset = scroll_output.state.unclamped_offset();
                 }
             });
 
         // 5. Close button (top-right)
-        egui::Area::new(egui::Id::new("lightbox_close").with(oid))
+        egui::Area::new(egui::Id::unique("lightbox_close").with(oid))
             .order(egui::Order::Tooltip)
             .movable(false)
             .fixed_pos(egui::pos2(
@@ -5095,7 +5116,7 @@ impl MarkdownApp {
         if zoom_pct != 100 {
             ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Tooltip,
-                egui::Id::new("lightbox_zoom_indicator").with(oid),
+                egui::Id::unique("lightbox_zoom_indicator").with(oid),
             ))
             .text(
                 egui::pos2(screen_rect.center().x, screen_rect.bottom() - 24.0),
@@ -5185,7 +5206,11 @@ impl eframe::App for MarkdownApp {
         eframe::set_value(storage, APP_KEY, &state);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // eframe 0.37 hands the app the root `Ui`; the ctx-level work below is
+        // unchanged and panels are shown in `ui`.
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
         // Enable AccessKit for MCP bridge
         #[cfg(feature = "mcp")]
         {
@@ -5637,14 +5662,15 @@ impl eframe::App for MarkdownApp {
             }
 
             for file in &i.raw.dropped_files {
-                if let Some(path) = &file.path {
-                    if Self::is_markdown_file(path) {
-                        self.open_in_new_tab(path.clone());
-                    } else {
-                        self.error_message = Some(
-                            "Unsupported file type. Please drop a markdown file (.md, .markdown, .txt)".to_string(),
-                        );
-                    }
+                // egui 0.37: every dropped file has a path (absolute on native).
+                let path = file.path();
+                if Self::is_markdown_file(path) {
+                    self.open_in_new_tab(path.to_path_buf());
+                } else {
+                    self.error_message = Some(
+                        "Unsupported file type. Please drop a markdown file (.md, .markdown, .txt)"
+                            .to_string(),
+                    );
                 }
             }
         });
@@ -5653,7 +5679,7 @@ impl eframe::App for MarkdownApp {
         let ctrl_held = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
 
         // Menu bar
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui
@@ -6080,7 +6106,7 @@ impl eframe::App for MarkdownApp {
         // Show error message if any
         let mut clear_error = false;
         if let Some(error) = &self.error_message {
-            egui::TopBottomPanel::top("error_bar").show(ctx, |ui| {
+            egui::Panel::top("error_bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("⚠").color(egui::Color32::from_rgb(255, 200, 100)),
@@ -6099,7 +6125,7 @@ impl eframe::App for MarkdownApp {
         }
 
         // Find bar (conditional, between error bar and tab bar)
-        let search_outcome = self.render_search_bar(ctx);
+        let search_outcome = self.render_search_bar(ui);
         // Rebuild matches if query or tab changed (TextEdit may have mutated the query)
         self.maybe_rebuild_search();
         if search_outcome.close_requested {
@@ -6120,7 +6146,7 @@ impl eframe::App for MarkdownApp {
                 .get(self.active_tab)
                 .is_some_and(|tab| tab.is_editing),
         ) {
-            egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            egui::Panel::top("tab_bar").show(ui, |ui| {
                 tab_to_close = self.render_tab_bar(ui);
             });
         }
@@ -6131,7 +6157,7 @@ impl eframe::App for MarkdownApp {
         }
 
         // File explorer (left sidebar)
-        let explorer_action = self.render_file_explorer(ctx);
+        let explorer_action = self.render_file_explorer(ui);
 
         // Explorer matches document links: primary click replaces the active
         // document, while Ctrl/Cmd+click opens (or focuses) a separate tab.
@@ -6151,16 +6177,17 @@ impl eframe::App for MarkdownApp {
         }
 
         // Outline sidebar (right) - at top level for proper layout
-        self.render_outline(ctx);
+        self.render_outline(ui);
 
         // Main content area
         let mut open_in_new_tab: Option<(PathBuf, Option<String>)> = None;
         let path_before_render = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
-        egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO))
-            .show(ctx, |ui| {
+        let central = egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&ctx.global_style()).inner_margin(egui::Margin::ZERO))
+            .show(ui, |ui| {
                 open_in_new_tab = self.render_tab_content(ui, ctrl_held);
             });
+        self.document_rect = central.response.rect;
 
         // A primary-clicked document link navigates inside Tab while it is
         // rendered. Synchronize the app-level state that depends on tab paths.
@@ -6216,10 +6243,10 @@ impl eframe::App for MarkdownApp {
 
         // Drag and drop overlay
         if self.is_dragging {
-            let screen_rect = ctx.available_rect();
+            let screen_rect = self.document_rect;
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
-                egui::Id::new("drop_overlay"),
+                egui::Id::unique("drop_overlay"),
             ));
 
             painter.rect_filled(
@@ -6300,22 +6327,6 @@ impl eframe::App for MarkdownApp {
 mod tests {
     use super::*;
 
-    #[test]
-    fn vsync_is_disabled_only_for_wayland_sessions() {
-        let wl = Some(OsStr::new("wayland-1"));
-        let empty = Some(OsStr::new(""));
-        assert_eq!(
-            wayland_session(wl, None),
-            cfg!(all(unix, not(target_os = "macos")))
-        );
-        assert_eq!(
-            wayland_session(None, Some(OsStr::new("5"))),
-            cfg!(all(unix, not(target_os = "macos")))
-        );
-        assert!(!wayland_session(None, None));
-        assert!(!wayland_session(empty, empty));
-    }
-
     /// In-memory stand-in for eframe's key/value storage so persistence
     /// roundtrips run through the same RON encode/decode path as the app.
     struct MemoryStorage(HashMap<String, String>);
@@ -6326,6 +6337,9 @@ mod tests {
         }
         fn set_string(&mut self, key: &str, value: String) {
             self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
         }
         fn flush(&mut self) {}
     }

@@ -620,12 +620,18 @@ pub(crate) fn body_line_height(ui: &Ui, options: &CommonMarkOptions) -> f32 {
     let natural = ui
         .text_style_height(&egui::TextStyle::Body)
         .max(font.size);
-    options
+    let line_height = options
         .typography
         .resolve_line_height(font.size)
         // A configured line box can be smaller than the glyphs, but a fixed
         // table row must still reserve their natural painted height.
-        .map_or(natural, |configured| configured.max(natural))
+        .map_or(natural, |configured| configured.max(natural));
+    // epaint 0.37 snaps every laid-out row height to the pixel grid
+    // (`round_to_pixel(max_row_height)` in `text_layout`), so a 19.5 pt line
+    // box paints 20 pt rows at 1x. Reserve what paint will use, or a cell of
+    // n rows comes up n/2 px short and its last line is clipped.
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    (line_height * pixels_per_point).round() / pixels_per_point
 }
 
 /// Blend max-min fairness with proportional content demand while fitting the
@@ -1172,50 +1178,6 @@ fn store_table_column_widths(ui: &Ui, table_id: Id, widths: &[f32]) {
     ui.data_mut(|data| {
         data.insert_temp(table_id.with("_column_widths"), widths.to_vec());
     });
-}
-
-/// Redirect Shift+vertical-wheel over a hovered wide-table into its inner
-/// horizontal scroll offset. Plain vertical wheel is left untouched so the
-/// outer document scroller keeps scrolling the page (this is the behavior
-/// users expect; the unconditional redirect from #4 caused #22).
-///
-/// The Shift modifier acts as an explicit opt-in for sideways table scrolling
-/// without dragging the bottom scrollbar. Native horizontal trackpad input is
-/// already consumed by `ScrollArea::horizontal()` inside its `.show()` call,
-/// so this helper only ever touches the Y delta.
-///
-/// Edge pass-through: when the table is at either side and the wheel direction
-/// would push past the edge, the delta is left for the outer scroller.
-fn forward_shift_wheel_to_horizontal_scroll<R>(
-    ui: &Ui,
-    out: &mut egui::containers::scroll_area::ScrollAreaOutput<R>,
-) {
-    if !ui.rect_contains_pointer(out.inner_rect) {
-        return;
-    }
-    if !ui.ctx().input(|i| i.modifiers.shift) {
-        return;
-    }
-    let dy = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-    if dy.abs() < 0.1 {
-        return;
-    }
-    let max_x = (out.content_size.x - out.inner_rect.width()).max(0.0);
-    if max_x <= 0.0 {
-        return;
-    }
-    let at_left = out.state.offset.x <= 0.0 && dy > 0.0;
-    let at_right = out.state.offset.x >= max_x && dy < 0.0;
-    if at_left || at_right {
-        return;
-    }
-    let new_x = (out.state.offset.x - dy).clamp(0.0, max_x);
-    if (new_x - out.state.offset.x).abs() > f32::EPSILON {
-        out.state.offset.x = new_x;
-        out.state.store(ui.ctx(), out.id);
-        ui.ctx().input_mut(|i| i.smooth_scroll_delta.y = 0.0);
-        ui.ctx().request_repaint();
-    }
 }
 
 /// Diagnostic instrument for issue #140 (intermittent one-frame blank pane).
@@ -2167,17 +2129,24 @@ impl CommonMarkViewerInternal {
         // shows the document tail. For a deep overshoot, snapping to the
         // deepest position is the behaviour the shrink asks for — the reader
         // was at a tail that no longer exists.
-        // `ScrollArea::id_salt` wraps its argument in `Id::new`, so the state
-        // id is `ui.id` combined with the *re-hashed* salt — mirror that
-        // exactly or `State::load` finds nothing.
-        let scroll_state_id = ui.make_persistent_id(Id::new(scroll_id));
+        // `ScrollArea::id_salt` wraps its argument in `IdSalt::new` and the
+        // state id is `ui.make_persistent_id(that)` — mirror that exactly or
+        // `State::load` finds nothing and this clamp silently never fires.
+        //
+        // egui 0.37 keeps `State::offset` private, so the clamp goes through
+        // the ScrollArea's `vertical_scroll_offset` builder, which `begin`
+        // applies before the viewport is computed — the same point the old
+        // direct `State` write took effect. An explicit pending offset (outline
+        // click, search jump) wins; a clamp carried over from last frame's
+        // overshoot check comes next.
+        let scroll_state_id = ui.make_persistent_id(egui::IdSalt::new(scroll_id));
         let deepest_scroll = (page_size.y - ui.available_height()).max(0.0);
-        if let Some(mut state) = egui::scroll_area::State::load(ui.ctx(), scroll_state_id) {
-            if state.offset.y > page_size.y {
-                state.offset.y = deepest_scroll;
-                state.store(ui.ctx(), scroll_state_id);
-            }
-        }
+        let stored_overshoot = egui::scroll_area::State::load(ui.ctx(), scroll_state_id)
+            .is_some_and(|state| state.unclamped_offset().y > page_size.y);
+        let carried_clamp = scroll_cache(cache, &source_id).pending_clamp.take();
+        let pending_scroll_offset = pending_scroll_offset
+            .or(carried_clamp)
+            .or(stored_overshoot.then_some(deepest_scroll));
         let pending_scroll_offset = pending_scroll_offset.map(|offset| {
             if offset > page_size.y {
                 deepest_scroll
@@ -2379,14 +2348,12 @@ impl CommonMarkViewerInternal {
         // `page_size`, and clamping against the stale value snaps the offset
         // back every frame — the reader cannot reach the document bottom.
         let real_max_scroll = (out.content_size.y - out.inner_rect.height()).max(0.0);
-        let clamped = out.state.offset.y > real_max_scroll;
-        if clamped {
-            let mut state = out.state;
-            state.offset.y = real_max_scroll;
-            state.store(ui.ctx(), out.id);
+        // Applied next frame through the offset builder (see above); the old
+        // direct `State` store also only took effect on the next frame.
+        if out.state.unclamped_offset().y > real_max_scroll {
+            scroll_cache(cache, &source_id).pending_clamp = Some(real_max_scroll);
             ui.ctx().request_repaint();
         }
-        let _ = clamped;
         out
         // No trailing invalidation needed — layout_signature is checked at
         // the top of show_scrollable, so a width/zoom/theme change in the
@@ -2610,7 +2577,7 @@ impl CommonMarkViewerInternal {
             self.line.try_insert_start(ui);
 
             let id = markdown_table_id(
-                self.source_id.unwrap_or_else(|| ui.id()),
+                self.source_id.unwrap_or_else(|| ui.scope_id()),
                 source_start.unwrap_or(self.curr_table),
             );
             self.curr_table += 1;
@@ -2642,7 +2609,8 @@ impl CommonMarkViewerInternal {
             // (auto-sized to content) total wider than the parent ui; without it,
             // narrow windows clip the rightmost columns. Plain vertical wheel
             // remains with the outer document scroller (#22); Shift+wheel opts in
-            // to horizontal table scrolling via `forward_shift_wheel_to_horizontal_scroll`.
+            // to horizontal table scrolling: egui turns it into a horizontal
+            // delta (`horizontal_scroll_modifier`), which this ScrollArea consumes.
             // ui.vertical(...) is essential: TableBuilder's body() positions itself
             // relative to the parent's cursor, but the parent here is a horizontal-
             // flow Ui from the markdown renderer. Without the vertical scope the
@@ -2801,7 +2769,7 @@ impl CommonMarkViewerInternal {
             table_scope_rect.max.y = table_scope_rect.min.y + reserved_height;
             let _ = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(table_scope_rect), |ui| {
-                    let mut scroll_out = egui::ScrollArea::horizontal()
+                    let scroll_out = egui::ScrollArea::horizontal()
                         .id_salt(id.with("_scroll"))
                         .max_width(table_bound)
                         .auto_shrink([false, true])
@@ -2921,7 +2889,6 @@ impl CommonMarkViewerInternal {
                                 });
                             });
                         });
-                    forward_shift_wheel_to_horizontal_scroll(ui, &mut scroll_out);
                     scroll_out
                 })
                 .inner;
@@ -3671,7 +3638,7 @@ impl CommonMarkViewerInternal {
         max_width: f32,
     ) {
         if let Some(block) = self.code_block.take() {
-            let id = ui.id().with("_code_block").with(self.curr_code_block);
+            let id = ui.scope_id().with("_code_block").with(self.curr_code_block);
             self.curr_code_block += 1;
             block.end(ui, cache, options, max_width, id);
             self.line.try_insert_end(ui);
@@ -3685,7 +3652,7 @@ impl CommonMarkViewerInternal {
         options: &CommonMarkOptions,
         max_width: f32,
     ) {
-        let id = ui.id().with("_html_table").with(self.curr_table);
+        let id = ui.scope_id().with("_html_table").with(self.curr_table);
         self.curr_table += 1;
 
         let num_cols = table
@@ -3706,7 +3673,8 @@ impl CommonMarkViewerInternal {
         // Outer ScrollArea::horizontal handles wide tables that exceed parent width;
         // ui.vertical() prevents the header/body Y-overlap quirk. Plain vertical wheel
         // stays with the outer document scroller (#22); Shift+wheel opts in to
-        // horizontal table scrolling via `forward_shift_wheel_to_horizontal_scroll`.
+        // horizontal table scrolling: egui turns it into a horizontal delta
+        // (`horizontal_scroll_modifier`), which this ScrollArea consumes.
         // Bound at `table_max_width` over the prose cap (#64), same as markdown tables.
         let table_bound = options
             .table_max_width
@@ -3811,7 +3779,7 @@ impl CommonMarkViewerInternal {
         table_scope_rect.max.y = ui.max_rect().bottom();
         let _ = ui
             .scope_builder(egui::UiBuilder::new().max_rect(table_scope_rect), |ui| {
-                let mut scroll_out = egui::ScrollArea::horizontal()
+                let scroll_out = egui::ScrollArea::horizontal()
                     .id_salt(id.with("_scroll"))
                     .max_width(table_bound)
                     .auto_shrink([false, true])
@@ -3901,7 +3869,6 @@ impl CommonMarkViewerInternal {
                     });
                 });
             });
-                forward_shift_wheel_to_horizontal_scroll(ui, &mut scroll_out);
                 scroll_out
             })
             .inner;
@@ -3911,6 +3878,34 @@ impl CommonMarkViewerInternal {
 
 #[cfg(test)]
 mod tests {
+    /// egui 0.37 test shims: `end_pass` output must have its texture deltas
+    /// cleared before drop, and `CentralPanel::show` takes a `Ui`.
+    trait FrameExt {
+        fn end_frame(&self) -> egui::FullOutput;
+    }
+    impl FrameExt for egui::Context {
+        fn end_frame(&self) -> egui::FullOutput {
+            let mut out = self.end_pass();
+            out.textures_delta.clear();
+            out
+        }
+    }
+    trait PanelExt {
+        fn show_ctx<R>(
+            self,
+            ctx: &egui::Context,
+            add: impl FnOnce(&mut egui::Ui) -> R,
+        ) -> egui::InnerResponse<R>;
+    }
+    impl PanelExt for egui::CentralPanel {
+        fn show_ctx<R>(
+            self,
+            ctx: &egui::Context,
+            add: impl FnOnce(&mut egui::Ui) -> R,
+        ) -> egui::InnerResponse<R> {
+            ctx.root_ui(|root| self.show(root, add))
+        }
+    }
     #[test]
     fn frontmatter_splits_top_level_key_value_pairs() {
         let pairs = parse_frontmatter_pairs(
@@ -4029,7 +4024,7 @@ mod tests {
     fn table_cells_measure_inline_code_with_the_monospace_font() {
         let ctx = egui::Context::default();
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             let mut style = ui.style().as_ref().clone();
             style
                 .text_styles
@@ -4073,7 +4068,7 @@ mod tests {
                 "two visual lines should not reserve a third: {height}"
             );
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
     }
 
     #[test]
@@ -4086,19 +4081,29 @@ mod tests {
                 .text_style_height(&egui::TextStyle::Body)
                 .max(font.size);
             let mut options = CommonMarkOptions::default();
+            // epaint 0.37 snaps row heights to the pixel grid; the reserved
+            // table row height must match what paint uses.
+            let ppp = ui.ctx().pixels_per_point();
+            let snap = |height: f32| (height * ppp).round() / ppp;
 
-            assert!((body_line_height(ui, &options) - natural).abs() < 0.01);
+            assert!((body_line_height(ui, &options) - snap(natural)).abs() < 0.01);
 
             options.typography.line_height = Some(Measurement::Multiplier(1.5));
-            assert!((body_line_height(ui, &options) - font.size * 1.5).abs() < 0.01);
+            assert!((body_line_height(ui, &options) - snap(font.size * 1.5)).abs() < 0.01);
 
             options.typography.line_height = Some(Measurement::Pixels(27.0));
             assert!((body_line_height(ui, &options) - 27.0).abs() < 0.01);
 
+            options.typography.line_height = Some(Measurement::Pixels(19.5));
+            assert!(
+                (body_line_height(ui, &options) - snap(19.5)).abs() < 0.01,
+                "a fractional line box reserves the pixel-snapped height"
+            );
+
             options.typography.line_height = Some(Measurement::Pixels(1.0));
             let clamped = body_line_height(ui, &options);
             assert!(
-                (clamped - natural).abs() < 0.01,
+                (clamped - snap(natural)).abs() < 0.01,
                 "configured={clamped} natural={natural}"
             );
         });
@@ -4123,7 +4128,7 @@ mod tests {
     fn table_cells_measure_short_code_with_the_width_left_by_text() {
         let ctx = egui::Context::default();
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             let mut style = ui.style().as_ref().clone();
             style
                 .text_styles
@@ -4168,7 +4173,7 @@ mod tests {
 
             assert_eq!(cell_visual_lines(&cell, ui, column_width), 2);
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
     }
 
     #[test]
@@ -4275,7 +4280,7 @@ mod tests {
             ..Default::default()
         });
         let mut rendered_widths = Vec::new();
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(ctx, |ui| {
             ui.set_width(table_bound);
             ui.set_max_width(table_bound);
             let mut builder = egui_extras::TableBuilder::new(ui)
@@ -4291,14 +4296,14 @@ mod tests {
             builder.body(|body| rendered_widths = body.widths().to_vec());
             store_table_column_widths(ui, table_id, &rendered_widths);
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
         rendered_widths
     }
 
     #[test]
     fn resizable_table_widths_stick_across_bound_changes() {
         let ctx = egui::Context::default();
-        let table_id = Id::new("responsive-table");
+        let table_id = Id::unique("responsive-table");
         let initial = render_resizable_table_widths(&ctx, table_id, 180.0, &[60.0, 80.0]);
         let same_bound = render_resizable_table_widths(&ctx, table_id, 180.0, &[90.0, 110.0]);
         assert_eq!(same_bound, initial, "stable bounds must retain cached widths");
@@ -4786,7 +4791,7 @@ mod tests {
     #[test]
     fn height_aware_cache_invalidates_only_when_its_layout_key_changes() {
         egui::__run_test_ui(|ui| {
-            let id = egui::Id::new("height-aware-cache");
+            let id = egui::Id::unique("height-aware-cache");
             let baseline = [100.0, 100.0];
             let desired = [200.0, 300.0];
             let minimums = [40.0, 40.0];
@@ -4820,7 +4825,7 @@ mod tests {
     #[test]
     fn dense_overflow_cache_does_not_remeasure_a_stable_layout() {
         egui::__run_test_ui(|ui| {
-            let id = egui::Id::new("dense-overflow-cache");
+            let id = egui::Id::unique("dense-overflow-cache");
             let minimums = [100.0, 100.0];
             let desired = [200.0, 400.0];
             let measurements = std::cell::Cell::new(0);
@@ -4903,7 +4908,7 @@ mod tests {
     fn height_aware_columns_reduce_production_wrapped_row_height() {
         let ctx = egui::Context::default();
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             let mut style = ui.style().as_ref().clone();
             style
                 .text_styles
@@ -5011,7 +5016,7 @@ mod tests {
             );
             assert!((optimized.iter().sum::<f32>() - baseline.iter().sum::<f32>()).abs() < 0.01);
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
     }
 
     #[test]
@@ -5027,7 +5032,7 @@ mod tests {
                 "| a | b |\n|---|---|\n| one | two |\n\n",
                 "Final paragraph.\n",
             );
-            let source_id = egui::Id::new("virtualization-regression");
+            let source_id = egui::Id::unique("virtualization-regression");
             let mut cache = CommonMarkCache::default();
             let options = CommonMarkOptions::default();
 
@@ -5602,7 +5607,7 @@ mod tests {
         let mut minimum_nested_y = 0.0;
 
         ctx.begin_pass(Default::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        egui::CentralPanel::default().show_ctx(&ctx, |ui| {
             ui.set_width(400.0);
             let line_height = ui.text_style_height(&egui::TextStyle::Body);
             minimum_nested_y = line_height * 4.0;
@@ -5614,7 +5619,7 @@ mod tests {
                 None,
             );
         });
-        let _ = ctx.end_pass();
+        let _ = ctx.end_frame();
 
         assert!(
             cache
@@ -5632,7 +5637,7 @@ mod tests {
 
     #[test]
     fn markdown_table_identity_uses_document_and_source_position() {
-        let document = Id::new("document-a");
+        let document = Id::unique("document-a");
 
         assert_eq!(
             markdown_table_id(document, 120),
@@ -5644,7 +5649,7 @@ mod tests {
         );
         assert_ne!(
             markdown_table_id(document, 120),
-            markdown_table_id(Id::new("document-b"), 120)
+            markdown_table_id(Id::unique("document-b"), 120)
         );
     }
 

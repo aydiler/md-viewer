@@ -10,8 +10,10 @@ struct App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.text_buffer)
@@ -44,7 +46,7 @@ fn main() -> eframe::Result {
                 }
             }
 
-            cc.egui_ctx.style_mut(|style| {
+            cc.egui_ctx.global_style_mut(|style| {
                 // Show the url of a hyperlink on hover
                 style.url_in_tooltip = true;
             });

@@ -2,7 +2,7 @@
 name = "md-viewer"
 version = "0.3.5"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.95"
 description = "Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload"
 license = "MIT"
 repository = "https://github.com/aydiler/md-viewer"
@@ -21,15 +21,20 @@ exclude = [
 
 [dependencies]
 # Core GUI framework - eframe re-exports egui
-eframe = { version = "0.33", default-features = false, features = [
+# eframe 0.37 made `clipboard` and `links` opt-in (0.33 always enabled them).
+eframe = { version = "0.37", default-features = false, features = [
     "default_fonts",
     "glow",
     "wayland",
     "x11",
     "persistence",
     "accesskit",
+    "clipboard",
+    "links",
 ] }
-egui = { version = "0.33", features = ["accesskit"] }
+egui = { version = "0.37", features = ["experimental"] }  # StyleProvider: ChromeButtonStyle in main.rs
+# Only for `color_fonts`: COLR/sbix/CBDT/EBDT color glyphs (color emoji).
+epaint = { version = "0.37", features = ["color_fonts"] }
 
 # MCP bridge for E2E testing (optional, local dev only - not on crates.io)
 # egui-mcp-bridge = { path = "/home/ahmet/dev/mcp/egui-mcp/crates/egui-mcp-bridge", optional = true }
@@ -77,14 +82,11 @@ percent-encoding = "2.3"
 zbus = { version = "5.5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [features]
-# `color-emoji` uses `FontData::emoji_only`, which only exists in the vendored
-# epaint (`crates/epaint`, wired in by `[patch.crates-io]`). `cargo publish`
-# ignores patches, so the crates.io package is built against stock epaint and
-# cannot use it: the release workflow's publish-crates job rewrites this
-# default to `[]` before publishing. Every source build (snap, AUR, release
-# binaries, local dev) keeps it on.
-default = ["color-emoji"]
-color-emoji = []
+# No `color-emoji` feature since egui 0.37: stock epaint draws color glyphs
+# (`color_fonts`), so the crates.io build needs no gate. The vendored epaint
+# patch only changes *which* face a cluster picks (crates/epaint/PATCH.md) and
+# adds no API the app calls; `crates-package-check` builds against stock
+# epaint to keep it that way.
 # mcp = ["dep:egui-mcp-bridge"]
 
 [lints.rust]
@@ -104,6 +106,8 @@ lto = "thin"
 codegen-units = 4
 
 [patch.crates-io]
-epaint = { path = "crates/epaint", version = "0.33.3" }
+# Vendored epaint 0.37.0 plus a small patch: font fallback honors emoji/text
+# presentation (U+FE0F / U+FE0E). See crates/epaint/PATCH.md.
+epaint = { path = "crates/epaint", version = "0.37.0" }
 egui_commonmark_extended = { path = "crates/egui_commonmark/egui_commonmark", version = "0.28.8" }
 egui_commonmark_backend_extended = { path = "crates/egui_commonmark/egui_commonmark_backend", version = "0.28.8" }

@@ -3,6 +3,10 @@
 //! clipping reported on a long project README. Skipped unless the
 //! `MDV_REAL_DOC` environment variable points at a readable document.
 
+mod common;
+#[allow(unused_imports)]
+use common::{FrameExt as _, PanelExt as _};
+
 use std::sync::Arc;
 
 use egui::{Context, Pos2, Shape, TextStyle};
@@ -46,11 +50,11 @@ fn real_document_rows_stay_within_column() {
     eprintln!("doc: {path} ({} bytes)", doc.len());
 
     let ctx = Context::default();
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style
         .text_styles
         .insert(TextStyle::Body, egui::FontId::proportional(16.0));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 
     let mut cache = CommonMarkCache::default();
     let mut overflow_rows: Vec<(String, f32)> = Vec::new();
@@ -67,13 +71,13 @@ fn real_document_rows_stay_within_column() {
     // Bootstrap frame + slice frames (cache warm; extra frames let async
     // math textures land and the re-bootstrap settle before measuring).
     for frame in 0..5 {
-        let full = ctx.run(
+        let full = ctx.run_frame(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show_ctx(ctx, |ui| {
                     let out = CommonMarkViewer::new()
                         .default_width(Some(COLUMN_WIDTH))
                         .table_max_width(Some(COLUMN_WIDTH))
