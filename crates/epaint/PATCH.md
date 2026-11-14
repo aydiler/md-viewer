@@ -32,6 +32,10 @@ dependency in `Cargo.toml`:
   the right of the widest row;
 - `Row::x_ranges`, `char_at` and `x_offset` are direction-aware, which is
   what makes stock egui 0.37's selection and copy correct on mixed lines.
+  The renderer's right-to-left paragraphs (devlog 091) rely on it too: link
+  clicks inside them go through `Galley::cursor_from_pos`, guarded by the
+  root test `tests/rtl_links.rs`. The paragraphs' right alignment itself uses
+  only stock API (`Align::RIGHT`).
 
 Not applied: the PR's egui-side changes (`label.rs`, text selection
 painting, caret movement). egui is not vendored. Stock egui 0.37 compiles

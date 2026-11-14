@@ -30,6 +30,7 @@ document-features = { workspace = true, optional = true }
 
 pulldown-cmark = { workspace = true }
 unicode-segmentation = { workspace = true }
+unicode-bidi = { workspace = true }
 
 [features]
 default = ["load-images", "pulldown_cmark"]
