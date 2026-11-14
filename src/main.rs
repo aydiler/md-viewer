@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eframe::egui;
+use egui::Widget;
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 use notify::{PollWatcher, RecommendedWatcher};
 use notify_debouncer_mini::{new_debouncer, new_debouncer_opt, DebouncedEventKind, Debouncer};
@@ -657,6 +658,8 @@ struct Tab {
     /// parsed events and split_points can survive across frames without
     /// re-hashing the entire content.
     content_version: u64,
+    /// When true, the content area shows a TextEdit instead of CommonMarkViewer.
+    is_editing: bool,
 }
 
 impl Tab {
@@ -701,6 +704,7 @@ impl Tab {
             history_forward: Vec::new(),
             search_matches: Vec::new(),
             content_version: 1,
+            is_editing: false,
         }
     }
 
@@ -2818,43 +2822,77 @@ impl MarkdownApp {
                 let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
                 let content_rect = ui.available_rect_before_wrap();
 
-                // The renderer owns the ScrollArea now (via show_scrollable),
-                // so we configure scroll_source / pending offset / content
-                // version through builder methods. The returned ScrollAreaOutput
-                // exposes state.offset and inner_rect for the post-render
-                // selection-preserving wheel hack below.
-                let pending = tab.pending_scroll_offset.take();
-                let default_width = content_default_width(self.full_width_content);
-                let mut scroll_output = CommonMarkViewer::new()
-                    .default_implicit_uri_scheme(&tab.base_uri)
-                    .max_image_width(Some(800))
-                    .default_width(default_width)
-                    // Tables are not bound by the reading column (#64): a wide
-                    // table spans the whole content pane and scrolls there,
-                    // while prose keeps the reading width.
-                    .table_max_width(Some(content_rect.width() as usize))
-                    .indentation_spaces(2)
-                    .use_strong_font_family(true)
-                    .show_alt_text_on_hover(true)
-                    .syntax_theme_dark("base16-ocean.dark")
-                    .syntax_theme_light("base16-ocean.light")
-                    .line_height(1.5)
-                    .code_line_height(1.3)
-                    .paragraph_spacing(2.0)
-                    .heading_spacing_above(2.0)
-                    .heading_spacing_below(0.75)
-                    .content_version(tab.content_version)
-                    .pending_scroll_offset(pending)
-                    .scroll_source(egui::scroll_area::ScrollSource {
-                        scroll_bar: true,
-                        drag: false,
-                        mouse_wheel: true,
-                    })
-                    .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content);
+                // View mode: CommonMarkViewer
+                // Edit mode: scrollable TextEdit for raw markdown
+                let edit_toggle_text = if tab.is_editing { "✎ View" } else { "Edit" };
+                let edit_toggle = ui.add(egui::Button::new(edit_toggle_text).small());
+                if edit_toggle.clicked() {
+                    tab.is_editing = !tab.is_editing;
+                    tab.cache.clear_scrollable();
+                    tab.content_version = tab.content_version.wrapping_add(1);
+                }
+                edit_toggle.on_hover_text(if tab.is_editing {
+                    "Switch to read mode"
+                } else {
+                    "Switch to edit mode"
+                });
 
-                tab.scroll_offset = scroll_output.state.offset.y;
-                tab.last_viewport_height = scroll_output.inner_rect.height();
-                tab.last_content_height = scroll_output.content_size.y;
+                let mut scroll_output: Option<egui::scroll_area::ScrollAreaOutput<()>> = None;
+
+                if tab.is_editing {
+                    // Edit mode: scrollable TextEdit
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .max_width(content_rect.width())
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                let frame = egui::Frame::NONE
+                                    .inner_margin(egui::Margin::symmetric(4_i8, 2_i8));
+                                frame.show(ui, |ui| {
+                                    egui::TextEdit::multiline(&mut tab.content)
+                                        .id_salt(ui.id().with("edit"))
+                                        .desired_width(content_rect.width() - 8.0)
+                                        .min_size(egui::vec2(content_rect.width() - 8.0, content_rect.height()))
+                                        .desired_rows(24)
+                                        .frame(false)
+                                        .ui(ui);
+                                });
+                            });
+                        });
+                    tab.scroll_offset = 0.0;
+                    tab.last_viewport_height = content_rect.height();
+                    tab.last_content_height = tab.content.len().max(1) as f32;
+                } else {
+                    // View mode: CommonMarkViewer (unchanged)
+                    let pending = tab.pending_scroll_offset.take();
+                    let default_width = content_default_width(self.full_width_content);
+                    scroll_output = Some(CommonMarkViewer::new()
+                        .default_implicit_uri_scheme(&tab.base_uri)
+                        .max_image_width(Some(800))
+                        .default_width(default_width)
+                        // Tables are not bound by the reading column (#64): a wide
+                        // table spans the whole content pane and scrolls there,
+                        // while prose keeps the reading width.
+                        .table_max_width(Some(content_rect.width() as usize))
+                        .indentation_spaces(2)
+                        .use_strong_font_family(true)
+                        .show_alt_text_on_hover(true)
+                        .syntax_theme_dark("base16-ocean.dark")
+                        .syntax_theme_light("base16-ocean.light")
+                        .line_height(1.5)
+                        .code_line_height(1.3)
+                        .paragraph_spacing(2.0)
+                        .heading_spacing_above(2.0)
+                        .heading_spacing_below(0.75)
+                        .content_version(tab.content_version)
+                        .pending_scroll_offset(pending)
+                        .scroll_source(egui::scroll_area::ScrollSource {
+                            scroll_bar: true,
+                            drag: false,
+                            mouse_wheel: true,
+                        })
+                        .show_scrollable(tab.id, ui, &mut tab.cache, &tab.content));
+                }
 
                 // If the renderer recorded an exact y for the active match, check
                 // whether the current scroll position keeps it visible. If not,
@@ -2868,20 +2906,23 @@ impl MarkdownApp {
                 // wheel input and locking the view (issue #19).
                 if tab.correct_active_search_pending {
                     if let Some(actual_y) = tab.cache.active_search_y() {
-                        let current_scroll = scroll_output.state.offset.y;
-                        let viewport_top = current_scroll;
-                        let viewport_bottom = current_scroll + tab.last_viewport_height;
-                        // Consider "not visible" if outside the viewport with a small margin
-                        let margin_outside = 20.0_f32;
-                        let needs_correction = actual_y < viewport_top + margin_outside
-                            || actual_y > viewport_bottom - margin_outside;
-                        if needs_correction && tab.last_viewport_height > 0.0 {
-                            // Place the active match ~35% from the top of the viewport
-                            let inset = tab.last_viewport_height * 0.35;
-                            let want_scroll = (actual_y - inset).max(0.0);
-                            // Avoid stomping if we're already at the target (within a frame)
-                            if (want_scroll - current_scroll).abs() > 2.0 {
-                                tab.pending_scroll_offset = Some(want_scroll);
+                        // View-mode only: scroll_output is None while editing.
+                        if let Some(so) = scroll_output.as_ref() {
+                            let current_scroll = so.state.offset.y;
+                            let viewport_top = current_scroll;
+                            let viewport_bottom = current_scroll + tab.last_viewport_height;
+                            // Consider "not visible" if outside the viewport with a small margin
+                            let margin_outside = 20.0_f32;
+                            let needs_correction = actual_y < viewport_top + margin_outside
+                                || actual_y > viewport_bottom - margin_outside;
+                            if needs_correction && tab.last_viewport_height > 0.0 {
+                                // Place the active match ~35% from the top of the viewport
+                                let inset = tab.last_viewport_height * 0.35;
+                                let want_scroll = (actual_y - inset).max(0.0);
+                                // Avoid stomping if we're already at the target (within a frame)
+                                if (want_scroll - current_scroll).abs() > 2.0 {
+                                    tab.pending_scroll_offset = Some(want_scroll);
+                                }
                             }
                         }
                         // Clear the one-shot regardless of which branch ran;
@@ -2899,34 +2940,41 @@ impl MarkdownApp {
                 // the recorded y. Mirrors the search-match corrective above.
                 if let Some(key) = tab.pending_header_click_key.take() {
                     if let Some(actual_y) = tab.cache.get_header_position(&key) {
-                        let current_scroll = scroll_output.state.offset.y;
-                        let want_scroll = (actual_y - 50.0).max(0.0);
-                        if (want_scroll - current_scroll).abs() > 2.0 {
-                            tab.pending_scroll_offset = Some(want_scroll);
+                        // View-mode only: scroll_output is None while editing.
+                        if let Some(so) = scroll_output.as_ref() {
+                            let current_scroll = so.state.offset.y;
+                            let want_scroll = (actual_y - 50.0).max(0.0);
+                            if (want_scroll - current_scroll).abs() > 2.0 {
+                                tab.pending_scroll_offset = Some(want_scroll);
+                            }
                         }
                     }
                 }
 
-                // Manual scroll handling for mouse wheel during text selection
+                // Manual scroll handling for mouse wheel during text selection.
+                // View-mode only: in edit mode the TextEdit's own ScrollArea
+                // handles the wheel natively and scroll_output is None.
                 let pointer_over_content = ui.ctx().input(|i| {
                     i.pointer
                         .hover_pos()
                         .is_some_and(|pos| content_rect.contains(pos))
                 });
                 if raw_scroll.abs() > 0.0 && pointer_over_content {
-                    let current_offset = scroll_output.state.offset.y;
-                    let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
-                    let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
+                    if let Some(so) = scroll_output.as_mut() {
+                        let current_offset = so.state.offset.y;
+                        let max_scroll = (tab.last_content_height - content_rect.height()).max(0.0);
+                        let new_offset = (current_offset - raw_scroll).clamp(0.0, max_scroll);
 
-                    // Don't store at boundaries (can break selection)
-                    let would_hit_top = new_offset < 0.5;
-                    let would_hit_bottom = new_offset > max_scroll - 0.5;
-                    let offset_changed = (new_offset - current_offset).abs() > 0.5;
+                        // Don't store at boundaries (can break selection)
+                        let would_hit_top = new_offset < 0.5;
+                        let would_hit_bottom = new_offset > max_scroll - 0.5;
+                        let offset_changed = (new_offset - current_offset).abs() > 0.5;
 
-                    if offset_changed && !would_hit_top && !would_hit_bottom {
-                        scroll_output.state.offset.y = new_offset;
-                        scroll_output.state.store(ui.ctx(), scroll_output.id);
-                        ui.ctx().request_repaint();
+                        if offset_changed && !would_hit_top && !would_hit_bottom {
+                            so.state.offset.y = new_offset;
+                            so.state.store(ui.ctx(), so.id);
+                            ui.ctx().request_repaint();
+                        }
                     }
                 }
 
