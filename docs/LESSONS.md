@@ -1793,3 +1793,14 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Fix:** `NativeOptions::vsync = false` on Wayland. The compositor already prevents tearing and winit paces `RedrawRequested` on frame callbacks without blocking. Keep vsync on X11.
 **Testing gotcha:** confirm the test window is really on a hidden workspace (`hyprctl clients -j`); this Hyprland uses Lua dispatch syntax (`hl.dsp.window.move({ workspace = "special:x", follow = false })`) and rejects the legacy form silently enough to fake a pass.
 **Files:** `src/main.rs` (`wayland_session`, `run_native_once`), `docs/devlog/073-wayland-hidden-vsync-hang.md`
+
+### egui 0.33 → 0.37: the traps that compiled cleanly
+**Context:** The egui 0.37 upgrade (devlog 089). The compile errors were mechanical. These were not: each one built, and most passed the tests.
+- **Row heights snap to pixels.** epaint 0.37 rounds a row's height (`round_to_pixel(max_row_height)`). A table row reserved from an unsnapped line height (19.5 px) clips the last line of a cell that lays out at 20 px. Any height the renderer computes ahead of layout must be snapped the same way (`body_line_height`).
+- **Button text follows `TextStyle::Body`.** 0.37's default button theme (`theme/default_style.rs`) ignores `TextStyle::Button`. An app that sets `Body` to a document size gets document-size chrome. `ChromeButtonStyle` in `src/main.rs` swaps the font back; the padding (8,2) and widget height (20) defaults grew too.
+- **`State::offset` is private.** Writes go through `vertical_scroll_offset` on the next `ScrollArea`. A clamp computed after `show` therefore has to be carried to the next frame (`ScrollableCache::pending_clamp`). Tests that need a stored offset inject it through a serde round-trip (`tests/common/mod.rs::store_offset`).
+- **Id salts hash twice.** A ScrollArea's state lives under `ui.make_persistent_id(IdSalt::new(salt))`, a panel's under `scope_id().with_salt(IdSalt::new(..))`. `Id::new(salt)` in place of `IdSalt::new(salt)` loads `None`, and the code that depends on the state silently does nothing.
+- **`textures_delta` must be consumed.** Headless test frames debug-assert on an unconsumed delta. Clear it in the frame helper, not in each test.
+- **A workaround can be what you are measuring.** The old scroll-while-selecting workaround re-applied every wheel delta, so 0.33 scrolled 2× egui's speed. Removing it, because its API is gone, halved scrolling; `line_scroll_speed = 80` restores it. And `forward_shift_wheel_to_horizontal_scroll` never acted at all: egui converts Shift+wheel to a horizontal delta before app code sees it.
+- **Opt-in eframe features.** `clipboard` and `links` became opt-in. Without them, copy and link opening fail with no error.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/common/mod.rs`, `src/main.rs`, `Cargo.toml`, `docs/devlog/089-egui-0.37.md`
