@@ -7,7 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/aydiler/md-viewer/main/scripts/install.sh | sh
 #   INSTALL_DIR=/usr/local/bin sh install.sh
 #
-# Supported: Linux x86_64, macOS x86_64, macOS arm64.
+# Supported: Linux x86_64, macOS arm64. Intel Macs are not built.
 # Windows: download the .zip from https://github.com/aydiler/md-viewer/releases
 
 set -eu
