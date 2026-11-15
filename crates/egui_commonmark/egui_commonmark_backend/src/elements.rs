@@ -312,6 +312,18 @@ fn width_body_space(ui: &Ui) -> f32 {
     ui.fonts_mut(|f| f.glyph_width(&id, ' '))
 }
 
+/// Label of a code block's copy button.
+///
+/// egui 0.37 no longer ships `emoji-icon-font` by default, and the previous
+/// glyph (U+1F5D0) is in no font that remains, so it painted as a missing-glyph
+/// box. U+1F4CB is what egui's own widgets use for copy, and it is in the
+/// common emoji fonts. U+FE0E asks for the monochrome text presentation, so the
+/// button keeps the plain look of the old icon instead of a colour emoji.
+pub const COPY_ICON: &str = "\u{1F4CB}\u{FE0E}";
+
+/// Label of a code block's copy button right after its text was copied.
+pub const COPIED_ICON: &str = "\u{2714}";
+
 /// Enhanced/specialized version of egui's code blocks. This one features copy button and borders.
 /// Uses selectable Label instead of TextEdit to allow text selection across code block boundaries.
 pub fn code_block(
@@ -371,7 +383,7 @@ pub fn code_block(
         frame_rect.right_top().y + spacing.button_padding.y * 2.0,
     );
 
-    // Check if we should show ✔ instead of 🗐 if the text was copied and the mouse is hovered
+    // Show COPIED_ICON instead of COPY_ICON while the copied text's button stays hovered
     let persistent_id = ui.make_persistent_id(frame_response.response.id);
     let copied_icon = ui.memory_mut(|m| *m.data.get_temp_mut_or_default::<bool>(persistent_id));
 
@@ -381,7 +393,7 @@ pub fn code_block(
                 min: position,
                 max: position,
             },
-            egui::Button::new(if copied_icon { "✔" } else { "🗐" })
+            egui::Button::new(if copied_icon { COPIED_ICON } else { COPY_ICON })
                 .small()
                 .frame(false)
                 .fill(egui::Color32::TRANSPARENT),

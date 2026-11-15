@@ -1410,6 +1410,40 @@ mod tests {
         }
     }
 
+    /// The code-block copy button's labels are covered without any system
+    /// font. egui 0.37 dropped `emoji-icon-font` from its defaults, and the
+    /// old label (U+1F5D0) then painted as a missing-glyph box (devlog 093).
+    #[test]
+    fn code_block_copy_icons_render_without_system_fonts() {
+        let mut definitions = FontDefinitions::default();
+        install_emoji_fonts(&mut definitions);
+        // Mirror a machine with no system fonts, as on CI: drop a colour
+        // emoji face the host may have contributed.
+        definitions.font_data.remove("ColorEmoji");
+        for chain in definitions.families.values_mut() {
+            chain.retain(|name| name != "ColorEmoji");
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+        let font_id = egui::FontId::proportional(14.0);
+        for label in [
+            egui_commonmark_extended::COPY_ICON,
+            egui_commonmark_extended::COPIED_ICON,
+        ] {
+            let missing: Vec<String> = label
+                .chars()
+                .filter(|&ch| !ctx.fonts_mut(|f| f.has_glyph(&font_id, ch)))
+                .map(|ch| format!("U+{:04X}", ch as u32))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "copy button label {label:?} has no glyph for {missing:?}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires installed system fonts"]
     fn emoji_fallback_face_resolves_for_doc_emoji() {
