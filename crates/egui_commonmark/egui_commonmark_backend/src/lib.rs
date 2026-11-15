@@ -31,7 +31,10 @@ pub use {
 pub use misc::CommonMarkCache;
 
 #[cfg(feature = "math")]
-pub use misc::{cached_inline_math_height, render_math, render_math_in_table};
+pub use misc::{
+    cached_inline_math_height, cached_inline_math_size, render_math, render_math_in_table,
+    seed_inline_math_size_for_test,
+};
 
 #[cfg(feature = "math")]
 pub use misc::warm_math_fonts;

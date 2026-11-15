@@ -768,6 +768,9 @@ fn table_cell_height(
     });
     let mut inline_math_height = 0.0;
     let mut inline_math_count = 0usize;
+    // Painted size of every formula in the cell, or `None` once any of them
+    // has not been rendered yet.
+    let mut inline_math_sizes: Option<Vec<egui::Vec2>> = Some(Vec::new());
     for (event, _) in cell {
         // Images contribute their painted height. The URI has to be resolved
         // exactly the way the painting path does it (`Image::new` applies the
@@ -793,20 +796,32 @@ fn table_cell_height(
         if let pulldown_cmark::Event::InlineMath(_tex) = event {
             let conservative = line_height * 2.0;
             #[cfg(feature = "math")]
-            let formula_height = crate::cached_inline_math_height(ui, cache, _tex, options)
-                .map(|exact| exact + line_height * 0.5)
-                .unwrap_or(conservative);
+            let size = crate::cached_inline_math_size(ui, cache, _tex, options);
             #[cfg(not(feature = "math"))]
-            let formula_height = {
+            let size: Option<egui::Vec2> = {
                 let _ = (cache, ui, options);
-                conservative
+                None
             };
+            match (size, inline_math_sizes.as_mut()) {
+                (Some(size), Some(sizes)) => sizes.push(size),
+                _ => inline_math_sizes = None,
+            }
+            let formula_height = size
+                .map(|exact| exact.y + line_height * 0.5)
+                .unwrap_or(conservative);
             inline_math_height += formula_height;
             inline_math_count += 1;
         }
     }
     if inline_math_count == 1 && !has_visible_text {
         height = height.max(inline_math_height);
+    } else if let Some(row_height) = inline_math_sizes
+        .filter(|sizes| !sizes.is_empty())
+        .and_then(|sizes| single_row_math_cell_height(cell, &sizes, ui, column_width, line_height))
+    {
+        // Every formula is rendered and the whole cell fits on one row: the
+        // row is as tall as its tallest piece, not the sum of them.
+        height = row_height;
     } else if inline_math_count > 0 {
         // Formula widgets participate in the same horizontal wrapping flow as
         // labels. Without cached formula widths we cannot know whether each
@@ -817,6 +832,66 @@ fn table_cell_height(
     }
 
     height
+}
+
+/// Height of a cell that mixes text and rendered inline formulas, if all of
+/// it fits on one row of `column_width`; `None` when it may wrap.
+fn single_row_math_cell_height(
+    cell: &[(pulldown_cmark::Event, Range<usize>)],
+    math_sizes: &[egui::Vec2],
+    ui: &Ui,
+    column_width: f32,
+    line_height: f32,
+) -> Option<f32> {
+    // Same rules as `cell_visual_lines`: line breaks, block content and
+    // images can force a second row, so leave those to the cumulative bound.
+    let breaks_row = cell.iter().any(|(event, _)| {
+        matches!(
+            event,
+            pulldown_cmark::Event::SoftBreak
+                | pulldown_cmark::Event::HardBreak
+                | pulldown_cmark::Event::DisplayMath(_)
+                | pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. })
+        )
+    });
+    if breaks_row {
+        return None;
+    }
+    let text: String = cell
+        .iter()
+        .filter_map(|(event, _)| match event {
+            pulldown_cmark::Event::Text(value)
+            | pulldown_cmark::Event::Code(value)
+            | pulldown_cmark::Event::InlineHtml(value)
+            | pulldown_cmark::Event::Html(value)
+            | pulldown_cmark::Event::FootnoteReference(value) => Some(value.as_ref()),
+            _ => None,
+        })
+        .collect();
+    let text_width = if text.is_empty() {
+        0.0
+    } else {
+        // Measured in the monospace font when it is code, which is wider, so
+        // this errs towards "does not fit".
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        let width = |font| {
+            ui.painter()
+                .layout_no_wrap(text.clone(), font, egui::Color32::WHITE)
+                .size()
+                .x
+        };
+        width(body).max(width(mono))
+    };
+    let pieces = math_sizes.len() + usize::from(!text.is_empty());
+    let spacing = ui.spacing().item_spacing.x * pieces.saturating_sub(1) as f32;
+    let row_width = text_width + math_sizes.iter().map(|size| size.x).sum::<f32>() + spacing;
+    // `wrapped_text_height` leaves the same 8 px of cell inset.
+    if row_width > (column_width - 8.0).max(1.0) {
+        return None;
+    }
+    let tallest_formula = math_sizes.iter().map(|size| size.y).fold(0.0, f32::max);
+    Some((tallest_formula + line_height * 0.5).max(line_height + ui.spacing().item_spacing.y))
 }
 
 fn markdown_cell_text(cell: &[(pulldown_cmark::Event, Range<usize>)]) -> String {
@@ -4714,6 +4789,73 @@ mod tests {
                 table_cell_height(&cell, line_height, &cache, ui, 120.0, &options)
                     >= line_height * 2.0
             );
+        });
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn a_cell_mixing_text_and_one_rendered_formula_is_one_row_tall() {
+        // A header like `$\chi^2$ (60 pts)` used to reserve the text line plus
+        // the formula plus spacing, about three lines for one row of content.
+        egui::__run_test_ui(|ui| {
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let formula = egui::vec2(18.0, line_height * 1.3);
+            crate::seed_inline_math_size_for_test(ui, &mut cache, r"\chi^2", &options, formula);
+            let cell = vec![
+                (Event::InlineMath(r"\chi^2".into()), 0..8),
+                (Event::Text(" (60 pts)".into()), 8..17),
+            ];
+
+            let height = table_cell_height(&cell, line_height, &cache, ui, 200.0, &options);
+            let one_row =
+                (formula.y + line_height * 0.5).max(line_height + ui.spacing().item_spacing.y);
+            assert!(
+                (height - one_row).abs() < 0.01,
+                "expected one row ({one_row}), got {height} (line height {line_height})"
+            );
+        });
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn a_mixed_cell_too_wide_for_its_column_keeps_the_cumulative_reservation() {
+        // The one-row shortcut must not apply when the pieces cannot share a
+        // row, or the wrapped formula is clipped.
+        egui::__run_test_ui(|ui| {
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let formula = egui::vec2(90.0, line_height * 1.3);
+            crate::seed_inline_math_size_for_test(ui, &mut cache, r"\chi^2", &options, formula);
+            let cell = vec![
+                (Event::InlineMath(r"\chi^2".into()), 0..8),
+                (Event::Text(" (sixty points in total)".into()), 8..32),
+            ];
+
+            let height = table_cell_height(&cell, line_height, &cache, ui, 120.0, &options);
+            assert!(
+                height >= line_height + formula.y + line_height * 0.5,
+                "a wrapping cell must reserve text and formula rows, got {height}"
+            );
+        });
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn an_unrendered_formula_keeps_the_conservative_reservation() {
+        egui::__run_test_ui(|ui| {
+            let cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let line_height = ui.text_style_height(&egui::TextStyle::Body);
+            let cell = vec![
+                (Event::InlineMath(r"\chi^2".into()), 0..8),
+                (Event::Text(" (60 pts)".into()), 8..17),
+            ];
+
+            let height = table_cell_height(&cell, line_height, &cache, ui, 200.0, &options);
+            assert!(height >= line_height * 3.0, "got {height}");
         });
     }
 

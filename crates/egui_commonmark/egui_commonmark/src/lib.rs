@@ -99,7 +99,8 @@ pub use egui_commonmark_backend_extended::misc::{
 pub use egui_commonmark_backend_extended::typography::{Measurement, TypographyConfig};
 #[cfg(feature = "math")]
 pub use egui_commonmark_backend_extended::{
-    cached_inline_math_height, render_math, render_math_in_table,
+    cached_inline_math_height, cached_inline_math_size, render_math, render_math_in_table,
+    seed_inline_math_size_for_test,
 };
 #[cfg(feature = "math")]
 pub use egui_commonmark_backend_extended::warm_math_fonts;

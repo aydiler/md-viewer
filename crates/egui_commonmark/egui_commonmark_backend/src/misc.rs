@@ -1791,19 +1791,65 @@ pub fn cached_inline_math_height(
     latex: &str,
     options: &CommonMarkOptions,
 ) -> Option<f32> {
-    // Key must match what the render pipeline stores (exact colors, like #92,
-    // and the same point size — see `math_size_pt`).
-    let hash = math_cache_hash(
+    cached_inline_math_size(ui, cache, latex, options).map(|size| size.y)
+}
+
+/// Like [`cached_inline_math_height`], but returns the full painted size, so a
+/// fixed-height container can tell whether a formula shares a row with its
+/// neighbours.
+#[cfg(feature = "math")]
+pub fn cached_inline_math_size(
+    ui: &egui::Ui,
+    cache: &CommonMarkCache,
+    latex: &str,
+    options: &CommonMarkOptions,
+) -> Option<egui::Vec2> {
+    let hash = inline_math_hash(ui, latex, options);
+    match cache.math_states.get(&hash) {
+        Some(MathState::Ready { size, .. }) => Some(*size),
+        _ => None,
+    }
+}
+
+/// Key must match what the render pipeline stores (exact colors, like #92,
+/// and the same point size — see `math_size_pt`).
+#[cfg(feature = "math")]
+fn inline_math_hash(ui: &egui::Ui, latex: &str, options: &CommonMarkOptions) -> u64 {
+    math_cache_hash(
         latex,
         true,
         ui.visuals().text_color(),
         ui.visuals().panel_fill,
         math_size_pt(ui, options),
+    )
+}
+
+/// Mark an inline formula as rendered at `size` without running the
+/// renderer. Test-only: production code fills the cache from the render
+/// workers.
+#[cfg(feature = "math")]
+#[doc(hidden)]
+pub fn seed_inline_math_size_for_test(
+    ui: &egui::Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    options: &CommonMarkOptions,
+    size: egui::Vec2,
+) {
+    let hash = inline_math_hash(ui, latex, options);
+    let texture = ui.ctx().load_texture(
+        format!("math_test_{hash}"),
+        egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT),
+        egui::TextureOptions::LINEAR,
     );
-    match cache.math_states.get(&hash) {
-        Some(MathState::Ready { size, .. }) => Some(size.y),
-        _ => None,
-    }
+    cache.math_states.insert(
+        hash,
+        MathState::Ready {
+            texture,
+            size,
+            baseline_ratio: 0.8,
+        },
+    );
 }
 
 /// Public function to render math from the callback. Called from the `render_math_fn` closure.
