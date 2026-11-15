@@ -6,9 +6,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/aydiler/md-viewer)](https://github.com/aydiler/md-viewer/stargazers)
 
-A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed for distraction-free reading with excellent typography, syntax highlighting, and LaTeX math — from quick notes to scientific papers.
+A fast, lightweight markdown viewer for Linux, with Windows and macOS builds too, written in Rust with egui. Designed for distraction-free reading with excellent typography, syntax highlighting, and LaTeX math — from quick notes to scientific papers.
 
-![md-viewer rendering a LaTeX-heavy scientific paper](screenshots/math-rendering.png)
+![md-viewer rendering a document with LaTeX math, a table and a figure](screenshots/math-rendering.png)
 
 ## Features
 
@@ -21,8 +21,9 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **HTML Tables** - Rendered as formatted grids with proper cell padding
 - **YAML Frontmatter** - A leading `---` block renders as a key/value table instead of raw text
 - **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
-- **Unicode Support** - System font fallbacks (Noto, DejaVu) for emojis, CJK, and non-Latin scripts
-- **60 FPS Rendering** - Viewport virtualization keeps scroll smooth on 100k+ line docs
+- **Right-to-Left Text** - Paragraphs, headings, list items and table cells in Arabic, Hebrew and other right-to-left scripts are right-aligned, and lines that mix directions read in the correct order (not in `cargo install` builds; see [Cargo](#cargo-cratesio--slower-builds-from-source))
+- **Unicode Support** - Installed system fonts are picked per script for CJK and other non-Latin text; a monochrome emoji font is bundled and a color one is used when installed
+- **Viewport Rendering** - Only the visible part of a long document is painted each frame
 - **Typography** - 1.5x line height for optimal readability (WCAG 2.1 compliant)
 
 *200+ languages via syntect, and mermaid diagrams rendered natively*
@@ -37,10 +38,14 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 ![YAML frontmatter rendered as a key/value table](screenshots/frontmatter.png)
 
+*Arabic and Hebrew blocks are right-aligned, list markers move to the right, and Latin words inside them keep their place*
+
+![Right-to-left paragraphs, lists and a table](screenshots/rtl.png)
+
 ### Navigation
 - **Tab System** - Open multiple documents with tab bar (Ctrl+Click links to open in new tab)
 - **In-Document Search (Ctrl+F)** - Find bar with inline highlights, Enter/Shift+Enter to cycle matches
-- **File Explorer** - Hierarchical sidebar with lazy-loading directories and sorting options; freely resizable, width remembered
+- **File Explorer** - Hierarchical sidebar with lazy-loading directories, sorted by name or date; freely resizable, width remembered
 - **Open Folder** - Use File → Open Folder… to choose and persist the file explorer root
 - **Outline Sidebar** - Click-to-navigate table of contents from document headers; freely resizable, width remembered
 - **Navigation Buttons** - Back/forward buttons in title bar for quick history navigation
@@ -56,6 +61,7 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 - **Zoom** - 50% to 300% zoom (Ctrl++/-/0 or Ctrl+Scroll)
 - **Full Width** - On by default; toggle between the full content pane and a reading-width column (Ctrl+Shift+W); prose and tables follow it together
 - **Formula Size** - Scale rendered math from 100% to 150% (View → Formula Size), independent of UI zoom
+- **Tab Bar** - Hide it with View → Show Tab Bar; it comes back while a tab is in Edit mode
 - **Keyboard Scrolling** - Scroll documents with ↑/↓ by line or Page Up/Page Down by page when the find bar is closed
 - **Live Reload** - Auto-refresh on file changes (enabled by default)
 - **Custom Colors** - Customize highlight and link text colors (View → Colors…)
@@ -72,12 +78,15 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 |---|---|
 | ![Dark mode](screenshots/dark-mode.png) | ![Light mode](screenshots/light-mode.png) |
 
+### Editing
+- **Edit Mode** - Switch the active tab between Preview and Edit (Ctrl+E or the Preview/Edit toggle) and save with Ctrl+S
+
 ### Usability
 - **Drag and Drop** - Drop markdown files onto the window to open
 - **Native Dialogs** - System file and folder picker integration
 - **Welcome Page & Recent Files** - Open files or folders from the idle screen and reopen recent documents
 - **Session Persistence** - Remembers open tabs, theme, zoom, and sidebar state
-- **Cross-Platform** - Works on X11 and Wayland
+- **Cross-Platform** - Linux (X11 and Wayland), Windows, and macOS on Apple Silicon
 
 ## Keyboard Shortcuts
 
@@ -95,8 +104,6 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 | Shortcut | Action |
 |----------|--------|
-| Ctrl+O | Open file in new tab |
-| Ctrl+S | Save the active tab (Edit mode) |
 | Alt+Left | Navigate back in history |
 | Alt+Right | Navigate forward in history |
 | Click link | Navigate in current tab |
@@ -131,6 +138,9 @@ A fast, lightweight markdown viewer for Linux built with Rust and egui. Designed
 
 | Shortcut | Action |
 |----------|--------|
+| Ctrl+O | Open file in new tab |
+| Ctrl+E | Toggle Preview / Edit for the active tab |
+| Ctrl+S | Save the active tab (Edit mode) |
 | F5 | Toggle file watching |
 | Ctrl+Q | Quit application |
 
@@ -166,10 +176,11 @@ Auto-updates via snapd.
 ### Arch Linux (AUR)
 
 ```bash
-yay -S md-viewer-git    # or: paru -S md-viewer-git
+yay -S md-viewer-bin    # prebuilt release binary
+yay -S md-viewer-git    # builds from the latest main commit
 ```
 
-Builds from the latest `main` commit (rolling) — your system update grabs new versions automatically.
+`md-viewer-bin` installs the binary from the latest GitHub release. `md-viewer-git` builds the latest `main` commit (rolling). Both update with your normal system update.
 
 ### Flatpak / Flathub
 
@@ -193,6 +204,8 @@ cargo install md-viewer
 
 Compiles locally (~2–3 minutes). Update with `cargo install --force md-viewer`. Requires the system dependencies listed below.
 
+This build has no right-to-left layout: right-to-left blocks are still right-aligned, but their text appears in typed order, and clicks on links inside them can miss. The layout fix lives in a patched copy of epaint (from the not-yet-merged emilk/egui#8822), and `cargo install` builds against the stock epaint from crates.io. Every other channel includes it.
+
 ### From Source
 
 ```bash
@@ -210,8 +223,7 @@ Only needed for `cargo install` / building from source:
 ```bash
 sudo pacman -S --needed \
     base-devel clang pkg-config \
-    libxcb libxkbcommon openssl \
-    gtk3 fontconfig dbus zenity \
+    libxcb libxkbcommon fontconfig zenity \
     xdg-desktop-portal xdg-desktop-portal-gtk \
     python tk
 ```
@@ -235,11 +247,10 @@ When launched from a terminal, `md-viewer` detaches by default so the shell prom
 
 ## Technical Details
 
-- **Binary size**: ~35 MB (includes syntax highlighting, mermaid renderer, math rendering, image support, X11+Wayland). ~7 MB as snap.
-- **Startup time**: < 200ms
-- **Rendering**: 60 FPS with viewport-based clipping
+- **Binary size**: ~50 MB on Linux (~23 MB as the release `.tar.gz`); includes syntax highlighting, the mermaid renderer, math rendering, image support, X11 and Wayland. The snap is a ~90 MB download.
+- **Rendering**: only the visible part of the document is painted each frame
 - **Memory**: Uses mimalloc for improved allocation performance
-- **Platform**: Linux (X11 and Wayland via glow backend)
+- **Platform**: Linux (X11 and Wayland, glow/OpenGL backend), Windows x86_64, macOS arm64
 
 ### Built With
 
