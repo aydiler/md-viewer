@@ -156,6 +156,26 @@ fn fitted_columns_do_not_split_short_header_words() {
 }
 
 #[test]
+fn fitted_columns_do_not_split_short_inline_code() {
+    // A short identifier in a narrow body column used to be cut mid-word
+    // (`budget_` / `mb`): only header words set a column's minimum width.
+    let markdown = concat!(
+        "| Key | Notes |\n",
+        "|---|---|\n",
+        "| `budget_mb` | A deliberately long note that wants all of the width there is and then some more of it |\n",
+        "| `lod_bias` | Another long note that keeps asking the fitter for more width than the table has |",
+    );
+    let (_, _, painted) = render_geometry_with_body_size(markdown, 400.0, &[], Some(16.0));
+    for token in ["budget_mb", "lod_bias"] {
+        let code = painted
+            .iter()
+            .find(|entry| entry.text == token)
+            .unwrap_or_else(|| panic!("missing {token}: {painted:#?}"));
+        assert_eq!(code.rows, 1, "short inline code was split: {code:?}");
+    }
+}
+
+#[test]
 fn fitted_markdown_cells_keep_visible_horizontal_padding() {
     let markdown = concat!(
         "| Owner | Mitigation |\n",

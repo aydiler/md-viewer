@@ -976,6 +976,37 @@ fn unbreakable_text_width(ui: &Ui, text: &str) -> f32 {
         .fold(40.0, f32::max)
 }
 
+/// Inline code at most this many characters long sets a minimum column width.
+/// Longer code still wraps: a path-length floor would force horizontal
+/// scrolling on ordinary tables, and `inline_code_wrap_segments` already
+/// chunks code past 56 characters on purpose.
+const INLINE_CODE_FLOOR_CHARS: usize = 20;
+
+/// Width a table column needs so the cell's short inline code is not cut
+/// mid-identifier (`budget_` / `mb`). Measured the way the cell paints code:
+/// monospace family at body size (see `cell_visual_lines`), plus the same
+/// padding `natural_text_width` adds. Zero when the cell has no short code.
+fn inline_code_floor(ui: &Ui, cell: &[(pulldown_cmark::Event, Range<usize>)]) -> f32 {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let code_font = egui::FontId::new(body.size, egui::FontFamily::Monospace);
+    cell.iter()
+        .filter_map(|(event, _)| match event {
+            pulldown_cmark::Event::Code(code)
+                if code.chars().count() <= INLINE_CODE_FLOOR_CHARS =>
+            {
+                Some(
+                    ui.painter()
+                        .layout_no_wrap(code.to_string(), code_font.clone(), egui::Color32::WHITE)
+                        .size()
+                        .x
+                        + 16.0,
+                )
+            }
+            _ => None,
+        })
+        .fold(0.0, f32::max)
+}
+
 fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32) -> f32 {
     let font_id = egui::TextStyle::Body.resolve(ui.style());
     let galley = ui.painter().layout(
@@ -3014,10 +3045,17 @@ impl CommonMarkViewerInternal {
                 .unwrap_or(max_width);
             let minimum_widths: Vec<f32> = (0..num_cols)
                 .map(|column| {
-                    header
+                    let header_floor = header
                         .get(column)
                         .map(|cell| unbreakable_text_width(ui, &markdown_cell_text(cell)))
-                        .unwrap_or(40.0)
+                        .unwrap_or(40.0);
+                    // Short inline code anywhere in the column is a floor too,
+                    // or a narrow column cuts identifiers mid-word.
+                    std::iter::once(header.get(column))
+                        .chain(rows.iter().map(|row| row.get(column)))
+                        .flatten()
+                        .map(|cell| inline_code_floor(ui, cell))
+                        .fold(header_floor, f32::max)
                 })
                 .collect();
             let mut table_rows = Vec::with_capacity(rows.len() + usize::from(!header.is_empty()));
@@ -5025,6 +5063,34 @@ mod tests {
             fit_column_widths(&[100.0, 300.0, 240.0], 180.0, &minimums),
             minimums
         );
+    }
+
+    #[test]
+    fn inline_code_floor_covers_short_code_only() {
+        egui::__run_test_ui(|ui| {
+            let body = egui::TextStyle::Body.resolve(ui.style());
+            let mono = egui::FontId::new(body.size, egui::FontFamily::Monospace);
+            let width = |text: &str| {
+                ui.painter()
+                    .layout_no_wrap(text.to_owned(), mono.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            };
+
+            let prose = vec![(Event::Text("budget_mb".into()), 0..9)];
+            assert_eq!(inline_code_floor(ui, &prose), 0.0);
+
+            let short = vec![
+                (Event::Text("see ".into()), 0..4),
+                (Event::Code("budget_mb".into()), 4..15),
+            ];
+            assert!(inline_code_floor(ui, &short) >= width("budget_mb"));
+
+            let long = "a_thirty_character_identifier_";
+            let long_cell = vec![(Event::Code(long.into()), 0..32)];
+            assert_eq!(long.chars().count(), 30);
+            assert_eq!(inline_code_floor(ui, &long_cell), 0.0);
+        });
     }
 
     #[test]
