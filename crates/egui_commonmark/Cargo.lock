@@ -1203,6 +1203,7 @@ dependencies = [
  "pulldown-cmark 0.13.0",
  "resvg",
  "serde_json",
+ "unicode-bidi",
  "unicode-segmentation",
 ]
 

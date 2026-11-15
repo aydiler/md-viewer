@@ -684,11 +684,7 @@ impl Link {
         }
 
         if response.clicked() || response.middle_clicked() {
-            if is_hook {
-                cache.link_hooks_mut().insert(destination.clone(), true);
-            } else {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(&destination));
-            }
+            follow_link(ui, cache, &destination);
         }
 
         // Show pointer cursor and URL on hover
@@ -698,6 +694,16 @@ impl Link {
                 response.on_hover_text(&destination);
             }
         }
+    }
+}
+
+/// What a click on a link does: set its hook when the viewer resolves the
+/// destination itself, otherwise hand it to the desktop's URL handler.
+pub fn follow_link(ui: &Ui, cache: &mut CommonMarkCache, destination: &str) {
+    if cache.link_hooks().contains_key(destination) {
+        cache.link_hooks_mut().insert(destination.to_owned(), true);
+    } else {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(destination));
     }
 }
 
@@ -2238,6 +2244,10 @@ pub struct CommonMarkCache {
     /// Cached parsed markdown events to avoid re-parsing every frame.
     /// Keyed by a hash of the source text. Cleared when cache is reset.
     cached_events: Option<(u64, Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>)>,
+    /// Source offsets of the blocks the renderer lays out right to left
+    /// (#108). Set together with `cached_events`, so it always describes the
+    /// event stream currently cached.
+    rtl_block_starts: std::collections::HashSet<usize>,
 
     /// Cached syntect LayoutJobs for code blocks, keyed by
     /// (content_hash, lang, theme_is_dark, mono_font_size).
@@ -2390,6 +2400,7 @@ impl Default for CommonMarkCache {
             #[cfg(feature = "math")]
             math_rendering: HashSet::new(),
             cached_events: None,
+            rtl_block_starts: Default::default(),
             syntax_layouts: HashMap::new(),
         }
     }
@@ -2689,6 +2700,18 @@ impl CommonMarkCache {
     /// Store parsed events in the cache.
     pub fn set_cached_events(&mut self, content_hash: u64, events: Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>) {
         self.cached_events = Some((content_hash, events));
+    }
+
+    /// Record which paragraphs and headings (by source start offset) are laid
+    /// out right to left. Replaces the previous set.
+    pub fn set_rtl_block_starts(&mut self, starts: std::collections::HashSet<usize>) {
+        self.rtl_block_starts = starts;
+    }
+
+    /// Whether the paragraph or heading starting at `source_start` is laid out
+    /// right to left.
+    pub fn is_rtl_block(&self, source_start: usize) -> bool {
+        self.rtl_block_starts.contains(&source_start)
     }
 }
 

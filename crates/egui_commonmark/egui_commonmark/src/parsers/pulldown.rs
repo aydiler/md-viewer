@@ -357,6 +357,196 @@ fn inline_code_wrap_segments(text: &str) -> Vec<String> {
     segments
 }
 
+/// Source start offsets of the paragraphs and headings to lay out right to
+/// left (#108): the first strong character of their text is right to left
+/// (UAX #9 rules P2/P3, like HTML's `dir="auto"`), and they hold nothing the
+/// merged layout in `render_rtl_block` cannot carry.
+///
+/// Only top-level and blockquote blocks qualify. List items, table cells,
+/// footnote and definition-list bodies keep the left-to-right path: their
+/// markers, cell layout and labels sit on the left by construction.
+fn rtl_block_starts(
+    events: &[(pulldown_cmark::Event<'_>, Range<usize>)],
+) -> std::collections::HashSet<usize> {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let mut starts = std::collections::HashSet::new();
+    let mut containers = 0usize;
+    for (index, (event, span)) in events.iter().enumerate() {
+        match event {
+            Event::Start(
+                Tag::List(_) | Tag::Table(_) | Tag::FootnoteDefinition(_) | Tag::DefinitionList,
+            ) => containers += 1,
+            Event::End(
+                TagEnd::List(_)
+                | TagEnd::Table
+                | TagEnd::FootnoteDefinition
+                | TagEnd::DefinitionList,
+            ) => containers = containers.saturating_sub(1),
+            Event::Start(Tag::Paragraph | Tag::Heading { .. })
+                if containers == 0 && block_is_rtl(&events[index + 1..]) =>
+            {
+                starts.insert(span.start);
+            }
+            _ => {}
+        }
+    }
+    starts
+}
+
+/// Whether the block whose content starts at `events[0]` is right to left and
+/// can be merged into one galley. Stops at the block's end tag.
+fn block_is_rtl(events: &[(pulldown_cmark::Event<'_>, Range<usize>)]) -> bool {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    use unicode_bidi::BidiClass;
+    let mut first_strong_rtl = None;
+    for (event, _) in events {
+        match event {
+            Event::End(TagEnd::Paragraph | TagEnd::Heading(_)) => break,
+            Event::Text(text) if first_strong_rtl.is_none() => {
+                first_strong_rtl = text
+                    .chars()
+                    .find_map(|c| match unicode_bidi::bidi_class(c) {
+                        BidiClass::L => Some(false),
+                        BidiClass::R | BidiClass::AL => Some(true),
+                        _ => None,
+                    });
+            }
+            // Inline code is not prose: it never sets the direction. A token
+            // long enough to be cut into rows needs `end_row` between its
+            // chunks, which one galley cannot express.
+            Event::Code(text) if inline_code_wrap_segments(text).len() > 1 => return false,
+            // Widgets that are not text cannot live inside a galley.
+            Event::Start(Tag::Image { .. })
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::InlineHtml(_)
+            | Event::Html(_)
+            | Event::FootnoteReference(_)
+            | Event::TaskListMarker(_) => return false,
+            _ => {}
+        }
+    }
+    first_strong_rtl == Some(true)
+}
+
+/// Text and links of a right-to-left paragraph, collected until its end tag
+/// and then drawn as one right-aligned galley (`render_rtl_block`).
+#[derive(Default)]
+struct RtlBlock {
+    texts: Vec<egui::RichText>,
+    /// Each link with the number of `texts` that precede it.
+    links: Vec<(usize, crate::Link)>,
+}
+
+/// Draw a right-to-left paragraph or heading as one galley whose rows sit
+/// flush with the right edge of the reading column (#108).
+///
+/// The ordinary path emits one label per text piece into a wrapping
+/// left-to-right row, and egui only flows a label on from the previous one
+/// in left-to-right layouts (`Label::layout_in_ui`). One galley lets epaint
+/// wrap and order the whole paragraph, and `Align::RIGHT` puts every row at
+/// the right edge. It stays a selectable `Label`, so selection and copy work
+/// as for any other text. Links are not separate widgets here: a click is
+/// hit-tested against their character ranges.
+fn render_rtl_block(
+    ui: &mut Ui,
+    cache: &mut CommonMarkCache,
+    block: RtlBlock,
+    column_right: f32,
+    max_width: f32,
+) {
+    let RtlBlock { texts, links } = block;
+    if texts.is_empty() && links.is_empty() {
+        return;
+    }
+
+    let valign = ui.text_valign();
+    let link_color = ui.visuals().hyperlink_color;
+    let mut job = egui::text::LayoutJob::default();
+    // Character range of each link inside `job.text`, with its destination.
+    let mut link_spans: Vec<(Range<usize>, String)> = Vec::new();
+    let mut push_link = |job: &mut egui::text::LayoutJob, link: crate::Link| {
+        let start = job.text.chars().count();
+        // Same look as `Link::end`. Styled before appending: `append_to` merges
+        // a piece into the previous section when the formats are equal, so
+        // restyling sections afterwards can miss the link entirely.
+        for text in link.text {
+            text.color(link_color).underline().append_to(
+                job,
+                ui.style(),
+                egui::FontSelection::Default,
+                valign,
+            );
+        }
+        link_spans.push((start..job.text.chars().count(), link.destination));
+    };
+    let mut links = links.into_iter().peekable();
+    for (index, text) in texts.into_iter().enumerate() {
+        while let Some((_, link)) = links.next_if(|(at, _)| *at <= index) {
+            push_link(&mut job, link);
+        }
+        text.append_to(&mut job, ui.style(), egui::FontSelection::Default, valign);
+    }
+    for (_, link) in links {
+        push_link(&mut job, link);
+    }
+
+    // Paragraphs and headings already start on a fresh row (`try_insert_start`,
+    // `end_row` in `start_tag`), so the cursor is at the block's left edge:
+    // the column, or past a blockquote's bar.
+    let left = ui.cursor().left();
+    let right = column_right.min(ui.max_rect().right());
+    let width = (right - left).min(max_width).max(0.0);
+    job.wrap.max_width = width;
+    job.halign = egui::Align::RIGHT;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+
+    let rect =
+        egui::Rect::from_min_size(egui::pos2(left, ui.cursor().top()), egui::vec2(width, 0.0));
+    let response = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Max)),
+            |ui| {
+                ui.set_min_width(width);
+                ui.add(egui::Label::new(galley.clone()))
+            },
+        )
+        .inner;
+
+    if link_spans.is_empty() {
+        return;
+    }
+    // The label placed the galley's origin at its right edge (Align::RIGHT).
+    let galley_pos = response.rect.right_top();
+    let hovered_link = response.hover_pos().and_then(|pointer| {
+        let local = pointer - galley_pos;
+        // Only a pointer over a row's glyphs can be on a link.
+        let on_text = galley
+            .rows
+            .iter()
+            .any(|row| row.rect().contains(local.to_pos2()));
+        if !on_text {
+            return None;
+        }
+        let index: usize = galley.cursor_from_pos(local).index.into();
+        link_spans
+            .iter()
+            .find(|(span, _)| span.start <= index && index <= span.end)
+            .map(|(_, destination)| destination.clone())
+    });
+    if let Some(destination) = hovered_link {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if response.clicked() || response.middle_clicked() {
+            egui_commonmark_backend_extended::misc::follow_link(ui, cache, &destination);
+        }
+        if !cache.link_hooks().contains_key(&destination) {
+            response.on_hover_text_at_pointer(destination);
+        }
+    }
+}
+
 /// Measure a table cell's visible labels in their rendering order. The cell
 /// uses a wrapping horizontal layout: every label continues the current row,
 /// then uses the full column width for subsequent rows. Long code chunks call
@@ -1385,6 +1575,10 @@ pub struct CommonMarkViewerInternal {
     /// in order with the text when the heading ends, so they flow inline at
     /// the heading's position instead of where the cursor stood mid-heading.
     current_heading_links: Vec<(usize, crate::Link)>,
+    /// The current heading is right to left (`rtl_block_starts`).
+    current_heading_rtl: bool,
+    /// `Some` while inside a right-to-left paragraph.
+    rtl_paragraph: Option<RtlBlock>,
     /// Content-space Y of the first event rendered by the current slice.
     slice_start_y: f32,
     /// Screen-space Y of the root UI for the current full or sliced render.
@@ -1430,6 +1624,8 @@ impl CommonMarkViewerInternal {
             current_heading_text: String::new(),
             current_heading_rich_texts: Vec::new(),
             current_heading_links: Vec::new(),
+            current_heading_rtl: false,
+            rtl_paragraph: None,
             slice_start_y: 0.0,
             render_origin_y: 0.0,
             column_right: f32::INFINITY,
@@ -1813,6 +2009,7 @@ impl CommonMarkViewerInternal {
             // back, so they stay valid against the original text.
             let owned_events: Vec<(pulldown_cmark::Event<'static>, Range<usize>)> =
                 super::latex_delimiters::parse_events(text, math_enabled, options.render_frontmatter);
+            cache.set_rtl_block_starts(rtl_block_starts(&owned_events));
             cache.set_cached_events(content_hash, owned_events);
         }
 
@@ -2912,7 +3109,19 @@ impl CommonMarkViewerInternal {
     ) {
         match event {
             pulldown_cmark::Event::Start(tag) => {
-                self.start_tag(ui, tag, src_span.start, options)
+                let rtl = matches!(
+                    tag,
+                    pulldown_cmark::Tag::Paragraph | pulldown_cmark::Tag::Heading { .. }
+                ) && cache.is_rtl_block(src_span.start);
+                let is_heading = matches!(tag, pulldown_cmark::Tag::Heading { .. });
+                self.start_tag(ui, tag, src_span.start, options);
+                if rtl {
+                    if is_heading {
+                        self.current_heading_rtl = true;
+                    } else {
+                        self.rtl_paragraph = Some(RtlBlock::default());
+                    }
+                }
             }
             pulldown_cmark::Event::End(tag) => self.end_tag(ui, tag, cache, options, max_width),
             pulldown_cmark::Event::Text(text) => {
@@ -2971,7 +3180,11 @@ impl CommonMarkViewerInternal {
                     }
                     if auto_link.is_some() {
                         if let Some(link) = self.link.take() {
-                            link.end(ui, cache);
+                            if self.rtl_paragraph.is_some() {
+                                self.finish_link(link, ui, cache);
+                            } else {
+                                link.end(ui, cache);
+                            }
                         }
                     }
                     if wrap {
@@ -2992,9 +3205,19 @@ impl CommonMarkViewerInternal {
                 footnote_start(ui, &footnote);
             }
             pulldown_cmark::Event::SoftBreak => {
-                soft_break(ui);
+                if let Some(block) = self.rtl_paragraph.as_mut() {
+                    block.texts.push(egui::RichText::new(" "));
+                } else {
+                    soft_break(ui);
+                }
             }
-            pulldown_cmark::Event::HardBreak => newline(ui),
+            pulldown_cmark::Event::HardBreak => {
+                if let Some(block) = self.rtl_paragraph.as_mut() {
+                    block.texts.push(egui::RichText::new("\n"));
+                } else {
+                    newline(ui)
+                }
+            }
             pulldown_cmark::Event::Rule => {
                 self.line.try_insert_start(ui);
                 rule(ui, self.line.can_insert_end());
@@ -3109,6 +3332,9 @@ impl CommonMarkViewerInternal {
                 .push_str(raw_heading_text.unwrap_or(&text));
             // Accumulate RichText - will render all at once in end_tag(Heading)
             self.current_heading_rich_texts.push(rich_text);
+        } else if let Some(block) = self.rtl_paragraph.as_mut() {
+            // Drawn as one right-aligned galley at TagEnd::Paragraph.
+            block.texts.push(rich_text);
         } else if self.is_table {
             ui.add(egui::Label::new(rich_text).wrap());
         } else {
@@ -3168,6 +3394,8 @@ impl CommonMarkViewerInternal {
         if self.text_style.heading.is_some() {
             self.current_heading_links
                 .push((self.current_heading_rich_texts.len(), link));
+        } else if let Some(block) = self.rtl_paragraph.as_mut() {
+            block.links.push((block.texts.len(), link));
         } else {
             link.end(ui, cache);
         }
@@ -3436,13 +3664,22 @@ impl CommonMarkViewerInternal {
     ) {
         match tag {
             pulldown_cmark::TagEnd::Paragraph => {
+                if let Some(block) = self.rtl_paragraph.take() {
+                    render_rtl_block(ui, cache, block, self.column_right, max_width);
+                }
                 self.line.try_insert_end(ui);
                 // Add extra paragraph spacing if configured
                 paragraph_end_spacing(ui, &options.typography);
             }
             pulldown_cmark::TagEnd::Heading { .. } => {
                 // Render all accumulated heading fragments at once, positioned at left edge
-                if !self.current_heading_rich_texts.is_empty()
+                if std::mem::take(&mut self.current_heading_rtl) {
+                    let block = RtlBlock {
+                        texts: std::mem::take(&mut self.current_heading_rich_texts),
+                        links: std::mem::take(&mut self.current_heading_links),
+                    };
+                    render_rtl_block(ui, cache, block, self.column_right, max_width);
+                } else if !self.current_heading_rich_texts.is_empty()
                     || !self.current_heading_links.is_empty()
                 {
                     let available = ui.available_rect_before_wrap();
@@ -3965,6 +4202,60 @@ mod tests {
 
     use super::*;
     use pulldown_cmark::{Event, Options, Parser, Tag};
+
+    /// Paragraph and heading texts that `rtl_block_starts` marks, in order.
+    fn rtl_blocks(markdown: &str) -> Vec<String> {
+        let events: Vec<_> = Parser::new_ext(markdown, Options::all())
+            .into_offset_iter()
+            .collect();
+        let starts = rtl_block_starts(&events);
+        let mut found: Vec<_> = events
+            .iter()
+            .filter(|(event, span)| {
+                matches!(event, Event::Start(Tag::Paragraph | Tag::Heading { .. }))
+                    && starts.contains(&span.start)
+            })
+            .map(|(_, span)| markdown[span.clone()].trim().to_owned())
+            .collect();
+        found.dedup();
+        found
+    }
+
+    #[test]
+    fn rtl_blocks_follow_the_first_strong_character() {
+        assert_eq!(rtl_blocks("שלום world\n\nworld שלום\n"), vec!["שלום world"]);
+        assert_eq!(rtl_blocks("مرحبا\n"), vec!["مرحبا"]);
+        // Digits and punctuation are not strong; the first letter decides.
+        assert_eq!(rtl_blocks("123, שלום\n"), vec!["123, שלום"]);
+        assert!(rtl_blocks("123 456\n").is_empty());
+    }
+
+    #[test]
+    fn rtl_blocks_ignore_inline_code_for_direction() {
+        assert_eq!(rtl_blocks("`code` שלום\n"), vec!["`code` שלום"]);
+        // A code token long enough to be cut into rows cannot be merged.
+        let long = format!("שלום `{}`\n", "x".repeat(80));
+        assert!(rtl_blocks(&long).is_empty());
+    }
+
+    #[test]
+    fn rtl_blocks_cover_headings_and_quotes_but_not_lists_or_tables() {
+        assert_eq!(rtl_blocks("# כותרת\n"), vec!["# כותרת"]);
+        assert_eq!(rtl_blocks("> שלום\n"), vec!["שלום"]);
+        assert!(rtl_blocks("- שלום\n\n- עולם\n").is_empty());
+        assert!(rtl_blocks("| א |\n|---|\n| ב |\n").is_empty());
+        assert!(rtl_blocks("שלום[^1]\n\n[^1]: עולם\n").is_empty());
+    }
+
+    #[test]
+    fn rtl_blocks_skip_paragraphs_with_widgets() {
+        assert!(rtl_blocks("שלום ![x](a.png)\n").is_empty());
+        assert!(rtl_blocks("שלום <b>עולם</b>\n").is_empty());
+        assert_eq!(
+            rtl_blocks("שלום [קישור](a.md)\n"),
+            vec!["שלום [קישור](a.md)"]
+        );
+    }
 
     // Snapshot scanner output so ranges and raw/rendered identities stay explicit.
     fn segment_snapshot(text: &str, start: usize) -> Vec<(String, Range<usize>, String, bool)> {
