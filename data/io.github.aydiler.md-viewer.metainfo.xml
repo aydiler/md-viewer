@@ -84,6 +84,16 @@
   </provides>
 
   <releases>
+    <release version="0.3.6" date="2026-11-15">
+      <description>
+        <p>Right-to-left text:</p>
+        <ul>
+          <li>Arabic and Hebrew paragraphs, headings, list items and table cells are right-aligned</li>
+          <li>Lines that mix right-to-left and left-to-right text are shown in reading order</li>
+          <li>Arabic letters join and Devanagari conjuncts form</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.5" date="2026-11-13">
       <description>
         <p>Text and layout fixes:</p>

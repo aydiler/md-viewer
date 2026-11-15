@@ -2,6 +2,27 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.6] - 2026-11-15
+
+Arabic and Hebrew documents read from the right, and Arabic letters join.
+
+### Features
+- **Right-to-left documents (#108).** Three steps, each on its own:
+  - **Mixed-direction lines are in reading order (#241).** A line like `English العربية 123 עברית end` used to keep its words in typed order, so Arabic and Hebrew runs read left to right. Lines are now laid out with the Unicode bidirectional algorithm, and selecting and copying across such a line copies what is highlighted.
+  - **Arabic and Hebrew paragraphs and headings are right-aligned (#242).** A block whose text starts with a right-to-left letter sits at the right edge of the reading column; links inside it keep their look and open on click.
+  - **Lists and table cells too (#243).** A right-to-left list item has its bullet or number on the right, and nested items step in from the right. A right-to-left table cell is right-aligned in its column; column order is unchanged.
+  - Still left-aligned: task-list items, and blocks that contain an inline image, inline math or inline HTML.
+- **Arabic letters join, Devanagari conjuncts form (#240).** Text is now shaped by egui 0.37's shaper instead of drawn one isolated letter at a time.
+
+### Notes
+- **`cargo install md-viewer`** builds against the stock text-layout crate (epaint), which has no bidi support yet. In that build, Arabic and Hebrew blocks are right-aligned, but their text is still laid out in typed order as in 0.3.5, and a click on a link inside right-to-left text can miss. The snap, AUR packages and release binaries are not affected.
+- **Scrolling** moves the same distance per wheel click as before; the old scroll-while-selecting workaround is gone because egui keeps the selection itself now.
+
+### Internal
+- **egui, eframe and egui_extras move from 0.33 to 0.37** (#240). Minimum Rust version is 1.95.
+- **The vendored epaint is now 0.37** with the emoji/text presentation patch and the bidi layout from the open upstream PR emilk/egui#8822 (`crates/epaint/PATCH.md`).
+- **The vendored renderer moves to 0.29.0**: its egui dependency and its list API changed.
+
 ## [0.3.5] - 2026-11-13
 
 Thai and Hebrew text get proper fonts, and display formulas stop widening the reading column.
