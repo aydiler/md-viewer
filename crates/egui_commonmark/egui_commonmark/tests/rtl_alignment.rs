@@ -269,3 +269,150 @@ fn links_keep_their_look_inside_an_rtl_paragraph() {
         "link is not underlined: {link_section:?}"
     );
 }
+
+/// Centres of the filled or hollow circles painted (bullet markers).
+fn circles(ctx: &Context, cache: &mut CommonMarkCache, markdown: &str) -> Vec<Pos2> {
+    fn walk(shape: &Shape, out: &mut Vec<Pos2>) {
+        match shape {
+            Shape::Circle(c) => out.push(c.center),
+            Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let full = ctx.run_frame(input(), |ctx| {
+        egui::CentralPanel::default().show_ctx(ctx, |ui| {
+            CommonMarkViewer::new()
+                .default_width(Some(COLUMN_WIDTH))
+                .show_scrollable("rtl-doc", ui, cache, markdown);
+        });
+    });
+    let mut out = Vec::new();
+    for clipped in full.shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+#[test]
+fn rtl_bullet_item_puts_text_and_marker_at_the_right_edge() {
+    let doc = format!("{ENGLISH}\n\n- שלום עולם\n- English item\n");
+    let ctx = context();
+    let mut cache = CommonMarkCache::default();
+    let _ = frame(&ctx, &mut cache, &doc, input());
+    let painted = frame(&ctx, &mut cache, &doc, input());
+    let bullets = circles(&ctx, &mut cache, &doc);
+    let (left, right) = column(&painted);
+
+    let rtl = find(&painted, "שלום");
+    assert!(
+        rtl.right() < right && rtl.right() > right - 60.0,
+        "RTL item text should end just left of the marker at the right edge {right:.1}, \
+         ends at {:.1}",
+        rtl.right()
+    );
+    assert!(rtl.left() > left + 100.0, "RTL item starts at the left edge");
+    let rtl_mid = rtl.pos.y + rtl.galley.rect.center().y;
+    let marker = bullets
+        .iter()
+        .find(|c| (c.y - rtl_mid).abs() < 12.0)
+        .unwrap_or_else(|| panic!("no bullet on the RTL item's line; bullets {bullets:?}"));
+    assert!(
+        marker.x > rtl.right() && marker.x <= right,
+        "RTL bullet should sit between the text {:.1} and the right edge {right:.1}, at {:.1}",
+        rtl.right(),
+        marker.x
+    );
+
+    // The English item in the same list keeps its marker and text on the left.
+    let ltr = find(&painted, "English item");
+    assert!(ltr.left() < left + 60.0, "LTR item moved to {:.1}", ltr.left());
+    let ltr_mid = ltr.pos.y + ltr.galley.rect.center().y;
+    let ltr_marker = bullets
+        .iter()
+        .find(|c| (c.y - ltr_mid).abs() < 12.0)
+        .expect("bullet on the LTR item's line");
+    assert!(ltr_marker.x < ltr.left(), "LTR bullet is not left of its text");
+}
+
+#[test]
+fn nested_rtl_items_indent_from_the_right_as_far_as_ltr_items_do_from_the_left() {
+    let doc = format!(
+        "{ENGLISH}\n\n- Outer item\n  - Inner item\n\n---\n\n- שלום עולם\n  - תת פריט\n"
+    );
+    for (pass, painted) in ["bootstrap", "slice"].iter().zip(render(&doc)) {
+        let ltr_step = find(&painted, "Inner item").left() - find(&painted, "Outer item").left();
+        let outer = find(&painted, "שלום");
+        let inner = find(&painted, "תת");
+        let rtl_step = outer.right() - inner.right();
+        assert!(
+            (rtl_step - ltr_step).abs() <= 2.0,
+            "{pass}: nested RTL item steps {rtl_step:.1} px in from its parent, \
+             an LTR one {ltr_step:.1} px"
+        );
+        assert!(inner.pos.y > outer.pos.y, "{pass}: nested item overlaps");
+    }
+}
+
+#[test]
+fn rtl_ordered_item_paints_its_number_on_the_right() {
+    let doc = format!("{ENGLISH}\n\n1. שלום עולם\n2. עוד פריט\n");
+    let [painted, _] = render(&doc);
+    let item = find(&painted, "שלום");
+    let number = painted
+        .iter()
+        .find(|p| p.text.contains('1') && (p.pos.y - item.pos.y).abs() < 12.0)
+        .unwrap_or_else(|| panic!("no number on the first item's line"));
+    assert!(
+        number.left() > item.right(),
+        "number {:.1}..{:.1} should be right of the item text ending at {:.1}",
+        number.left(),
+        number.right(),
+        item.right()
+    );
+}
+
+#[test]
+fn loose_rtl_list_items_sit_at_the_right_edge() {
+    let doc = format!("{ENGLISH}\n\n- שלום עולם\n\n- עוד פריט\n");
+    for (pass, painted) in ["bootstrap", "slice"].iter().zip(render(&doc)) {
+        let (left, right) = column(&painted);
+        for marker in ["שלום", "עוד"] {
+            let item = find(&painted, marker);
+            assert!(
+                item.right() > right - 60.0 && item.left() > left + 100.0,
+                "{pass}: loose item {marker} at {:.1}..{:.1}, column {left:.1}..{right:.1}",
+                item.left(),
+                item.right()
+            );
+        }
+    }
+}
+
+#[test]
+fn rtl_table_cell_aligns_its_text_right() {
+    // Tables stretch to the pane (#211), so a column's right edge is measured
+    // as the start of the column after it.
+    let doc = format!(
+        "{ENGLISH}\n\n| First header | Second header |\n|---|---|\n| שלום | x |\n| English cell | y |\n"
+    );
+    for (pass, painted) in ["bootstrap", "slice"].iter().zip(render(&doc)) {
+        let first = find(&painted, "First header");
+        let second = find(&painted, "Second header");
+        let rtl = find(&painted, "שלום");
+        let ltr = find(&painted, "English cell");
+        assert!(
+            rtl.right() < second.left() && rtl.right() > second.left() - 24.0,
+            "{pass}: RTL cell should end just before the next column at {:.1}, ends at {:.1}",
+            second.left(),
+            rtl.right()
+        );
+        assert!(
+            rtl.left() > first.left() + 40.0,
+            "{pass}: RTL cell starts at the column's left edge"
+        );
+        assert!(
+            (ltr.left() - first.left()).abs() <= 1.0,
+            "{pass}: LTR cell moved"
+        );
+    }
+}

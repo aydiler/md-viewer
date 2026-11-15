@@ -156,6 +156,68 @@ pub fn paint_list_marker(
     }
 }
 
+/// Width of a list marker's slot: four body spaces, as `reserve_list_marker`
+/// allocates.
+pub fn list_marker_width(ui: &Ui) -> f32 {
+    width_body_space(ui) * 4.0
+}
+
+/// Width of `count` body spaces, the unit of list indentation.
+pub fn body_spaces_width(ui: &Ui, count: usize) -> f32 {
+    width_body_space(ui) * count as f32
+}
+
+/// Paint the marker of a right-to-left list item (#108), whose slot sits to
+/// the right of the item text: `slot_left` is the slot's edge next to the text.
+///
+/// The item text is already laid out, so its first row's baseline and the
+/// x-height of its format are known and passed in, rather than predicted from
+/// the cursor as `paint_list_marker` must. A number is drawn as `.1`, the
+/// visual order a right-to-left line gives `1.`, with its left edge at
+/// `slot_left` so it sits next to the text, as the left-to-right number sits
+/// with its right edge next to the text.
+pub fn paint_rtl_list_marker(
+    ui: &Ui,
+    slot_left: f32,
+    kind: &ListMarkerKind,
+    baseline_y: f32,
+    x_height: f32,
+    font: egui::FontId,
+) {
+    let raw = height_body(ui);
+    let color = ui.visuals().strong_text_color();
+    let centre_x = slot_left + list_marker_width(ui) / 2.0;
+    let optical_centre_y = baseline_y - x_height / 2.0;
+    match kind {
+        ListMarkerKind::Bullet => {
+            ui.painter()
+                .circle_filled(egui::pos2(centre_x, optical_centre_y), raw / 6.0, color);
+        }
+        ListMarkerKind::BulletHollow => {
+            ui.painter().circle(
+                egui::pos2(centre_x, optical_centre_y),
+                raw / 6.0,
+                egui::Color32::TRANSPARENT,
+                egui::Stroke::new(0.6_f32, color),
+            );
+        }
+        ListMarkerKind::Number(number) => {
+            let galley = ui
+                .painter()
+                .layout_no_wrap(format!(".{number}"), font, color);
+            let Some(row) = galley.rows.first() else {
+                return;
+            };
+            let Some(glyph) = row.glyphs.first() else {
+                return;
+            };
+            let baseline_offset = row.pos.y + glyph.pos.y;
+            let pos = egui::pos2(slot_left, baseline_y - baseline_offset);
+            ui.painter().add(epaint::TextShape::new(pos, galley, color));
+        }
+    }
+}
+
 /// Where the item text's first line will paint its baseline, and how tall a
 /// lowercase `x` is under that format, both in ui coordinates.
 ///
