@@ -357,34 +357,47 @@ fn inline_code_wrap_segments(text: &str) -> Vec<String> {
     segments
 }
 
-/// Source start offsets of the paragraphs and headings to lay out right to
-/// left (#108): the first strong character of their text is right to left
-/// (UAX #9 rules P2/P3, like HTML's `dir="auto"`), and they hold nothing the
-/// merged layout in `render_rtl_block` cannot carry.
+/// Source start offsets of the blocks to lay out right to left (#108): the
+/// first strong character of their text is right to left (UAX #9 rules P2/P3,
+/// like HTML's `dir="auto"`), and they hold nothing the merged layout in
+/// `render_rtl_block` cannot carry.
 ///
-/// Only top-level and blockquote blocks qualify. List items, table cells,
-/// footnote and definition-list bodies keep the left-to-right path: their
-/// markers, cell layout and labels sit on the left by construction.
+/// Three kinds of block are recorded, each by the source start of its opening
+/// event:
+/// - top-level and blockquote paragraphs and headings (`Start(Paragraph)`,
+///   `Start(Heading)`);
+/// - list items (`Start(Item)`), judged by their lead text: what comes before
+///   the item's first nested block, or its first paragraph in a loose list;
+/// - table cells (`Start(TableCell)`).
+///
+/// Paragraphs inside list items, footnote and definition-list bodies keep the
+/// left-to-right path.
 fn rtl_block_starts(
     events: &[(pulldown_cmark::Event<'_>, Range<usize>)],
 ) -> std::collections::HashSet<usize> {
     use pulldown_cmark::{Event, Tag, TagEnd};
     let mut starts = std::collections::HashSet::new();
+    // Footnote and definition-list bodies; tables hold no paragraphs.
     let mut containers = 0usize;
+    let mut lists = 0usize;
     for (index, (event, span)) in events.iter().enumerate() {
+        let rest = &events[index + 1..];
         match event {
-            Event::Start(
-                Tag::List(_) | Tag::Table(_) | Tag::FootnoteDefinition(_) | Tag::DefinitionList,
-            ) => containers += 1,
-            Event::End(
-                TagEnd::List(_)
-                | TagEnd::Table
-                | TagEnd::FootnoteDefinition
-                | TagEnd::DefinitionList,
-            ) => containers = containers.saturating_sub(1),
+            Event::Start(Tag::List(_)) => lists += 1,
+            Event::End(TagEnd::List(_)) => lists = lists.saturating_sub(1),
+            Event::Start(Tag::FootnoteDefinition(_) | Tag::DefinitionList) => containers += 1,
+            Event::End(TagEnd::FootnoteDefinition | TagEnd::DefinitionList) => {
+                containers = containers.saturating_sub(1)
+            }
             Event::Start(Tag::Paragraph | Tag::Heading { .. })
-                if containers == 0 && block_is_rtl(&events[index + 1..]) =>
+                if containers == 0 && lists == 0 && block_is_rtl(rest) =>
             {
+                starts.insert(span.start);
+            }
+            Event::Start(Tag::Item) if containers == 0 && block_is_rtl(rest) => {
+                starts.insert(span.start);
+            }
+            Event::Start(Tag::TableCell) if block_is_rtl(rest) => {
                 starts.insert(span.start);
             }
             _ => {}
@@ -394,14 +407,37 @@ fn rtl_block_starts(
 }
 
 /// Whether the block whose content starts at `events[0]` is right to left and
-/// can be merged into one galley. Stops at the block's end tag.
+/// can be merged into one galley. Stops where the block's inline content ends:
+/// its end tag, or, for a list item, the first nested block.
 fn block_is_rtl(events: &[(pulldown_cmark::Event<'_>, Range<usize>)]) -> bool {
     use pulldown_cmark::{Event, Tag, TagEnd};
     use unicode_bidi::BidiClass;
     let mut first_strong_rtl = None;
-    for (event, _) in events {
+    for (index, (event, _)) in events.iter().enumerate() {
         match event {
-            Event::End(TagEnd::Paragraph | TagEnd::Heading(_)) => break,
+            Event::End(
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::TableCell,
+            ) => break,
+            // A loose list item's lead text is wrapped in a paragraph.
+            Event::Start(Tag::Paragraph) if index == 0 => {}
+            Event::Start(
+                Tag::Paragraph
+                | Tag::Heading { .. }
+                | Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::HtmlBlock
+                | Tag::List(_)
+                | Tag::Item
+                | Tag::FootnoteDefinition(_)
+                | Tag::DefinitionList
+                | Tag::DefinitionListTitle
+                | Tag::DefinitionListDefinition
+                | Tag::Table(_)
+                | Tag::TableHead
+                | Tag::TableRow
+                | Tag::TableCell
+                | Tag::MetadataBlock(_),
+            ) => break,
             Event::Text(text) if first_strong_rtl.is_none() => {
                 first_strong_rtl = text
                     .chars()
@@ -422,7 +458,8 @@ fn block_is_rtl(events: &[(pulldown_cmark::Event<'_>, Range<usize>)]) -> bool {
             | Event::InlineHtml(_)
             | Event::Html(_)
             | Event::FootnoteReference(_)
-            | Event::TaskListMarker(_) => return false,
+            | Event::TaskListMarker(_)
+            | Event::Rule => return false,
             _ => {}
         }
     }
@@ -454,10 +491,10 @@ fn render_rtl_block(
     block: RtlBlock,
     column_right: f32,
     max_width: f32,
-) {
+) -> Option<(std::sync::Arc<egui::Galley>, egui::Rect)> {
     let RtlBlock { texts, links } = block;
     if texts.is_empty() && links.is_empty() {
-        return;
+        return None;
     }
 
     let valign = ui.text_valign();
@@ -515,8 +552,9 @@ fn render_rtl_block(
         )
         .inner;
 
+    let placed = Some((galley.clone(), response.rect));
     if link_spans.is_empty() {
-        return;
+        return placed;
     }
     // The label placed the galley's origin at its right edge (Align::RIGHT).
     let galley_pos = response.rect.right_top();
@@ -545,6 +583,75 @@ fn render_rtl_block(
             response.on_hover_text_at_pointer(destination);
         }
     }
+    placed
+}
+
+/// Draw the lead text of a right-to-left list item (#108) with its marker on
+/// the right: the mirror of the left-to-right item, where indentation and the
+/// marker sit on the left of the text.
+#[allow(clippy::too_many_arguments)]
+fn render_rtl_item(
+    ui: &mut Ui,
+    cache: &mut CommonMarkCache,
+    block: RtlBlock,
+    kind: &egui_commonmark_backend_extended::elements::ListMarkerKind,
+    depth: usize,
+    column_right: f32,
+    max_width: f32,
+    options: &CommonMarkOptions,
+) {
+    use egui_commonmark_backend_extended::elements::{
+        body_spaces_width, list_marker_width, paint_rtl_list_marker,
+    };
+    // Gap between the marker slot and the text, as `List::start_item` leaves.
+    const MARKER_GAP: f32 = 4.0;
+    // A left-to-right nested item sits inside its parent's content area, past
+    // the parent's marker slot and gap, then its own indentation spaces. A
+    // right-to-left parent reserves nothing on the left, so the whole step is
+    // taken here, from the right.
+    let marker = list_marker_width(ui);
+    let step = marker + MARKER_GAP + body_spaces_width(ui, options.indentation_spaces);
+    let slot_right =
+        column_right.min(ui.max_rect().right()) - step * depth.saturating_sub(1) as f32;
+    let slot_left = slot_right - marker;
+    let Some((galley, rect)) =
+        render_rtl_block(ui, cache, block, slot_left - MARKER_GAP, max_width)
+    else {
+        return;
+    };
+    let (Some(row), Some(section)) = (galley.rows.first(), galley.job.sections.first()) else {
+        return;
+    };
+    let Some(glyph) = row.glyphs.first() else {
+        return;
+    };
+    let baseline_y = rect.top() + row.pos.y + glyph.pos.y;
+    let format = section.format.clone();
+    let font = format.font_id.clone();
+    let reference = ui.fonts_mut(|fonts| {
+        fonts.layout_job(egui::text::LayoutJob::single_section("x".to_owned(), format))
+    });
+    let x_height = reference
+        .rows
+        .first()
+        .and_then(|row| row.glyphs.first())
+        .map_or(0.0, |glyph| glyph.uv_rect.size.y);
+    paint_rtl_list_marker(ui, slot_left, kind, baseline_y, x_height, font);
+}
+
+/// Whether `tag` opens inline content that can live inside an RTL galley, as
+/// opposed to a block that ends a list item's lead text.
+fn is_inline_tag(tag: &pulldown_cmark::Tag) -> bool {
+    matches!(
+        tag,
+        pulldown_cmark::Tag::Emphasis
+            | pulldown_cmark::Tag::Strong
+            | pulldown_cmark::Tag::Strikethrough
+            | pulldown_cmark::Tag::Superscript
+            | pulldown_cmark::Tag::Subscript
+            | pulldown_cmark::Tag::Link { .. }
+            | pulldown_cmark::Tag::Image { .. }
+    )
 }
 
 /// Measure a table cell's visible labels in their rendering order. The cell
@@ -1579,6 +1686,14 @@ pub struct CommonMarkViewerInternal {
     current_heading_rtl: bool,
     /// `Some` while inside a right-to-left paragraph.
     rtl_paragraph: Option<RtlBlock>,
+    /// The marker and depth of the right-to-left list item whose lead text is
+    /// being collected in `rtl_paragraph`.
+    rtl_item: Option<(
+        egui_commonmark_backend_extended::elements::ListMarkerKind,
+        usize,
+    )>,
+    /// Set for the `Tag::Item` about to start when it is right to left.
+    next_item_rtl: bool,
     /// Content-space Y of the first event rendered by the current slice.
     slice_start_y: f32,
     /// Screen-space Y of the root UI for the current full or sliced render.
@@ -1626,6 +1741,8 @@ impl CommonMarkViewerInternal {
             current_heading_links: Vec::new(),
             current_heading_rtl: false,
             rtl_paragraph: None,
+            rtl_item: None,
+            next_item_rtl: false,
             slice_start_y: 0.0,
             render_origin_y: 0.0,
             column_right: f32::INFINITY,
@@ -3047,6 +3164,24 @@ impl CommonMarkViewerInternal {
                                                                 // Otherwise egui uses that entire height as
                                                                 // the first text line's minimum height and
                                                                 // later inline widgets overflow the row.
+                                                                // A right-to-left cell (#108) collects its
+                                                                // text and draws it as one galley at the
+                                                                // cell's right edge.
+                                                                // The first cell of a row also carries the
+                                                                // row's (or head's) start event.
+                                                                let rtl = col.iter().find_map(|(e, span)| {
+                                                                    matches!(
+                                                                        e,
+                                                                        pulldown_cmark::Event::Start(
+                                                                            pulldown_cmark::Tag::TableCell
+                                                                        )
+                                                                    )
+                                                                    .then(|| cache.is_rtl_block(span.start))
+                                                                }) == Some(true);
+                                                                if rtl {
+                                                                    self.rtl_paragraph =
+                                                                        Some(RtlBlock::default());
+                                                                }
                                                                 ui.horizontal_wrapped(|ui| {
                                                                     for (e, src_span) in col {
                                                                         let tmp_start =
@@ -3076,6 +3211,17 @@ impl CommonMarkViewerInternal {
                                                                             tmp_start;
                                                                         self.line.should_end_newline =
                                                                             tmp_end;
+                                                                    }
+                                                                    if let Some(block) =
+                                                                        self.rtl_paragraph.take()
+                                                                    {
+                                                                        // The width the cell's labels wrap at.
+                                                                        let cell_right =
+                                                                            ui.cursor().left() + col_w;
+                                                                        render_rtl_block(
+                                                                            ui, cache, block,
+                                                                            cell_right, col_w,
+                                                                        );
                                                                     }
                                                                 });
                                                             });
@@ -3114,6 +3260,18 @@ impl CommonMarkViewerInternal {
                     pulldown_cmark::Tag::Paragraph | pulldown_cmark::Tag::Heading { .. }
                 ) && cache.is_rtl_block(src_span.start);
                 let is_heading = matches!(tag, pulldown_cmark::Tag::Heading { .. });
+                // A right-to-left item's lead text ends at its first nested
+                // block; the opening paragraph of a loose item is the lead.
+                let opens_lead = matches!(tag, pulldown_cmark::Tag::Paragraph)
+                    && self
+                        .rtl_paragraph
+                        .as_ref()
+                        .is_some_and(|block| block.texts.is_empty() && block.links.is_empty());
+                if self.rtl_item.is_some() && !is_inline_tag(&tag) && !opens_lead {
+                    self.finish_rtl_item(ui, cache, options, max_width);
+                }
+                self.next_item_rtl = matches!(tag, pulldown_cmark::Tag::Item)
+                    && cache.is_rtl_block(src_span.start);
                 self.start_tag(ui, tag, src_span.start, options);
                 if rtl {
                     if is_heading {
@@ -3390,6 +3548,30 @@ impl CommonMarkViewerInternal {
     /// Expand eligible emoji shortcodes, then preserve source-based search semantics.
     /// Draw a finished link, or, inside a heading, keep it for the heading's
     /// single inline render in `end_tag(Heading)`.
+    /// Draw the collected lead text of an open right-to-left list item, if any.
+    fn finish_rtl_item(
+        &mut self,
+        ui: &mut Ui,
+        cache: &mut CommonMarkCache,
+        options: &CommonMarkOptions,
+        max_width: f32,
+    ) {
+        let Some((kind, depth)) = self.rtl_item.take() else {
+            return;
+        };
+        let block = self.rtl_paragraph.take().unwrap_or_default();
+        render_rtl_item(
+            ui,
+            cache,
+            block,
+            &kind,
+            depth,
+            self.column_right,
+            max_width,
+            options,
+        );
+    }
+
     fn finish_link(&mut self, link: crate::Link, ui: &mut Ui, cache: &mut CommonMarkCache) {
         if self.text_style.heading.is_some() {
             self.current_heading_links
@@ -3591,7 +3773,11 @@ impl CommonMarkViewerInternal {
 
             pulldown_cmark::Tag::Item => {
                 self.is_list_item = true;
-                self.list.start_item(ui, options);
+                let rtl = std::mem::take(&mut self.next_item_rtl);
+                if let Some(kind) = self.list.start_item(ui, options, rtl) {
+                    self.rtl_item = Some((kind, self.list.depth()));
+                    self.rtl_paragraph = Some(RtlBlock::default());
+                }
             }
 
             pulldown_cmark::Tag::FootnoteDefinition(note) => {
@@ -3664,7 +3850,9 @@ impl CommonMarkViewerInternal {
     ) {
         match tag {
             pulldown_cmark::TagEnd::Paragraph => {
-                if let Some(block) = self.rtl_paragraph.take() {
+                if self.rtl_item.is_some() {
+                    self.finish_rtl_item(ui, cache, options, max_width);
+                } else if let Some(block) = self.rtl_paragraph.take() {
                     render_rtl_block(ui, cache, block, self.column_right, max_width);
                 }
                 self.line.try_insert_end(ui);
@@ -3793,6 +3981,7 @@ impl CommonMarkViewerInternal {
                 }
             }
             pulldown_cmark::TagEnd::Item => {
+                self.finish_rtl_item(ui, cache, options, max_width);
                 // The item is over without ever painting text — a code block,
                 // nested list or math block came first, say — so align its
                 // deferred marker with whatever line the content produced
@@ -4239,12 +4428,58 @@ mod tests {
     }
 
     #[test]
-    fn rtl_blocks_cover_headings_and_quotes_but_not_lists_or_tables() {
+    fn rtl_blocks_cover_headings_and_quotes_but_not_paragraphs_in_lists_or_footnotes() {
         assert_eq!(rtl_blocks("# כותרת\n"), vec!["# כותרת"]);
         assert_eq!(rtl_blocks("> שלום\n"), vec!["שלום"]);
         assert!(rtl_blocks("- שלום\n\n- עולם\n").is_empty());
         assert!(rtl_blocks("| א |\n|---|\n| ב |\n").is_empty());
         assert!(rtl_blocks("שלום[^1]\n\n[^1]: עולם\n").is_empty());
+    }
+
+    /// Source text of the list items and table cells `rtl_block_starts` marks.
+    fn rtl_items_and_cells(markdown: &str) -> Vec<String> {
+        let events: Vec<_> = Parser::new_ext(markdown, Options::all())
+            .into_offset_iter()
+            .collect();
+        let starts = rtl_block_starts(&events);
+        events
+            .iter()
+            .filter(|(event, span)| {
+                matches!(event, Event::Start(Tag::Item | Tag::TableCell))
+                    && starts.contains(&span.start)
+            })
+            .map(|(_, span)| markdown[span.clone()].trim().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn rtl_items_follow_their_lead_text() {
+        assert_eq!(
+            rtl_items_and_cells("- שלום\n- English\n"),
+            vec!["- שלום"]
+        );
+        // A loose item's lead is its first paragraph.
+        assert_eq!(
+            rtl_items_and_cells("- שלום\n\n- English\n"),
+            vec!["- שלום"]
+        );
+        // The lead ends at the nested list: the outer item is English, the
+        // nested one Hebrew.
+        assert_eq!(
+            rtl_items_and_cells("- English\n  - שלום\n"),
+            vec!["- שלום"]
+        );
+        // Task items keep their checkbox on the left.
+        assert!(rtl_items_and_cells("- [ ] שלום\n").is_empty());
+        assert!(rtl_items_and_cells("- שלום ![x](a.png)\n").is_empty());
+    }
+
+    #[test]
+    fn rtl_cells_are_judged_one_by_one() {
+        assert_eq!(
+            rtl_items_and_cells("| א | b |\n|---|---|\n| c | ב |\n"),
+            vec!["א", "ב"]
+        );
     }
 
     #[test]

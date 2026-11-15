@@ -626,7 +626,15 @@ impl List {
         self.items.len() == 1
     }
 
-    pub fn start_item(&mut self, ui: &mut egui::Ui, options: &CommonMarkOptions) {
+    /// Start a list item. A right-to-left item (#108) reserves nothing on the
+    /// left: its marker kind is returned and painted to the right of the
+    /// item's text once that is laid out (`render_rtl_item`).
+    pub fn start_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        options: &CommonMarkOptions,
+        rtl: bool,
+    ) -> Option<ListMarkerKind> {
         // A nested list starts a new item before the outer item has painted any
         // text; flush the outer marker here so it stays on its own row.
         self.flush_pending_markers(ui, None);
@@ -639,6 +647,18 @@ impl List {
         }
 
         let len = self.items.len();
+        if rtl {
+            let item = self.items.last_mut()?;
+            return Some(match &mut item.current_number {
+                Some(number) => {
+                    let kind = ListMarkerKind::Number(number.to_string());
+                    *number += 1;
+                    kind
+                }
+                None if len > 1 => ListMarkerKind::BulletHollow,
+                None => ListMarkerKind::Bullet,
+            });
+        }
         if let Some(item) = self.items.last_mut() {
             ui.label(" ".repeat((len - 1) * options.indentation_spaces));
 
@@ -674,6 +694,12 @@ impl List {
         }
 
         ui.add_space(4.0);
+        None
+    }
+
+    /// Nesting depth of the current item: 1 for a top-level list.
+    pub fn depth(&self) -> usize {
+        self.items.len()
     }
 
     /// Paint every reserved list marker that is still outstanding.
