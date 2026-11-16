@@ -84,6 +84,16 @@
   </provides>
 
   <releases>
+    <release version="0.3.7" date="2026-11-16">
+      <description>
+        <p>Fixes:</p>
+        <ul>
+          <li>The copy button on code blocks shows its icon again instead of an empty box</li>
+          <li>Table rows that mix text and inline math are no longer much taller than their content</li>
+          <li>Short inline code in narrow table columns is no longer split mid-word</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.6" date="2026-11-15">
       <description>
         <p>Right-to-left text:</p>

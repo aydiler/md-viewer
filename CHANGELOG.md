@@ -2,6 +2,21 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.7] - 2026-11-16
+
+The copy button on code blocks shows its icon again, and tables with inline math or short code lay out tighter.
+
+### Bug Fixes
+- **The code-block copy button is visible again (#245).** Since 0.3.6 it painted as an empty box on every system: egui 0.37 no longer loads the font that held its glyph (🗐) by default. It now uses 📋︎ in text presentation, which the bundled emoji font covers, so no system font is needed.
+- **Table rows that mix text and inline math are one row tall (#247).** A cell such as `rate $\gamma = 0.32$` reserved the height of the text plus every formula stacked below it, about three lines, and left a gap under the row. When the text and the rendered formulas fit side by side in the column, the row is now as tall as its tallest formula. Cells that wrap, contain display math or images, or whose formulas have not rendered yet keep the old, safe reservation.
+- **Short inline code stays whole in narrow table columns (#248).** Column minimums came only from the header's words, so a narrow column could split `lod_bias` or `budget_mb` mid-word. Inline code of up to 20 characters, in the header or the body, now sets the column's minimum width; longer code still wraps.
+
+### Documentation
+- **README and screenshots refreshed (#246, #249).** Stale claims corrected (binary and snap sizes, platforms, build dependencies, shortcuts), Edit mode, right-to-left text and the tab-bar toggle added, and every screenshot retaken against a neutral demo folder.
+
+### Internal
+- **The vendored renderer moves to 0.29.1**, carrying #245, #247 and #248.
+
 ## [0.3.6] - 2026-11-15
 
 Arabic and Hebrew documents read from the right, and Arabic letters join.
