@@ -1,6 +1,6 @@
 [package]
 name = "md-viewer"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 rust-version = "1.95"
 description = "Fast, lightweight markdown viewer with LaTeX math, mermaid diagrams, tabs, file explorer and live reload"
