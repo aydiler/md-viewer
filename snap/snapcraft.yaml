@@ -9,39 +9,47 @@ issues: https://github.com/aydiler/md-viewer/issues
 source-code: https://github.com/aydiler/md-viewer
 website: https://github.com/aydiler/md-viewer
 description: |
-  A fast, lightweight markdown viewer for Linux built with Rust and egui.
-  Designed for distraction-free reading with excellent typography and syntax highlighting.
+  A fast, lightweight markdown viewer built with Rust and egui. Designed for
+  distraction-free reading with excellent typography, syntax highlighting and
+  LaTeX math, from quick notes to scientific papers.
 
   Rendering:
-  - GitHub Flavored Markdown (tables, task lists, footnotes)
+  - GitHub Flavored Markdown (tables, task lists, footnotes, emoji shortcodes like :pushpin:)
+  - LaTeX math, inline and display, rendered via typst + mitex and aligned to the surrounding text
   - Syntax highlighting for 200+ languages
   - Mermaid diagrams (flowcharts, sequence diagrams) rendered natively, click to enlarge
-  - Math rendering (LaTeX via typst)
-  - Resizable table columns - drag dividers to fit content
+  - Tables fill the pane and re-fit when the window or a sidebar changes size; cell text wraps, and dividers can be dragged to override
   - HTML tables with proper cell padding
-  - Images and SVG support (PNG, JPEG, GIF, SVG, HTTP URLs) - click images to enlarge
-  - Unicode support with system font fallbacks (emojis, CJK, non-Latin scripts)
-  - 60 FPS rendering with viewport-based lazy rendering
-  - WCAG 2.1 compliant typography (1.5x line height)
+  - YAML frontmatter shown as a key/value table
+  - Images and SVG (PNG, JPEG, GIF, SVG, HTTP URLs), click to enlarge
+  - Right-to-left text: Arabic and Hebrew paragraphs, headings, lists and table cells are right-aligned, mixed-direction lines read in order
+  - Unicode: installed system fonts are picked per script for CJK and other non-Latin text; a monochrome emoji font is bundled
+  - Only the visible part of a long document is painted
+  - 1.5x line height for readability (WCAG 2.1)
 
   Navigation:
-  - Tab system for multiple documents (Ctrl+Click links to open in new tab)
-  - In-document search (Ctrl+F) with inline highlights and Enter/Shift+Enter to cycle
-  - File explorer sidebar with hierarchical directory tree
+  - Tabs for multiple documents (Ctrl+Click a link to open it in a new tab)
+  - In-document search (Ctrl+F) with inline highlights; Enter/Shift+Enter cycle matches
+  - File explorer sidebar, sorted by name or date; File > Open Folder sets its root
   - Outline sidebar with click-to-navigate table of contents
-  - Per-tab back/forward history (Alt+Left/Right)
-  - Internal links between markdown files
+  - Per-tab back/forward history (Alt+Left/Right) and internal links between markdown files
 
   View:
   - Dark and light themes (Ctrl+D)
   - Zoom 50%-300% (Ctrl++/-/0 or Ctrl+Scroll)
-  - Full-width content toggle (View menu) to use the entire content pane
+  - Full Width on by default; Ctrl+Shift+W switches to a reading-width column
+  - Formula size, fonts, highlight and link colours, and smooth text rendering in the View menu
+  - Tab bar can be hidden
   - Shift+Scroll over a wide table scrolls it horizontally
   - Live reload on file changes (enabled by default)
 
+  Editing:
+  - Switch a tab between Preview and Edit (Ctrl+E) and save with Ctrl+S
+
   Usability:
+  - Welcome page with Open File / Open Folder and recent files
   - Drag and drop files to open
-  - Native file dialogs
+  - Native file and folder dialogs
   - Session persistence (tabs, theme, zoom, sidebar state)
   - Native X11 and Wayland support
 

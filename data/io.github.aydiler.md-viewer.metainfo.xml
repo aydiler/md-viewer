@@ -9,20 +9,22 @@
   <description>
     <p>
       A fast, lightweight markdown viewer built with Rust and egui.
-      Designed for distraction-free reading with excellent typography
-      and syntax highlighting.
+      Designed for distraction-free reading with excellent typography,
+      syntax highlighting and LaTeX math, from quick notes to scientific papers.
     </p>
     <p>Features:</p>
     <ul>
-      <li>GitHub Flavored Markdown with syntax highlighting (200+ languages)</li>
-      <li>Tab system for multiple documents</li>
-      <li>File explorer sidebar</li>
-      <li>Outline / table-of-contents sidebar</li>
-      <li>Dark and light themes</li>
-      <li>Live reload on file changes</li>
-      <li>Session persistence</li>
-      <li>Native X11 and Wayland support</li>
-      <li>Mermaid diagrams, math, and image rendering</li>
+      <li>GitHub Flavored Markdown: tables, task lists, footnotes and emoji shortcodes</li>
+      <li>LaTeX math, inline and display, rendered via typst and mitex</li>
+      <li>Syntax highlighting for 200+ languages and native Mermaid diagrams</li>
+      <li>Tables that fill the pane and re-fit as the window or sidebars change size</li>
+      <li>YAML frontmatter shown as a key/value table; images and SVG, click to enlarge</li>
+      <li>Right-to-left text: Arabic and Hebrew blocks are right-aligned and mixed lines read in order</li>
+      <li>Tabs, in-document search, a file explorer and an outline sidebar</li>
+      <li>Dark and light themes, zoom, full-width or reading-width layout, font and colour choices</li>
+      <li>Edit mode with save, and live reload on file changes</li>
+      <li>Session persistence and a welcome page with recent files</li>
+      <li>Native X11 and Wayland support; Windows and macOS builds are also available</li>
     </ul>
   </description>
 

@@ -11,7 +11,7 @@ This document covers the **one-time setup** for each channel and the **per-relea
    - `syntax-highlighting`, `file-explorer`, `tabs`, `wayland`, `x11`
 
 2. **Add description**:
-   > Fast, lightweight markdown viewer for Linux with tabs, file explorer, and live reload
+   > Fast, lightweight markdown viewer with LaTeX math, mermaid diagrams, tabs, file explorer and live reload
 
 3. **Enable features**:
    - Releases
