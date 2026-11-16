@@ -69,7 +69,29 @@ build() {
         return 1
     fi
     echo "built ${snaps[0]}"
+    check_contents "${snaps[0]}"
     echo "snap=${snaps[0]}" >> "$GITHUB_OUTPUT"
+}
+
+# The app dlopens these at runtime, so snapcraft's link-time dependency
+# staging cannot see them (#55, devlog 099). Fail the build if one is missing.
+# libdbus-1.so.3 (rfd's portal dialog) is not listed: the core22 base has it.
+check_contents() {
+    local snap=$1 listing lib missing=0
+    if ! command -v unsquashfs >/dev/null; then
+        sudo apt-get install -y -q squashfs-tools
+    fi
+    listing=$(unsquashfs -l "$snap")
+    for lib in libxkbcommon-x11.so.0 libX11.so.6 libfontconfig.so.1; do
+        if grep -qE "/${lib//./\\.}\$" <<<"$listing"; then
+            echo "snap contains $lib"
+        else
+            echo "::error::snap is missing $lib, which the app dlopens at runtime"
+            missing=1
+        fi
+    done
+    echo "snap size: $(du -h "$snap" | cut -f1)"
+    return "$missing"
 }
 
 publish() {

@@ -7,15 +7,14 @@ arch=('x86_64')
 url="https://github.com/aydiler/md-viewer"
 license=('MIT')
 # Runtime deps are kept identical to md-viewer-git. ldd on the binary only
-# shows libc/libm/libgcc_s linked directly; everything else (xcb, xkbcommon,
-# openssl, gtk3, fontconfig, dbus) is dlopen'd at runtime by winit/rfd/zbus,
-# so ldd cannot validate the dep set. Match the source-build PKGBUILD verbatim.
+# shows libc/libm/libgcc_s linked directly; the rest is dlopen'd at runtime,
+# so ldd cannot validate the dep set: libxcb/libxkbcommon by winit,
+# fontconfig by the font loader, and libdbus (package dbus) by rfd's
+# xdg-desktop-portal file dialog. openssl and gtk3 are not used (devlog 099).
 depends=(
     'gcc-libs'
     'libxcb'
     'libxkbcommon'
-    'openssl'
-    'gtk3'
     'fontconfig'
     'dbus'
 )
