@@ -86,6 +86,11 @@
   </provides>
 
   <releases>
+    <release version="0.3.8" date="2026-11-16">
+      <description>
+        <p>Refreshed store and software-center descriptions. No change to the app.</p>
+      </description>
+    </release>
     <release version="0.3.7" date="2026-11-16">
       <description>
         <p>Fixes:</p>

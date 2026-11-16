@@ -2,6 +2,13 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [0.3.8] - 2026-11-16
+
+No change to the app: this release carries the refreshed package descriptions to the stores.
+
+### Documentation
+- **Store descriptions refreshed (#251).** The crates.io, AUR and Snap Store descriptions and the software-center (AppStream) description now list LaTeX math, Mermaid diagrams, right-to-left text, frontmatter, Edit mode, Open Folder and the welcome page, and drop claims that no longer held (resizable table columns, "60 FPS", Full Width as an opt-in toggle).
+
 ## [0.3.7] - 2026-11-16
 
 The copy button on code blocks shows its icon again, and tables with inline math or short code lay out tighter.
