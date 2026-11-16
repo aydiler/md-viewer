@@ -9,8 +9,6 @@ depends=(
     'gcc-libs'
     'libxcb'
     'libxkbcommon'
-    'openssl'
-    'gtk3'
     'fontconfig'
     'dbus'
 )

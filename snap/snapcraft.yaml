@@ -92,10 +92,7 @@ parts:
       - libxcb-shape0-dev
       - libxcb-xfixes0-dev
       - libxkbcommon-dev
-      - libssl-dev
-      - libgtk-3-dev
       - libfontconfig1-dev
-      - libdbus-1-dev
     stage-packages:
       - libxcb1
       - libxkbcommon0
@@ -106,8 +103,8 @@ parts:
       - libx11-data
       - xkb-data
       - libfontconfig1
-      - libgtk-3-0
-      - libglib2.0-0
+      # No gtk/glib: the app never loads them. rfd's portal file dialog
+      # dlopens libdbus-1.so.3, which the core22 base already provides.
       - libgl1
       - libwayland-client0
       - libwayland-egl1

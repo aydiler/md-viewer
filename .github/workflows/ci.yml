@@ -22,8 +22,8 @@ jobs:
         run: |
           sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
           sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
-            libgtk-3-dev libfontconfig1-dev libdbus-1-dev
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libfontconfig1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,8 +60,8 @@ jobs:
         run: |
           sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
           sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
-            libgtk-3-dev libfontconfig1-dev libdbus-1-dev
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libfontconfig1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -134,8 +134,8 @@ jobs:
         run: |
           sudo apt-get update --error-on=any -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
           sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 clang pkg-config libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
-            libgtk-3-dev libfontconfig1-dev libdbus-1-dev
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libfontconfig1-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
