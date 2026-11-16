@@ -72,7 +72,7 @@ A fast, lightweight markdown viewer for Linux, with Windows and macOS builds too
 
 ![The View menu](screenshots/view-menu.png)
 
-*The same document on both themes — syntax highlighting, mermaid diagrams and both sidebars*
+*The same document on both themes — a mermaid flowchart, highlighted code and both sidebars*
 
 | Dark | Light |
 |---|---|
