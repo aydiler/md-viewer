@@ -394,7 +394,7 @@ fn invalidation_mid_measurement_restarts_cleanly() {
 /// split point past it, and without the cap at the frontier the slice would
 /// then run to the end of the document.
 #[test]
-fn a_tall_block_at_the_frontier_does_not_paint_the_rest_of_the_document() {
+fn a_tall_block_at_the_frontier_does_not_lay_out_the_rest_of_the_document() {
     let mut md = String::new();
     for i in 1..=30 {
         md.push_str(&format!("Opening paragraph {i}, short.\n\n"));
