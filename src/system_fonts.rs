@@ -566,6 +566,7 @@ fn install_regular_fonts(
     locale: Option<&str>,
     preferred_family: Option<&str>,
     preset_body_families: Option<&'static [&'static str]>,
+    include_fallbacks: bool,
 ) -> Vec<InstalledFont> {
     let mut installed = Vec::new();
     let mut loaded_faces = HashSet::new();
@@ -661,6 +662,10 @@ fn install_regular_fonts(
                 true,
             );
         }
+    }
+
+    if !include_fallbacks {
+        return installed;
     }
 
     for spec in SCRIPT_FALLBACKS {
@@ -894,8 +899,13 @@ const COLOR_EMOJI_FONT_PATHS: &[&str] = &[
 /// U+FE0E and symbols such as ▶ ⚠ ✔, to a face without color glyphs
 /// (`crates/epaint/PATCH.md`). The crates.io build, on stock epaint, still
 /// draws color emoji but without that presentation handling.
-fn install_emoji_fonts(definitions: &mut FontDefinitions) {
-    for path in COLOR_EMOJI_FONT_PATHS {
+fn install_emoji_fonts(definitions: &mut FontDefinitions, include_color: bool) {
+    let color_paths: &[&str] = if include_color {
+        COLOR_EMOJI_FONT_PATHS
+    } else {
+        &[]
+    };
+    for path in color_paths {
         match std::fs::read(path) {
             Ok(bytes) => {
                 definitions
@@ -929,63 +939,174 @@ fn install_emoji_fonts(definitions: &mut FontDefinitions) {
     }
 }
 
+/// Which faces [`FontLoader::definitions`] installs.
+///
+/// Loading every script and emoji fallback took about 180 ms of each launch
+/// (devlog 100), most of it the CJK face, whatever the document contained.
+/// `Base` is what a document in the primary face's own scripts needs for its
+/// first frame; `Full` is the complete set, built on a background thread when
+/// the startup text does not need it right away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FontScope {
+    /// Primary sans with its bold, the preset's mono face, and egui's bundled
+    /// faces plus the bundled monochrome emoji face.
+    Base,
+    /// `Base` plus every script and symbol fallback and the system color emoji.
+    Full,
+}
+
+/// Builds font definitions from the platform's font collection.
+///
+/// Holds the fontique collection so that building `Base` and then `Full` in
+/// one place does not enumerate the system fonts twice.
+pub(crate) struct FontLoader {
+    collection: Collection,
+    source_cache: SourceCache,
+    locale: Option<String>,
+}
+
+impl FontLoader {
+    pub(crate) fn new() -> Self {
+        Self {
+            collection: Collection::new(CollectionOptions::default()),
+            source_cache: SourceCache::default(),
+            locale: sys_locale::get_locale(),
+        }
+    }
+
+    /// Font definitions led by the user's picked family (font picker) or the
+    /// preset's emulated stack.
+    pub(crate) fn definitions(
+        &mut self,
+        preferred_family: Option<&str>,
+        preset: FontPreset,
+        scope: FontScope,
+    ) -> FontDefinitions {
+        let started = std::time::Instant::now();
+        let full = scope == FontScope::Full;
+        let mut definitions = FontDefinitions::default();
+        let defaults = definitions
+            .families
+            .get(&FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        let installed = install_regular_fonts(
+            &mut self.collection,
+            &mut self.source_cache,
+            &mut definitions,
+            self.locale.as_deref(),
+            preferred_family,
+            preset.body_families(),
+            full,
+        );
+        let bold_count = install_strong_font_family(
+            &mut self.collection,
+            &mut self.source_cache,
+            &mut definitions,
+            &installed,
+            &defaults,
+        );
+        let preset_mono_families = preset.mono_families();
+        let preset_mono = if preset_mono_families.is_empty() {
+            false
+        } else {
+            install_preset_mono_font(
+                &mut self.collection,
+                &mut self.source_cache,
+                &mut definitions,
+                preset_mono_families,
+            )
+        };
+        install_emoji_fonts(&mut definitions, full);
+        if installed.is_empty() {
+            log::warn!("No suitable system font fallbacks found; using egui defaults.");
+        } else {
+            log::info!(
+                "Selected {} font faces ({scope:?}) for locale {:?} in {:.1} ms",
+                installed.len() + bold_count + usize::from(preset_mono),
+                self.locale,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        definitions
+    }
+}
+
+/// Install built definitions and the text-size class.
+pub(crate) fn install_fonts(
+    ctx: &egui::Context,
+    definitions: FontDefinitions,
+    size: TextSizeClass,
+) {
+    ctx.set_fonts(definitions);
+    apply_text_size_class(ctx, size);
+}
+
+/// Build and install the full font set. Used for runtime changes of family,
+/// preset or size, where every fallback is wanted at once.
 pub(crate) fn setup_fonts(
     ctx: &egui::Context,
     preferred_family: Option<&str>,
     preset: FontPreset,
     size: TextSizeClass,
 ) {
-    let started = std::time::Instant::now();
-    let mut collection = Collection::new(CollectionOptions::default());
-    let family_count = collection.family_names().count();
-    let mut source_cache = SourceCache::default();
-    let locale = sys_locale::get_locale();
-    let mut definitions = FontDefinitions::default();
-    let defaults = definitions
-        .families
-        .get(&FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-    let installed = install_regular_fonts(
-        &mut collection,
-        &mut source_cache,
-        &mut definitions,
-        locale.as_deref(),
-        preferred_family,
-        preset.body_families(),
-    );
-    let bold_count = install_strong_font_family(
-        &mut collection,
-        &mut source_cache,
-        &mut definitions,
-        &installed,
-        &defaults,
-    );
-    let preset_mono_families = preset.mono_families();
-    let preset_mono = if preset_mono_families.is_empty() {
-        false
-    } else {
-        install_preset_mono_font(
-            &mut collection,
-            &mut source_cache,
-            &mut definitions,
-            preset_mono_families,
-        )
-    };
-    install_emoji_fonts(&mut definitions);
-    if installed.is_empty() {
-        log::warn!("No suitable system font fallbacks found; using egui defaults.");
-    } else {
-        log::info!(
-            "Selected {} font faces from {} families for locale {:?} in {:.1} ms",
-            installed.len() + bold_count + usize::from(preset_mono),
-            family_count,
-            locale,
-            started.elapsed().as_secs_f64() * 1000.0
-        );
+    let definitions = FontLoader::new().definitions(preferred_family, preset, FontScope::Full);
+    install_fonts(ctx, definitions, size);
+}
+
+/// Faces of a `Base` set that count as covering a character: the text faces
+/// only. Emoji faces are left out on purpose: the full set puts the system
+/// color emoji ahead of them, so a character only they cover would change
+/// face once the full set lands.
+const BASE_TEXT_FACES: &[&str] = &[
+    "SystemSans",
+    "SystemSansBold",
+    "PresetMono",
+    "Ubuntu-Light",
+    "Hack",
+];
+
+/// Whether every character in `texts` has a glyph in one of the base set's
+/// text faces.
+///
+/// When it does, the base set draws these texts exactly as the full set
+/// would: fallbacks are appended after these faces, so they never take over a
+/// character the base faces already cover. Emoji-presentation characters are
+/// the exception (the color face takes them), so they always count as
+/// uncovered. ASCII is skipped (every primary
+/// face covers it, and documents are mostly ASCII), as are control characters
+/// and the byte-order mark, which no face draws.
+pub(crate) fn base_covers<'a>(
+    definitions: &FontDefinitions,
+    texts: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let faces: Vec<ttf_parser::Face<'_>> = BASE_TEXT_FACES
+        .iter()
+        .filter_map(|key| definitions.font_data.get(*key))
+        .filter_map(|data| ttf_parser::Face::parse(data.bytes(), data.index).ok())
+        .collect();
+    // Stops at the first uncovered character: a document that needs the
+    // fallbacks usually shows one early, and the answer is all that is used.
+    let mut checked: HashSet<char> = HashSet::new();
+    let mut utf8 = [0u8; 4];
+    for text in texts {
+        for c in text.chars() {
+            if c.is_ascii() || c.is_control() || c == '\u{feff}' || !checked.insert(c) {
+                continue;
+            }
+            // An emoji-presentation character (or the U+FE0F selector) is
+            // drawn by the color emoji face once the full set is in, even
+            // when a base text face has a glyph for it (DejaVu Sans has
+            // 😀), so the base set would draw it differently.
+            if c == '\u{fe0f}'
+                || epaint::text::has_emoji_presentation(c.encode_utf8(&mut utf8))
+                || !faces.iter().any(|face| face.glyph_index(c).is_some())
+            {
+                return false;
+            }
+        }
     }
-    ctx.set_fonts(definitions);
-    apply_text_size_class(ctx, size);
+    true
 }
 
 /// Enumerate the family names the font picker should offer: one canonical
@@ -1047,6 +1168,197 @@ fn pickable_family_names(
 mod tests {
     use super::*;
 
+    /// Today's full set built the way `setup_fonts` built it before the
+    /// Base/Full split (devlog 100): every helper with fallbacks and color
+    /// emoji on.
+    fn reference_full_definitions(preset: FontPreset) -> FontDefinitions {
+        let mut collection = Collection::new(CollectionOptions::default());
+        let mut source_cache = SourceCache::default();
+        let locale = sys_locale::get_locale();
+        let mut definitions = FontDefinitions::default();
+        let defaults = definitions
+            .families
+            .get(&FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        let installed = install_regular_fonts(
+            &mut collection,
+            &mut source_cache,
+            &mut definitions,
+            locale.as_deref(),
+            None,
+            preset.body_families(),
+            true,
+        );
+        install_strong_font_family(
+            &mut collection,
+            &mut source_cache,
+            &mut definitions,
+            &installed,
+            &defaults,
+        );
+        let mono = preset.mono_families();
+        if !mono.is_empty() {
+            install_preset_mono_font(&mut collection, &mut source_cache, &mut definitions, mono);
+        }
+        install_emoji_fonts(&mut definitions, true);
+        definitions
+    }
+
+    fn sorted_keys(definitions: &FontDefinitions) -> Vec<String> {
+        let mut keys: Vec<String> = definitions.font_data.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn full_scope_matches_the_set_installed_before_the_split() {
+        for preset in [FontPreset::default(), FontPreset::Github] {
+            let reference = reference_full_definitions(preset);
+            let full = FontLoader::new().definitions(None, preset, FontScope::Full);
+            assert_eq!(sorted_keys(&full), sorted_keys(&reference), "{preset:?}");
+            for family in [
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+                FontFamily::Name(STRONG_FONT_FAMILY.into()),
+            ] {
+                assert_eq!(
+                    full.families.get(&family),
+                    reference.families.get(&family),
+                    "{preset:?} {family:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn base_scope_leaves_out_script_symbol_and_color_emoji_faces() {
+        let base = FontLoader::new().definitions(None, FontPreset::default(), FontScope::Base);
+        if !base.font_data.contains_key("SystemSans") {
+            return; // no system fonts available in this environment
+        }
+        assert!(
+            base.font_data.contains_key("NotoEmoji"),
+            "bundled emoji face kept"
+        );
+        for key in base.font_data.keys() {
+            assert!(
+                !key.contains("Fallback") && key != "ColorEmoji",
+                "base set loaded deferred face {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_covers_latin_text_and_not_other_scripts() {
+        let base = FontLoader::new().definitions(None, FontPreset::default(), FontScope::Base);
+        if !base.font_data.contains_key("SystemSans") {
+            return; // no system fonts available in this environment
+        }
+        assert!(base_covers(
+            &base,
+            ["# Title\n\nPlain prose, `code` and **bold**."]
+        ));
+        assert!(base_covers(
+            &base,
+            ["café über Straße", "\u{feff}BOM-led file"]
+        ));
+        assert!(base_covers(&base, std::iter::empty::<&str>()));
+        // No Latin UI sans covers CJK or emoji, on any platform CI runs on.
+        for other in ["中文", "😀", "\u{2764}\u{fe0f}"] {
+            assert!(
+                !base_covers(&base, ["ASCII first ", other]),
+                "{other} must take the full-set path"
+            );
+        }
+        // Whether the primary face covers these depends on the platform:
+        // Noto Sans (Arch) does not cover Arabic, DejaVu Sans (Ubuntu) and
+        // Segoe UI (Windows) do. Where it does, the full set draws them with
+        // that same face, so skipping the fallbacks is right. Check against
+        // an independent per-face lookup.
+        for other in ["عربي", "עברית", "ภาษาไทย", "नमस्ते"] {
+            let faces: Vec<ttf_parser::Face<'_>> = BASE_TEXT_FACES
+                .iter()
+                .filter_map(|key| base.font_data.get(*key))
+                .filter_map(|data| ttf_parser::Face::parse(data.bytes(), data.index).ok())
+                .collect();
+            let expected = other
+                .chars()
+                .all(|c| faces.iter().any(|face| face.glyph_index(c).is_some()));
+            assert_eq!(
+                base_covers(&base, ["ASCII first ", other]),
+                expected,
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn emoji_presentation_is_uncovered_even_when_a_base_face_has_the_glyph() {
+        // Some primary sans faces carry emoji glyphs (DejaVu Sans has 😀).
+        // The full set still draws emoji-presentation characters with the
+        // color face, so they must send startup down the full-set path.
+        // The bundled monochrome emoji face stands in for such a primary.
+        let mut definitions = FontDefinitions::default();
+        definitions.font_data.insert(
+            "SystemSans".to_owned(),
+            FontData::from_static(EMOJI_FONT_BYTES).into(),
+        );
+        assert!(!base_covers(&definitions, ["😀"]));
+        assert!(!base_covers(&definitions, ["\u{2764}\u{fe0f}"]));
+        // Text presentation stays with the text face, in both sets.
+        assert!(base_covers(&definitions, ["\u{2600}"]));
+    }
+
+    #[test]
+    fn chrome_symbols_render_with_the_base_set() {
+        // Non-ASCII characters drawn by the app's own chrome (menu labels,
+        // tooltips) that the base set covers. On a base-set startup they must not wait
+        // for the background fallbacks. Any base face counts here, emoji
+        // faces included: chrome does not depend on which face wins.
+        let base = FontLoader::new().definitions(None, FontPreset::default(), FontScope::Base);
+        let faces: Vec<ttf_parser::Face<'_>> = base
+            .font_data
+            .values()
+            .filter_map(|data| ttf_parser::Face::parse(data.bytes(), data.index).ok())
+            .collect();
+        for c in "→—☀".chars() {
+            assert!(
+                faces.iter().any(|face| face.glyph_index(c).is_some()),
+                "chrome glyph {c} (U+{:04X}) missing from the base set",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn view_menu_symbols_come_from_the_full_set() {
+        // The View menu's "✓" (U+2713) and "☾" (U+263E) are in neither the
+        // usual primary sans nor egui's bundled faces; the full set's symbol
+        // fallback draws them. Loading that fallback up front costs ~40 ms per
+        // launch, so it stays deferred: the menu opened before the full set
+        // lands (~150 ms after the first frame) shows them as boxes for that
+        // moment (devlog 100). This pins that the full set covers them.
+        let full = FontLoader::new().definitions(None, FontPreset::default(), FontScope::Full);
+        // Only where a symbol fallback was installed: without one (Windows
+        // CI) nothing draws these, before or after the split.
+        if !full.font_data.contains_key("SystemSymbolFallback") {
+            return;
+        }
+        let faces: Vec<ttf_parser::Face<'_>> = full
+            .font_data
+            .values()
+            .filter_map(|data| ttf_parser::Face::parse(data.bytes(), data.index).ok())
+            .collect();
+        for c in "✓☾".chars() {
+            assert!(
+                faces.iter().any(|face| face.glyph_index(c).is_some()),
+                "no face in the full set draws {c} (U+{:04X})",
+                c as u32
+            );
+        }
+    }
+
     #[test]
     fn reported_scripts_use_full_coverage_samples() {
         let sample = |script| {
@@ -1107,6 +1419,7 @@ mod tests {
             Some("en-US"),
             None,
             None,
+            true,
         );
         for key in ["SystemThaiFallback", "SystemHebrewFallback"] {
             let font = installed
@@ -1167,6 +1480,7 @@ mod tests {
             None,
             Some("Definitely Not An Installed Font Name 12345"),
             None,
+            true,
         );
         assert!(
             installed.iter().any(|f| f.primary),
@@ -1192,6 +1506,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         );
         let Some(baseline_primary) = baseline.iter().find(|f| f.primary) else {
             return; // no system fonts available in this environment
@@ -1206,6 +1521,7 @@ mod tests {
             None,
             Some(&family_name),
             None,
+            true,
         );
         let primary = installed
             .iter()
@@ -1344,7 +1660,7 @@ mod tests {
     #[test]
     fn bundled_emoji_face_is_always_registered_last() {
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         assert!(
             definitions.font_data.contains_key("NotoEmoji"),
             "bundled emoji face missing from font_data"
@@ -1363,7 +1679,7 @@ mod tests {
     #[test]
     fn bundled_emoji_face_alone_renders_doc_emoji() {
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         definitions.font_data.retain(|k, _| k == "NotoEmoji");
         *definitions
             .families
@@ -1416,7 +1732,7 @@ mod tests {
     #[test]
     fn code_block_copy_icons_render_without_system_fonts() {
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         // Mirror a machine with no system fonts, as on CI: drop a colour
         // emoji face the host may have contributed.
         definitions.font_data.remove("ColorEmoji");
@@ -1450,7 +1766,7 @@ mod tests {
         // Build the same definitions setup_fonts() would install: egui
         // defaults + the bundled monochrome emoji face appended last.
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         // The color-glyph check needs the system color emoji font, which only
         // the Linux paths in COLOR_EMOJI_FONT_PATHS provide; where it is
         // absent (e.g. macOS) the fallback asserts above still ran, and the
@@ -1481,7 +1797,7 @@ mod tests {
         });
         // Isolate which individual face supplies each glyph: one font per chain.
         let mut with_ours = FontDefinitions::default();
-        install_emoji_fonts(&mut with_ours);
+        install_emoji_fonts(&mut with_ours, true);
         // egui 0.37's defaults no longer bundle NotoEmoji-Regular (only with
         // epaint's `monochrome_emoji_fonts`), so only our bundled copy is
         // checked here.
@@ -1640,7 +1956,7 @@ mod tests {
     fn color_emoji_face_never_claims_ui_symbols() {
         // The real chain the app installs: egui defaults, then the emoji faces.
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         assert!(
             definitions.font_data.contains_key("ColorEmoji"),
             "no system color emoji font; the test would prove nothing"
@@ -1688,7 +2004,7 @@ mod tests {
     #[ignore = "requires installed system fonts"]
     fn vs16_requests_the_color_face_for_text_default_characters() {
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         assert!(
             definitions.font_data.contains_key("ColorEmoji"),
             "no system NotoColorEmoji.ttf; the test would prove nothing"
@@ -1730,7 +2046,7 @@ mod tests {
     #[ignore = "requires installed system fonts"]
     fn fe0e_requests_a_text_face_and_zwj_takes_no_space() {
         let mut definitions = FontDefinitions::default();
-        install_emoji_fonts(&mut definitions);
+        install_emoji_fonts(&mut definitions, true);
         assert!(
             definitions.font_data.contains_key("ColorEmoji"),
             "no system NotoColorEmoji.ttf; the test would prove nothing"
@@ -1854,6 +2170,7 @@ mod tests {
             None,
             None,
             FontPreset::Github.body_families(),
+            true,
         );
         let Some(primary) = installed.iter().find(|f| f.primary) else {
             return; // no system fonts available in this environment

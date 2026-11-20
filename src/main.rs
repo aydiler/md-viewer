@@ -23,7 +23,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 mod system_fonts;
-use system_fonts::{scan_pickable_font_families, setup_fonts, FontPreset, TextSizeClass};
+use system_fonts::{
+    base_covers, install_fonts, scan_pickable_font_families, setup_fonts, FontLoader, FontPreset,
+    FontScope, TextSizeClass,
+};
 
 #[cfg(feature = "mcp")]
 use egui_mcp_bridge::{McpBridge, McpUiExt};
@@ -2317,6 +2320,11 @@ struct MarkdownApp {
     // Mirrors the font setup inputs (picked family, preset, size class): only
     // reload fonts when this tuple changes.
     last_applied_font_config: Option<(Option<String>, FontPreset, TextSizeClass)>,
+    // Full font set (every script and emoji fallback) being built off the UI
+    // thread after a startup that only needed the base set (devlog 100). The
+    // config is the one it was built for; a result for an older config is
+    // dropped.
+    pending_full_fonts: Option<Receiver<(FontConfig, egui::FontDefinitions)>>,
     show_font_dialog: bool,
     // Transient UI-only search text for the font picker (not persisted).
     font_filter: String,
@@ -2386,6 +2394,9 @@ struct MarkdownApp {
     mcp_bridge: McpBridge,
 }
 
+/// The inputs of a font setup: picked family, preset, size class.
+type FontConfig = (Option<String>, FontPreset, TextSizeClass);
+
 impl MarkdownApp {
     fn new(cc: &eframe::CreationContext<'_>, file: Option<PathBuf>, watch: bool) -> Self {
         // Load persisted state (needed before font setup, which reads the
@@ -2398,15 +2409,18 @@ impl MarkdownApp {
         let font_preset = persisted.font_preset.unwrap_or_default();
         let text_size_class = persisted.text_size_class.unwrap_or_default();
 
-        // Setup fonts with system font fallbacks for Unicode support, led by
-        // the user's picked family (font picker) or the preset's emulated
-        // stack; the text-size class is shared by every preset.
-        setup_fonts(
-            &cc.egui_ctx,
+        // Install the base font set: the user's picked family (font picker)
+        // or the preset's emulated stack, with its bold and mono faces. The
+        // script and emoji fallbacks are added at the end of `new`, either
+        // right away when the startup text needs them or on a background
+        // thread (devlog 100).
+        let mut font_loader = FontLoader::new();
+        let base_fonts = font_loader.definitions(
             selected_font_family.as_deref(),
             font_preset,
-            text_size_class,
+            FontScope::Base,
         );
+        install_fonts(&cc.egui_ctx, base_fonts.clone(), text_size_class);
 
         // Scan the picker's family list off the UI thread: probing every
         // family's Latin coverage takes ~0.5s on a stock Arch system (see
@@ -2603,8 +2617,9 @@ impl MarkdownApp {
             link_color,
             last_applied_link_color: link_color,
             show_color_settings_dialog: false,
-            // Already applied above via setup_fonts(); last_applied starts in
-            // sync so update() doesn't redundantly reload fonts on frame 1.
+            // Already applied in `new` (base set, then the full set now or
+            // from `pending_full_fonts`); last_applied starts in sync so
+            // update() doesn't redundantly reload fonts on frame 1.
             last_applied_font_config: Some((
                 selected_font_family.clone(),
                 font_preset,
@@ -2614,6 +2629,7 @@ impl MarkdownApp {
             available_font_families: Vec::new(),
             available_font_families_lower: Vec::new(),
             pending_font_family_scan,
+            pending_full_fonts: None,
             show_font_dialog: false,
             font_filter: String::new(),
             smooth_text_rendering,
@@ -2665,7 +2681,80 @@ impl MarkdownApp {
             app.start_watching();
         }
 
+        app.finish_startup_fonts(&cc.egui_ctx, font_loader, &base_fonts);
+
         app
+    }
+
+    /// Text the first frames can draw: the active document, tab titles and
+    /// paths, and the recent-files list. The explorer tree is scanned
+    /// asynchronously and is not available yet; its names are covered once
+    /// the full font set lands, a few hundred milliseconds in.
+    fn startup_texts(&self) -> Vec<std::borrow::Cow<'_, str>> {
+        let mut texts: Vec<std::borrow::Cow<'_, str>> = Vec::new();
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            texts.push(tab.content.as_str().into());
+        }
+        for tab in &self.tabs {
+            texts.push(tab.path.to_string_lossy());
+        }
+        for entry in &self.recent_files {
+            texts.push(entry.path.to_string_lossy());
+        }
+        texts
+    }
+
+    /// Complete the font setup `new` started with the base set.
+    ///
+    /// If the startup text has a character the base faces lack, install the
+    /// full set now, so the first frame draws it (the behaviour before
+    /// devlog 100). Otherwise build the full set on a background thread and
+    /// let `update` install it.
+    fn finish_startup_fonts(
+        &mut self,
+        ctx: &egui::Context,
+        mut font_loader: FontLoader,
+        base_fonts: &egui::FontDefinitions,
+    ) {
+        let config: FontConfig = (
+            self.selected_font_family.clone(),
+            self.font_preset,
+            self.text_size_class,
+        );
+        let covered = {
+            let texts = self.startup_texts();
+            base_covers(base_fonts, texts.iter().map(|t| t.as_ref()))
+        };
+        if !covered {
+            log::info!("Startup text needs fallback fonts; installing the full set now");
+            let full = font_loader.definitions(config.0.as_deref(), config.1, FontScope::Full);
+            install_fonts(ctx, full, config.2);
+            return;
+        }
+        drop(font_loader);
+        log::info!(
+            "Startup text is covered by the base fonts; loading fallbacks in the background"
+        );
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("font-fallbacks".to_owned())
+            .spawn(move || {
+                let full =
+                    FontLoader::new().definitions(config.0.as_deref(), config.1, FontScope::Full);
+                let _ = tx.send((config, full));
+            })
+            .is_ok();
+        if spawned {
+            self.pending_full_fonts = Some(rx);
+        } else {
+            // No thread: build it here, as before devlog 100.
+            let full = FontLoader::new().definitions(
+                self.selected_font_family.as_deref(),
+                self.font_preset,
+                FontScope::Full,
+            );
+            install_fonts(ctx, full, self.text_size_class);
+        }
     }
 
     fn window_title(&self) -> String {
@@ -5310,6 +5399,24 @@ impl eframe::App for MarkdownApp {
                     // panicked) — stop polling, keep whatever list we have.
                     self.pending_font_family_scan = None;
                 }
+            }
+        }
+
+        // Install the full font set built after a base-set startup, unless the
+        // font config changed meanwhile (that change already installed a
+        // full set synchronously below, and this result is stale).
+        if let Some(rx) = &self.pending_full_fonts {
+            match rx.try_recv() {
+                Ok((config, definitions)) => {
+                    self.pending_full_fonts = None;
+                    if self.last_applied_font_config.as_ref() == Some(&config) {
+                        log::info!("Installing the background-built full font set");
+                        install_fonts(ctx, definitions, config.2);
+                        ctx.request_repaint();
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.pending_full_fonts = None,
             }
         }
 

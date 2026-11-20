@@ -507,6 +507,12 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 **Result:** CPU drops from 500%+ to ~220%
 **Files:** `src/main.rs`
 
+### The egui MCP bridge does not build against egui 0.37
+**Context:** Devlog 100 wanted to type into the find bar via `egui_type` after enabling the `mcp` feature.
+**Problem:** `egui-mcp-bridge` (path dependency, commented out in `Cargo.toml`) is built against an older egui. With the feature on, every `register_widget` call fails with `expected egui::response::Response, found egui::Response`.
+**Workaround:** drive the behaviour without input. For "text that appears after startup renders", rewrite the open file and let live reload show the new text, then screenshot with `import -window` on Xvfb. Revert `Cargo.toml` and `Cargo.lock` after trying the feature.
+**Files:** `Cargo.toml`, `docs/devlog/100-lazy-fallback-fonts.md`
+
 ### "Connection reset by peer" during egui_launch
 **Context:** Bridge logs errors during MCP connection polling
 **Problem:** `egui_launch` polls every 200ms to check if bridge is ready, connecting then disconnecting
@@ -1450,6 +1456,13 @@ Poll `systemctl --user is-active <unit>`; read the verdict from the log and `Exe
 **Third trap, 2026-11-14:** never run two copies of the *same* guard at once, even on different `MDV_DISPLAY`s. Each script uses a fixed `TAG` (`visreg`, `scrollreg`) for its profile, frame and screenshot paths under `/tmp`, so a branch run and a control run started together read each other's captures. Both reported PASS with identical numbers, which is what gave it away. Run them one after another in a single unit.
 **General lesson:** a long-running verification must be detached from whatever invoked it, or its result is a function of the caller's lifetime rather than of the code under test. And when a guard produces no output, the correct reading is "did not run", never "passed" and never "failed".
 **Files:** `scripts/scroll-regression.sh`, `scripts/visual-regression.sh` (both now carry this in their usage header)
+
+### Startup timings on a shared machine: compare phases, interleave builds
+**Context:** Measuring devlog 100 (lazy fallback fonts) against main on a desktop with a load average of 16–40 from unrelated jobs.
+**Problem:** the total from launch to first content frame moved by ±300 ms between runs of the *same* binary. Almost all of that was window and GL context creation before `MarkdownApp::new` (71–509 ms on llvmpipe under load), which the change does not touch. Read as totals, the branch looked 325 ms slower on the README, and the comparison was noise.
+**Fix:** stamp phases from a process-start `Instant` (`main`, `MarkdownApp::new` start and end, first frame, first content frame) and compare only the phases the change can affect. Run the two builds alternately, run by run, in one detached unit, so load drifts hit both equally. Report the fastest run beside the median. The fastest is the closest to an idle machine.
+**Cold cache without root:** `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` on the binary, the document and `/usr/share/fonts/**` evicts them; check it worked by timing one read before and after.
+**Files:** `docs/devlog/100-lazy-fallback-fonts.md`
 
 ### A scroll-regression fixture only proves anything if the sampling is fine enough to land in the failure window
 **Context:** Issue #121 — scrolling the wrench `asset_reference.md` intermittently painted an empty document pane. Writing `scripts/scroll-regression.sh` to guard the fix.
