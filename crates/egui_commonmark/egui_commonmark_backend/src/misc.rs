@@ -942,8 +942,36 @@ fn fix_double_escaped_xml_entities(svg: &str) -> String {
         .replace("&amp;apos;", "&apos;")
 }
 
+/// One pixel of a diagram rendered for a dark page (#257).
+///
+/// merman draws diagrams with mermaid's light palette, and its dark theme sets
+/// only a handful of variables, so most diagram types would come out half
+/// dark. Instead the light rendering is recoloured: HSL lightness is inverted
+/// with hue and saturation kept (white cards turn black, dark text turns
+/// light, a pale purple node turns dark purple), then black is lifted to
+/// `background` so the diagram sits on the page like a code block.
 #[cfg(feature = "mermaid")]
-fn rasterize_mermaid_svg(svg_bytes: &[u8]) -> Option<(egui::ColorImage, egui::Vec2)> {
+pub fn mermaid_dark_pixel(rgb: [u8; 3], background: [u8; 3]) -> [u8; 3] {
+    let c = rgb.map(|v| v as f32 / 255.0);
+    let max = c[0].max(c[1]).max(c[2]);
+    let min = c[0].min(c[1]).min(c[2]);
+    // Inverting HSL lightness keeps chroma (max - min) and hue: every channel
+    // moves by the same amount, 1 - (max + min).
+    let shift = 1.0 - (max + min);
+    let mut out = [0u8; 3];
+    for i in 0..3 {
+        let inverted = (c[i] + shift).clamp(0.0, 1.0);
+        let bg = background[i] as f32 / 255.0;
+        out[i] = ((bg + (1.0 - bg) * inverted) * 255.0).round() as u8;
+    }
+    out
+}
+
+#[cfg(feature = "mermaid")]
+fn rasterize_mermaid_svg(
+    svg_bytes: &[u8],
+    dark_background: Option<[u8; 3]>,
+) -> Option<(egui::ColorImage, egui::Vec2)> {
     let opts = resvg::usvg::Options {
         fontdb: Arc::clone(&MERMAID_FONTDB),
         ..Default::default()
@@ -972,9 +1000,16 @@ fn rasterize_mermaid_svg(svg_bytes: &[u8]) -> Option<(egui::ColorImage, egui::Ve
     for chunk in pixels.chunks_exact(4) {
         let a = chunk[3] as f32 / 255.0;
         if a > 0.0 {
-            rgba.push((chunk[0] as f32 / a).min(255.0) as u8);
-            rgba.push((chunk[1] as f32 / a).min(255.0) as u8);
-            rgba.push((chunk[2] as f32 / a).min(255.0) as u8);
+            let rgb = [
+                (chunk[0] as f32 / a).min(255.0) as u8,
+                (chunk[1] as f32 / a).min(255.0) as u8,
+                (chunk[2] as f32 / a).min(255.0) as u8,
+            ];
+            let rgb = match dark_background {
+                Some(background) => mermaid_dark_pixel(rgb, background),
+                None => rgb,
+            };
+            rgba.extend_from_slice(&rgb);
         } else {
             rgba.push(0);
             rgba.push(0);
@@ -997,8 +1032,19 @@ impl CodeBlock {
         options: &CommonMarkOptions,
         max_width: f32,
     ) {
+        // In dark mode the rendering is recoloured onto the code-block
+        // background (`mermaid_dark_pixel`), so the theme and that colour are
+        // part of the diagram's identity: toggling the theme renders it again.
+        let dark_background = ui
+            .visuals()
+            .dark_mode
+            .then(|| {
+                let c = ui.visuals().extreme_bg_color;
+                [c.r(), c.g(), c.b()]
+            });
         let mut hasher = DefaultHasher::new();
         self.content.hash(&mut hasher);
+        dark_background.hash(&mut hasher);
         let hash = hasher.finish();
 
         // Poll for completed background renders
@@ -1039,7 +1085,7 @@ impl CodeBlock {
             cache.mermaid_states.insert(hash, MermaidState::Rendering);
 
             if cache.mermaid_rendering.is_none() {
-                Self::spawn_mermaid_render(hash, &self.content, cache);
+                Self::spawn_mermaid_render(hash, &self.content, dark_background, cache);
             }
         }
 
@@ -1049,7 +1095,7 @@ impl CodeBlock {
         if matches!(cache.mermaid_states.get(&hash), Some(MermaidState::Rendering))
             && cache.mermaid_rendering.is_none()
         {
-            Self::spawn_mermaid_render(hash, &self.content, cache);
+            Self::spawn_mermaid_render(hash, &self.content, dark_background, cache);
         }
 
         // Display based on current state
@@ -1105,7 +1151,12 @@ impl CodeBlock {
     }
 
     /// Spawn a background thread to render a mermaid diagram and mark it as active.
-    fn spawn_mermaid_render(hash: u64, content: &str, cache: &mut CommonMarkCache) {
+    fn spawn_mermaid_render(
+        hash: u64,
+        content: &str,
+        dark_background: Option<[u8; 3]>,
+        cache: &mut CommonMarkCache,
+    ) {
         cache.mermaid_rendering = Some(hash);
         let content = content.to_owned();
         let tx = cache.mermaid_tx.clone();
@@ -1120,7 +1171,7 @@ impl CodeBlock {
                     let svg_string = CodeBlock::wrap_fallback_text(&svg_string);
                     let svg_bytes = svg_string.into_bytes();
 
-                    match rasterize_mermaid_svg(&svg_bytes) {
+                    match rasterize_mermaid_svg(&svg_bytes, dark_background) {
                         Some((image, size)) => Ok(MermaidRendered { image, size }),
                         None => Err("Failed to rasterize SVG".to_string()),
                     }
@@ -2883,4 +2934,61 @@ pub fn prepare_show(cache: &mut CommonMarkCache, ctx: &egui::Context) {
     }
 
     cache.deactivate_link_hooks();
+}
+
+#[cfg(all(test, feature = "mermaid"))]
+mod mermaid_dark_tests {
+    use super::{mermaid_dark_pixel, rasterize_mermaid_svg};
+
+    const BG: [u8; 3] = [10, 10, 10];
+
+    fn hue(rgb: [u8; 3]) -> f32 {
+        let [r, g, b] = rgb.map(|v| v as f32 / 255.0);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let d = max - min;
+        let h = if max == r {
+            ((g - b) / d).rem_euclid(6.0)
+        } else if max == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        h * 60.0
+    }
+
+    #[test]
+    fn white_becomes_the_background_and_dark_text_becomes_light() {
+        assert_eq!(mermaid_dark_pixel([255, 255, 255], BG), BG);
+        assert_eq!(mermaid_dark_pixel([0, 0, 0], BG), [255, 255, 255]);
+        // mermaid's text colour #333 must end up light on the dark card.
+        let text = mermaid_dark_pixel([0x33, 0x33, 0x33], BG);
+        assert!(text.iter().all(|&c| c > 190), "text became {text:?}");
+    }
+
+    #[test]
+    fn colours_keep_their_hue_and_light_fills_turn_dark() {
+        // mermaid's node border #9370DB and pale node fill #ECECFF.
+        for rgb in [[0x93, 0x70, 0xDB], [0xEC, 0xEC, 0xFF], [0xff, 0xff, 0xde]] {
+            let out = mermaid_dark_pixel(rgb, [0, 0, 0]);
+            assert!(
+                (hue(out) - hue(rgb)).abs() < 2.0,
+                "{rgb:?} -> {out:?} changed hue {} -> {}",
+                hue(rgb),
+                hue(out)
+            );
+        }
+        let fill = mermaid_dark_pixel([0xEC, 0xEC, 0xFF], BG);
+        assert!(fill.iter().all(|&c| c < 64), "pale fill stayed light: {fill:?}");
+    }
+
+    #[test]
+    fn rasterizing_recolours_only_in_dark_mode() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#ffffff"/></svg>"##;
+        let (light, _) = rasterize_mermaid_svg(svg, None).expect("light raster");
+        let (dark, _) = rasterize_mermaid_svg(svg, Some(BG)).expect("dark raster");
+        let px = |img: &egui::ColorImage| img.pixels[5].to_array();
+        assert_eq!(px(&light), [255, 255, 255, 255]);
+        assert_eq!(px(&dark), [BG[0], BG[1], BG[2], 255]);
+    }
 }
