@@ -53,13 +53,23 @@ fn copy_button_frame_hugs_the_icon_and_clears_a_floating_scrollbar() {
     // Measured against zero available width, the two-character label wrapped
     // onto two rows, which is what made the frame twice as tall.
     assert_eq!(rows, 1, "copy icon label wrapped onto {rows} rows");
+    // The block's background is the smallest filled rect around the icon (the
+    // panel's background also contains it, and the button has no fill). Its
+    // colour is not a fixed visual: with `better_syntax_highlighting` it comes
+    // from the syntect theme.
     let block = shapes
         .iter()
         .filter_map(|s| match s {
-            Shape::Rect(r) if r.fill == ctx.global_style().visuals.extreme_bg_color => Some(r.rect),
+            Shape::Rect(r)
+                if r.fill.a() > 0
+                    && r.rect.contains(icon.center())
+                    && r.rect.width() > 4.0 * icon.width() =>
+            {
+                Some(r.rect)
+            }
             _ => None,
         })
-        .max_by(|a, b| a.area().total_cmp(&b.area()))
+        .min_by(|a, b| a.area().total_cmp(&b.area()))
         .expect("code block background painted");
 
     // Hover the icon so the button paints its frame.
