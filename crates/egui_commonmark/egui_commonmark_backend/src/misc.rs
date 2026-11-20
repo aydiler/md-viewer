@@ -368,6 +368,41 @@ mod tests {
     }
 
     #[test]
+    fn plain_job_has_the_highlighted_geometry() {
+        // Off-screen code blocks are laid out with `plain_highlighting` and
+        // highlighted only once visible (devlog 101). That is invisible to the
+        // reader only if both jobs lay out to the same size, so the document
+        // extent and every later block position stay where they were measured.
+        let code = "fn main() {\n    // a comment that is quite long, long enough to matter\n    let s = \"string\";\n    println!(\"{s} {}\", 42_u64 as f32 * 1.5);\n}\n\n#[derive(Debug)]\nstruct S<'a> { x: &'a str }\n";
+        egui::__run_test_ui(|ui| {
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            for line_height in [None, Some(21.0)] {
+                for lang in ["rs", "py", "toml", "not-a-language"] {
+                    let block = CodeBlock { lang: Some(lang.to_owned()), content: code.to_owned() };
+                    let mut highlighted =
+                        block.syntax_highlighting(&mut cache, &options, lang, ui, code, line_height);
+                    let mut plain = plain_highlighting(ui, code, line_height);
+                    // `CodeBlock::end` disables wrapping for both.
+                    highlighted.wrap.max_width = f32::INFINITY;
+                    plain.wrap.max_width = f32::INFINITY;
+                    assert!(
+                        highlighted.sections.len() > 1 || lang != "rs",
+                        "{lang}: highlighting produced one section, so this compares nothing"
+                    );
+                    let highlighted = ui.fonts_mut(|f| f.layout_job(highlighted));
+                    let plain = ui.fonts_mut(|f| f.layout_job(plain));
+                    assert_eq!(
+                        highlighted.size(),
+                        plain.size(),
+                        "{lang}, line height {line_height:?}: plain and highlighted code differ in size"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
     fn opt_in_strong_style_selects_distinct_markdown_strong_font() {
         // Issue #39: md-viewer opts into a registered bold face so markdown
         // strong/bold produces an inspectable font formatting change.
@@ -807,6 +842,15 @@ impl CodeBlock {
                 h.finish()
             };
 
+            // A block that cannot be on screen gets a plain job and is
+            // highlighted the first time it is painted where it shows. The
+            // full-document layout pass (the scrollable bootstrap) lays out
+            // every block, and syntect dominated that pass on code-heavy
+            // documents (devlog 101). Highlighting only sets colors, so the
+            // plain job has the same font, line height and therefore the same
+            // size; `plain_job_has_the_highlighted_geometry` pins that.
+            let offscreen = code_block_is_offscreen(ui, &self.content, code_line_height);
+
             // Build (or retrieve) the LayoutJob for syntax highlighting.
             // Cache hit: clone the stored LayoutJob (cheap — egui's LayoutJob
             // is just text + Vec<LayoutSection>). Cache miss: run syntect,
@@ -814,6 +858,9 @@ impl CodeBlock {
             // visible code blocks ever pay the syntect cost.
             let mut job = if let Some(cached) = cache.syntax_layouts.get(&cache_key).cloned() {
                 cached
+            } else if offscreen {
+                // Not cached: the highlighted job is built once it is visible.
+                plain_highlighting(ui, &self.content, code_line_height)
             } else {
                 let job = if let Some(lang) = &self.lang {
                     self.syntax_highlighting(
@@ -2245,6 +2292,25 @@ fn simple_highlighting(ui: &Ui, text: &str, extension: &str, code_line_height: O
     job
 }
 
+/// Whether a code block starting at the cursor lies wholly outside the clip
+/// rect, so its colors cannot be seen this frame.
+///
+/// Below the clip the answer is exact. Above it, the block's height is not
+/// known before layout, so it is overestimated: twice the line count times the
+/// line height, plus room for the frame. Underestimating would paint a block
+/// that reaches into view without colors for one frame.
+fn code_block_is_offscreen(ui: &Ui, text: &str, code_line_height: Option<f32>) -> bool {
+    let clip = ui.clip_rect();
+    let top = ui.cursor().top();
+    if top > clip.bottom() {
+        return true;
+    }
+    let line_height = code_line_height.unwrap_or_else(|| ui.text_style_height(&TextStyle::Monospace));
+    let lines = text.lines().count().max(1) as f32;
+    let generous_height = 2.0 * lines * line_height + 64.0;
+    top + generous_height < clip.top()
+}
+
 fn plain_highlighting(ui: &Ui, text: &str, code_line_height: Option<f32>) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let mut format = egui::TextFormat::simple(
@@ -2681,6 +2747,14 @@ impl CommonMarkCache {
 
     pub fn layout_revision(&self) -> u64 {
         self.layout_revision
+    }
+
+    /// Number of code blocks whose syntax-highlighted layout is cached.
+    /// Blocks laid out while off screen are not highlighted (devlog 101), so
+    /// tests read this to see which blocks paid for syntect.
+    #[doc(hidden)]
+    pub fn highlighted_code_block_count(&self) -> usize {
+        self.syntax_layouts.len()
     }
 
     pub fn mark_layout_changed(&mut self) {
