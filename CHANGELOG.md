@@ -6,6 +6,7 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ### Performance
 - **Faster startup for documents that need no fallback fonts.** The script fallbacks (CJK, Arabic, Hebrew, Devanagari, Thai), the symbol face and the color emoji font are now loaded on a background thread after the first frame when the opened document does not use them. Font setup at startup takes about half as long: 60–110 ms → 35–70 ms, and 137 → 55 ms with a cold page cache. Documents that do use other scripts or emoji still get every font before the first frame, as before.
+- **Code-heavy documents open several times faster.** The first frame lays out the whole document, and every code block in it was syntax-highlighted even when it was far below the window. Code blocks off screen are now laid out without colors (which does not change their size) and highlighted when they scroll into view. A 2.7 MB document with 3,000 code blocks showed its first screen after 3 s instead of 19 s (median).
 
 ## [0.3.8] - 2026-11-16
 
