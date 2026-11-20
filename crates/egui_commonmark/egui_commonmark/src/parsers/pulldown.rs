@@ -1605,6 +1605,26 @@ impl MeasureBudget {
     }
 }
 
+/// Time budget for the first frame of a progressively measured document.
+const FIRST_FRAME_MEASURE_MS: u64 = 8;
+/// Time budget per later frame while measurement continues.
+const CONTINUE_MEASURE_MS: u64 = 4;
+
+fn progressive_budget(options: &CommonMarkOptions, ms: u64) -> MeasureBudget {
+    match options.progressive_measure_blocks {
+        Some(blocks) => MeasureBudget::Blocks(blocks.max(1)),
+        None => MeasureBudget::millis(ms),
+    }
+}
+
+/// Extent of a partly measured document, extrapolated from the measured part
+/// by source length. Never less than what is already measured.
+fn estimated_extent(frontier: MeasureFrontier, total_src_len: usize) -> f32 {
+    let measured_src = frontier.src_end.max(1) as f32;
+    let ratio = (total_src_len as f32 / measured_src).max(1.0);
+    frontier.y * ratio
+}
+
 impl MeasureStop {
     pub(crate) fn new(min_y: f32, budget: MeasureBudget) -> Self {
         Self { min_y, budget, blocks: 0 }
@@ -2609,6 +2629,22 @@ impl CommonMarkViewerInternal {
         text: &str,
         split_points_id: Option<Id>,
     ) -> (egui::InnerResponse<()>, Vec<CheckboxClickEvent>) {
+        self.show_measuring(ui, cache, options, text, split_points_id, None)
+    }
+
+    /// [`Self::show`], optionally stopping at the first safe block boundary
+    /// that satisfies `stop`. A run that stops records the frontier and an
+    /// estimated extent in the scroll cache instead of the measured one
+    /// (progressive measurement, devlog 103).
+    fn show_measuring(
+        &mut self,
+        ui: &mut egui::Ui,
+        cache: &mut CommonMarkCache,
+        options: &CommonMarkOptions,
+        text: &str,
+        split_points_id: Option<Id>,
+        stop: Option<MeasureStop>,
+    ) -> (egui::InnerResponse<()>, Vec<CheckboxClickEvent>) {
         self.slice_start_y = 0.0;
         let max_width = options.max_width(ui);
         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
@@ -2667,7 +2703,7 @@ impl CommonMarkViewerInternal {
                 .expect("events just cached");
             let event_count = events_data.len();
             let mut events = events_data.iter().cloned().enumerate().peekable();
-            self.run_events(
+            let frontier = self.run_events(
                 ui,
                 &mut events,
                 0,
@@ -2678,19 +2714,25 @@ impl CommonMarkViewerInternal {
                 options,
                 max_width,
                 split_points_id,
-                None,
+                stop,
             );
             drop(events);
             cache.set_cached_events(content_hash, events_data);
 
-            // Trailing breathing room below the last block: see
-            // TRAILING_PADDING_BODY_LINES.
-            let body_height = ui.text_style_height(&TextStyle::Body);
-            ui.add_space(TRAILING_PADDING_BODY_LINES * body_height);
+            if frontier.is_none() {
+                // Trailing breathing room below the last block: see
+                // TRAILING_PADDING_BODY_LINES.
+                let body_height = ui.text_style_height(&TextStyle::Body);
+                ui.add_space(TRAILING_PADDING_BODY_LINES * body_height);
+            }
 
             if let Some(source_id) = split_points_id {
-                let content_height = (ui.next_widget_position().y - content_origin_y).max(0.0);
+                let content_height = match frontier {
+                    Some(frontier) => estimated_extent(frontier, text.len()),
+                    None => (ui.next_widget_position().y - content_origin_y).max(0.0),
+                };
                 let scroll_cache = scroll_cache(cache, &source_id);
+                scroll_cache.measure_frontier = frontier;
                 scroll_cache.page_size = Some(egui::vec2(max_width, content_height));
                 // Capture the column this pass wrapped at, so slices reproduce
                 // it instead of deriving a different width from their own ui.
@@ -2702,6 +2744,96 @@ impl CommonMarkViewerInternal {
         });
 
         (re, std::mem::take(&mut self.checkbox_events))
+    }
+
+    /// Continue measuring a progressively measured document from its
+    /// frontier until `stop` is satisfied or the stream ends (devlog 103).
+    ///
+    /// The events are laid out in an invisible child that the parent does not
+    /// allocate, at the screen position the bootstrap would give them at this
+    /// scroll offset: `content_top + frontier.y`, in the recorded column. A
+    /// fresh renderer keeps the slice renderer's list, line and heading state
+    /// untouched; it starts at a safe block boundary, like a slice does.
+    #[allow(clippy::too_many_arguments)]
+    fn measure_from_frontier(
+        &self,
+        ui: &mut Ui,
+        cache: &mut CommonMarkCache,
+        options: &CommonMarkOptions,
+        source_id: Id,
+        content_left: f32,
+        content_top: f32,
+        max_width: f32,
+        total_src_len: usize,
+        stop: MeasureStop,
+    ) {
+        let Some(frontier) = scroll_cache(cache, &source_id).measure_frontier else {
+            return;
+        };
+        let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(content_left, content_top + frontier.y),
+            egui::vec2(max_width, 0.0),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(layout)
+                .id_salt(source_id.with("progressive_measure"))
+                .invisible(),
+        );
+        child.spacing_mut().item_spacing.x = 0.0;
+        child.set_row_height(child.text_style_height(&TextStyle::Body));
+
+        let mut measurer = CommonMarkViewerInternal::new();
+        measurer.source_id = Some(source_id);
+        measurer.column_right = content_left + max_width;
+        measurer.slice_start_y = frontier.y;
+        measurer.render_origin_y = rect.top();
+
+        let events_data = std::mem::take(&mut scroll_cache(cache, &source_id).events);
+        let event_count = events_data.len();
+        let start = frontier.event_index.min(event_count);
+        let mut events = events_data[start..]
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, event)| (offset + start, event))
+            .peekable();
+        let next = measurer.run_events(
+            &mut child,
+            &mut events,
+            start,
+            event_count,
+            rect.top(),
+            frontier.y,
+            cache,
+            options,
+            max_width,
+            Some(source_id),
+            Some(stop),
+        );
+        drop(events);
+
+        let sc = scroll_cache(cache, &source_id);
+        sc.events = events_data;
+        match next {
+            Some(next) => {
+                sc.measure_frontier = Some(next);
+                if let Some(page_size) = &mut sc.page_size {
+                    page_size.y = estimated_extent(next, total_src_len);
+                }
+            }
+            None => {
+                let padding = TRAILING_PADDING_BODY_LINES * child.text_style_height(&TextStyle::Body);
+                let measured = (child.next_widget_position().y - rect.top()).max(0.0) + frontier.y;
+                sc.measure_frontier = None;
+                sc.observed_extent_bottom = 0.0;
+                if let Some(page_size) = &mut sc.page_size {
+                    page_size.y = measured + padding;
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2760,6 +2892,7 @@ impl CommonMarkViewerInternal {
                 sc.page_size = None;
                 sc.observed_extent_bottom = 0.0;
                 sc.split_points.clear();
+                sc.measure_frontier = None;
             }
             // Width/zoom/theme change: y-coordinates are invalid for the
             // new layout, even though parsed events are still good.
@@ -2769,6 +2902,7 @@ impl CommonMarkViewerInternal {
                 sc.page_size = None;
                 sc.observed_extent_bottom = 0.0;
                 sc.split_points.clear();
+                sc.measure_frontier = None;
                 sc.available_size = available_size;
             }
             if sc.layout_revision != layout_revision {
@@ -2777,6 +2911,7 @@ impl CommonMarkViewerInternal {
                 sc.page_size = None;
                 sc.observed_extent_bottom = 0.0;
                 sc.split_points.clear();
+                sc.measure_frontier = None;
             }
             // An unknown navigation target may require painting every event
             // so its precise position can be measured. Scrolling to an
@@ -2791,6 +2926,18 @@ impl CommonMarkViewerInternal {
             if force_full_render {
                 sc.page_size = None;
                 sc.observed_extent_bottom = 0.0;
+                sc.measure_frontier = None;
+            }
+            // A requested offset whose window reaches past the measured part
+            // of a progressively measured document: measure all of it now,
+            // as a full bootstrap at that offset (today's behaviour), rather
+            // than clamp the offset against an estimated extent.
+            if let (Some(frontier), Some(offset)) = (sc.measure_frontier, pending_scroll_offset) {
+                if offset + available_size.y > frontier.y {
+                    sc.page_size = None;
+                    sc.observed_extent_bottom = 0.0;
+                    sc.measure_frontier = None;
+                }
             }
         }
         // Header positions are content-keyed; new content means the cached
@@ -2823,13 +2970,36 @@ impl CommonMarkViewerInternal {
         // Bootstrap once after content/layout invalidation. It records safe
         // top-level block boundaries and content-relative positions. Normal
         // frames then paint only the viewport slice between clean boundaries.
+        //
+        // With progressive measurement the first frame stops once two screens
+        // are measured and its time budget is spent; the rest is measured by
+        // later frames (devlog 103). A requested offset or a forced full
+        // render needs the whole document, so those still measure it all.
         if scroll_cache(cache, &source_id).page_size.is_none() {
+            let progressive = options.progressive_measure
+                && pending_scroll_offset.is_none()
+                && !force_full_render;
+            let stop = progressive.then(|| {
+                MeasureStop::new(
+                    2.0 * available_size.y,
+                    progressive_budget(options, FIRST_FRAME_MEASURE_MS),
+                )
+            });
             let out = make_scroll_area(pending_scroll_offset).show(ui, |ui| {
                 cache.set_scroll_offset(pending_scroll_offset.unwrap_or(0.0));
-                self.show(ui, cache, options, text, Some(source_id));
+                self.show_measuring(ui, cache, options, text, Some(source_id), stop);
+                // Show the estimated extent on the scrollbar from the start.
+                let estimate = scroll_cache(cache, &source_id)
+                    .measure_frontier
+                    .and_then(|_| scroll_cache(cache, &source_id).page_size);
+                if let Some(estimate) = estimate {
+                    ui.set_min_height(estimate.y);
+                }
             });
             let sc = scroll_cache(cache, &source_id);
-            if let Some(page_size) = &mut sc.page_size {
+            if sc.measure_frontier.is_some() {
+                ui.ctx().request_repaint();
+            } else if let Some(page_size) = &mut sc.page_size {
                 // The ScrollArea output is the canonical extent. Nested
                 // widgets such as tables may advance the inner cursor beyond
                 // the space actually allocated by their outer response.
@@ -2912,6 +3082,30 @@ impl CommonMarkViewerInternal {
             let max_width = max_width.min((ui.max_rect().right() - content_left).max(0.0));
             self.column_right = content_left + max_width;
 
+            // Progressive measurement (devlog 103): before choosing the slice,
+            // make sure the measured part reaches a screen past the viewport,
+            // so a scrollbar drag or End into the estimated region paints real
+            // content. This lays out only the distance actually travelled.
+            if let Some(frontier) = scroll_cache(cache, &source_id).measure_frontier {
+                let wanted = viewport.max.y + viewport.height();
+                if frontier.y < wanted {
+                    self.measure_from_frontier(
+                        ui,
+                        cache,
+                        options,
+                        source_id,
+                        content_left,
+                        ui.max_rect().top(),
+                        max_width,
+                        text.len(),
+                        MeasureStop::new(wanted, MeasureBudget::Nothing),
+                    );
+                }
+            }
+            let frontier_index = scroll_cache(cache, &source_id)
+                .measure_frontier
+                .map(|frontier| frontier.event_index);
+
             let (first_event_index, first_end_y, events_range,
                  diag_viewport_min_y, diag_viewport_max_y, slice_reached_end) = {
                 let scroll_cache = scroll_cache(cache, &source_id);
@@ -2936,6 +3130,10 @@ impl CommonMarkViewerInternal {
                 let last_event_index = last_split
                     .map(|(index, _, _)| *index)
                     .unwrap_or(num_rows);
+                // Never paint past the measured part: past the last split
+                // point the slice would otherwise run to the document's end.
+                let last_event_index =
+                    frontier_index.map_or(last_event_index, |frontier| last_event_index.min(frontier));
 
                 let range_end = last_event_index.min(scroll_cache.events.len());
                 let events_range = if first_event_index < range_end {
@@ -3020,6 +3218,23 @@ impl CommonMarkViewerInternal {
                     }
                 },
             );
+
+            // Progressive measurement: spend this frame's budget measuring on
+            // from the frontier, then come back for more.
+            if scroll_cache(cache, &source_id).measure_frontier.is_some() {
+                self.measure_from_frontier(
+                    ui,
+                    cache,
+                    options,
+                    source_id,
+                    content_left,
+                    ui.max_rect().top(),
+                    max_width,
+                    text.len(),
+                    MeasureStop::new(0.0, progressive_budget(options, CONTINUE_MEASURE_MS)),
+                );
+                ui.ctx().request_repaint();
+            }
 
             // Extent floor. The bootstrap's `page_size` is the base measurement, but
             // async-grown content (math textures) and the slice pass's relayout

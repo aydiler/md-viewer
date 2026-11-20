@@ -68,6 +68,13 @@ pub struct CommonMarkOptions<'f> {
     /// Opt into using the named strong font family. Callers must register
     /// `STRONG_FONT_FAMILY` in egui before enabling this to avoid lookup panics.
     pub use_strong_font_family: bool,
+    /// Measure a large document over several frames in `show_scrollable`
+    /// instead of all in the first one (devlog 103). Off by default.
+    pub progressive_measure: bool,
+    /// Test hook: measure this many block boundaries per chunk instead of
+    /// using the time budget, so progressive measurement is deterministic.
+    #[doc(hidden)]
+    pub progressive_measure_blocks: Option<usize>,
     /// Opt into parsing a leading `---` block as YAML frontmatter and rendering
     /// it as a key/value table. Off by default: enabling it changes how a
     /// document that starts with `---` is *parsed*, not just painted, so it
@@ -106,6 +113,8 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             .field("mutable", &self.mutable)
             .field("typography", &self.typography)
             .field("use_strong_font_family", &self.use_strong_font_family)
+            .field("progressive_measure", &self.progressive_measure)
+            .field("progressive_measure_blocks", &self.progressive_measure_blocks)
             .field("render_frontmatter", &self.render_frontmatter)
             .field("math_scale", &self.math_scale)
             .finish()
@@ -132,6 +141,8 @@ impl Default for CommonMarkOptions<'_> {
             html_fn: None,
             typography: TypographyConfig::default(),
             use_strong_font_family: false,
+            progressive_measure: false,
+            progressive_measure_blocks: None,
             render_frontmatter: false,
             math_scale: 1.0,
         }
