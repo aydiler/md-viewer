@@ -376,11 +376,34 @@ pub fn code_block(
         ),
     );
 
-    // Copy icon
-    let spacing = &ui.style().spacing;
-    let position = egui::pos2(
-        frame_rect.right_top().x - spacing.icon_width * 0.5 - spacing.button_padding.x,
-        frame_rect.right_top().y + spacing.button_padding.y * 2.0,
+    // Copy icon, in a slot at the block's top-right corner (#256).
+    //
+    // The slot is right-aligned and as wide as the block, so the label never
+    // wraps. It used to be `ui.put` into a zero-size rect: the button was
+    // measured against zero available width, its label ("📋" + U+FE0E)
+    // wrapped onto two rows, and the hover frame came out twice as tall as
+    // the icon.
+    //
+    // The slot also keeps clear of a floating scrollbar. egui's default bars
+    // float over the content, and with Full Width a code block reaches the
+    // pane's right edge, so the right half of the button sat under the bar
+    // and a click there went to the scrollbar instead of copying.
+    let spacing = ui.spacing();
+    let scroll = spacing.scroll;
+    let bar_reach = if scroll.floating {
+        scroll.bar_width + scroll.bar_outer_margin
+    } else {
+        0.0
+    };
+    let slot = egui::Rect::from_min_max(
+        egui::pos2(
+            frame_rect.left(),
+            frame_rect.top() + spacing.button_padding.y * 2.0,
+        ),
+        egui::pos2(
+            frame_rect.right() - bar_reach - spacing.button_padding.x,
+            frame_rect.bottom(),
+        ),
     );
 
     // Show COPIED_ICON instead of COPY_ICON while the copied text's button stays hovered
@@ -388,22 +411,25 @@ pub fn code_block(
     let copied_icon = ui.memory_mut(|m| *m.data.get_temp_mut_or_default::<bool>(persistent_id));
 
     let copy_button = ui
-        .put(
-            egui::Rect {
-                min: position,
-                max: position,
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(slot)
+                .layout(egui::Layout::right_to_left(egui::Align::TOP)),
+            |ui| {
+                ui.add(
+                    egui::Button::new(if copied_icon { COPIED_ICON } else { COPY_ICON })
+                        .small()
+                        .frame(false)
+                        .fill(egui::Color32::TRANSPARENT),
+                )
             },
-            egui::Button::new(if copied_icon { COPIED_ICON } else { COPY_ICON })
-                .small()
-                .frame(false)
-                .fill(egui::Color32::TRANSPARENT),
         )
+        .inner
         .on_hover_cursor(
             ui.visuals()
                 .interact_cursor
                 .unwrap_or(egui::CursorIcon::Default),
         );
-
     // Update icon state in persistent memory
     if copied_icon && !copy_button.hovered() {
         ui.memory_mut(|m| *m.data.get_temp_mut_or_default(persistent_id) = false);
