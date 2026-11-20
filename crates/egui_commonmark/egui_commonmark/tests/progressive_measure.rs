@@ -149,6 +149,18 @@ fn frontier(cache: &mut CommonMarkCache) -> Option<MeasureFrontier> {
     scroll_cache(cache, &Id::unique("doc")).measure_frontier
 }
 
+/// Headings past the frontier that have a recorded position. A heading's
+/// position is recorded when it is laid out, painted or not (labels outside
+/// the clip are laid out but not painted, so painted shapes cannot show how
+/// far a pass ran).
+fn headings_laid_out_past_frontier(cache: &CommonMarkCache, md: &str, frontier: &MeasureFrontier) -> Vec<usize> {
+    heading_starts(md)
+        .into_iter()
+        .filter(|start| *start >= frontier.src_end)
+        .filter(|start| cache.get_header_position(&header_position_key(*start)).is_some())
+        .collect()
+}
+
 fn one_shot_geometry(md: &str, width: f32) -> Geometry {
     let ctx = Context::default();
     let mut cache = CommonMarkCache::default();
@@ -267,26 +279,19 @@ fn first_frame_measures_only_the_top_and_paints_it() {
 }
 
 #[test]
-fn no_frame_paints_past_the_measured_part() {
+fn no_frame_lays_out_past_the_measured_part() {
     let md = document();
     let ctx = Context::default();
     let mut cache = CommonMarkCache::default();
-    render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
-    for _ in 0..10 {
-        let frame = render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
+    for frame in 1..=10 {
+        render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
         let Some(frontier) = frontier(&mut cache) else {
-            panic!("fixture finished measuring within 10 frames");
+            panic!("fixture finished measuring within {frame} frames");
         };
-        let content_top = frame.out.inner_rect.top() - frame.out.state.unclamped_offset().y;
-        let deepest = frame
-            .texts
-            .iter()
-            .map(|r| r.bottom() - content_top)
-            .fold(0.0_f32, f32::max);
+        let past = headings_laid_out_past_frontier(&cache, &md, &frontier);
         assert!(
-            deepest <= frontier.y + 1.0,
-            "painted text reaches content y {deepest:.1}, past the frontier at {:.1}",
-            frontier.y
+            past.is_empty(),
+            "frame {frame}: headings at {past:?} were laid out past the frontier ({frontier:?})"
         );
     }
 }
@@ -419,16 +424,10 @@ fn a_tall_block_at_the_frontier_does_not_paint_the_rest_of_the_document() {
     let frame = render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
 
     let frontier = frontier(&mut cache).expect("the document is still being measured");
-    let content_top = frame.out.inner_rect.top() - frame.out.state.unclamped_offset().y;
-    let deepest = frame
-        .texts
-        .iter()
-        .map(|r| r.bottom() - content_top)
-        .fold(0.0_f32, f32::max);
     assert!(visible_count(&frame) > 0, "the frame painted nothing visible");
+    let past = headings_laid_out_past_frontier(&cache, &md, &frontier);
     assert!(
-        deepest <= frontier.y + 1.0,
-        "painted text reaches content y {deepest:.1}, past the frontier at {:.1}",
-        frontier.y
+        past.is_empty(),
+        "headings at {past:?} were laid out past the frontier ({frontier:?})"
     );
 }
