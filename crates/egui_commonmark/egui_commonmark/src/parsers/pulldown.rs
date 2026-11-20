@@ -1009,6 +1009,9 @@ fn inline_code_floor(ui: &Ui, cell: &[(pulldown_cmark::Event, Range<usize>)]) ->
 
 fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32) -> f32 {
     let font_id = egui::TextStyle::Body.resolve(ui.style());
+    if fits_on_one_row(ui, text, &font_id, (column_width - 8.0).max(1.0)) {
+        return line_height;
+    }
     let galley = ui.painter().layout(
         text.to_owned(),
         font_id,
@@ -1016,6 +1019,30 @@ fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32)
         (column_width - 8.0).max(1.0),
     );
     line_height * galley.rows.len().max(1) as f32
+}
+
+/// Whether `text` lays out as a single row at `wrap_width`, decided without
+/// laying it out at that width.
+///
+/// The table column optimizer measures every cell at many candidate widths
+/// (devlog 102), and each measurement used to shape the text again. Shaping
+/// does not depend on the wrap width, so the unwrapped galley (already built,
+/// and cached for the frame, by `natural_text_width`) gives the paragraph's
+/// width once. epaint keeps a paragraph on one row when that width is at most
+/// `effective_wrap_width()`, which is `max_width` or `max_width + 0.5`. The
+/// reported galley width is within 0.5 of the paragraph width, so a margin of
+/// 0.5 makes `true` exact. Text near the boundary, and text with a newline
+/// (several paragraphs), returns `false` and is laid out in full.
+fn fits_on_one_row(ui: &Ui, text: &str, font_id: &egui::FontId, wrap_width: f32) -> bool {
+    if text.contains('\n') {
+        return false;
+    }
+    let natural = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font_id.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    natural + 0.5 < wrap_width
 }
 
 pub(crate) fn body_line_height(ui: &Ui, options: &CommonMarkOptions) -> f32 {
@@ -5188,6 +5215,85 @@ mod tests {
 
         assert!((widths[0] - widths[1]).abs() < 0.01);
         assert!((widths[1] - widths[2]).abs() < 0.01);
+    }
+
+    #[test]
+    fn one_row_shortcut_matches_a_full_layout() {
+        // `fits_on_one_row` lets `wrapped_text_height` skip laying out a cell
+        // at each candidate width (devlog 102). It may only answer "one row"
+        // when a full layout would too, so compare against the full layout at
+        // widths swept in quarter points across each text's natural width,
+        // where the two could disagree.
+        let texts = [
+            "",
+            "a",
+            "word",
+            "two words",
+            "eiusmod ut render viewer markdown",
+            "trailing space ",
+            " leading space",
+            "averyveryverylongunbreakabletokenwithoutanyspaces",
+            "`code` and **bold** text, with punctuation; and more!",
+            "中文混合 English 文本",
+            "עברית עם English",
+            "emoji 😀 in a cell",
+            "tab\tseparated",
+        ];
+        egui::__run_test_ui(|ui| {
+            let font_id = egui::TextStyle::Body.resolve(ui.style());
+            let line_height = 20.0;
+            let mut boundary_checks = 0;
+            for text in texts {
+                let natural = ui
+                    .painter()
+                    .layout_no_wrap(text.to_owned(), font_id.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x;
+                let mut wrap_width = (natural - 6.0).max(1.0);
+                while wrap_width <= natural + 6.0 {
+                    let column_width = wrap_width + 8.0;
+                    let full_rows = ui
+                        .painter()
+                        .layout(text.to_owned(), font_id.clone(), egui::Color32::WHITE, wrap_width)
+                        .rows
+                        .len()
+                        .max(1);
+                    let shortcut = fits_on_one_row(ui, text, &font_id, wrap_width);
+                    if shortcut {
+                        assert_eq!(
+                            full_rows, 1,
+                            "{text:?} at wrap width {wrap_width}: the shortcut said one row, \
+                             a full layout gives {full_rows}"
+                        );
+                    }
+                    assert_eq!(
+                        wrapped_text_height(ui, text, column_width, line_height),
+                        line_height * full_rows as f32,
+                        "{text:?} at wrap width {wrap_width}"
+                    );
+                    boundary_checks += 1;
+                    wrap_width += 0.25;
+                }
+            }
+            assert!(boundary_checks > 500, "sweep ran {boundary_checks} checks");
+        });
+    }
+
+    #[test]
+    fn one_row_shortcut_answers_for_text_that_clearly_fits() {
+        // The guard above passes trivially if the shortcut never fires, so
+        // pin that it does fire where it should: short text in a wide column.
+        egui::__run_test_ui(|ui| {
+            let font_id = egui::TextStyle::Body.resolve(ui.style());
+            assert!(fits_on_one_row(ui, "two words", &font_id, 400.0));
+            assert!(!fits_on_one_row(ui, "two\nlines", &font_id, 400.0));
+            assert!(!fits_on_one_row(
+                ui,
+                "eiusmod ut render viewer markdown",
+                &font_id,
+                40.0
+            ));
+        });
     }
 
     #[test]
