@@ -2602,10 +2602,15 @@ impl CommonMarkViewerInternal {
                             if index == first_index {
                                 self.line.should_not_start_newline_forced = false;
                             }
+                            let row = ui.cursor();
                             return Some(MeasureFrontier {
                                 event_index: split_index,
                                 y: end_y,
                                 src_end,
+                                row_top: (row.top() - origin_screen_y) + origin_content_y,
+                                row_height: row.height(),
+                                min_rect_bottom: (ui.min_rect().bottom() - origin_screen_y)
+                                    + origin_content_y,
                             });
                         }
                     }
@@ -2771,8 +2776,11 @@ impl CommonMarkViewerInternal {
             return;
         };
         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
+        // Start on the bootstrap's own cursor row at the frontier (its top
+        // and height), so the next block's leading newline and a heading's
+        // `end_row` move the cursor exactly as they do in a full bootstrap.
         let rect = egui::Rect::from_min_size(
-            egui::pos2(content_left, content_top + frontier.y),
+            egui::pos2(content_left, content_top + frontier.row_top),
             egui::vec2(max_width, 0.0),
         );
         let mut child = ui.new_child(
@@ -2783,13 +2791,17 @@ impl CommonMarkViewerInternal {
                 .invisible(),
         );
         child.spacing_mut().item_spacing.x = 0.0;
-        child.set_row_height(child.text_style_height(&TextStyle::Body));
+        child.set_row_height(frontier.row_height);
+        child.expand_to_include_y(rect.top() + (frontier.min_rect_bottom - frontier.row_top));
 
         let mut measurer = CommonMarkViewerInternal::new();
         measurer.source_id = Some(source_id);
         measurer.column_right = content_left + max_width;
-        measurer.slice_start_y = frontier.y;
+        measurer.slice_start_y = frontier.row_top;
         measurer.render_origin_y = rect.top();
+        // The bootstrap clears this after event 0: a resumed run is never at
+        // the document top, so its first block opens with a newline too.
+        measurer.line.should_not_start_newline_forced = false;
 
         let events_data = std::mem::take(&mut scroll_cache(cache, &source_id).events);
         let event_count = events_data.len();
@@ -2806,7 +2818,7 @@ impl CommonMarkViewerInternal {
             start,
             event_count,
             rect.top(),
-            frontier.y,
+            frontier.row_top,
             cache,
             options,
             max_width,
@@ -2825,12 +2837,15 @@ impl CommonMarkViewerInternal {
                 }
             }
             None => {
-                let padding = TRAILING_PADDING_BODY_LINES * child.text_style_height(&TextStyle::Body);
-                let measured = (child.next_widget_position().y - rect.top()).max(0.0) + frontier.y;
+                // The extent a full bootstrap reports is its ScrollArea's
+                // content size: the bottom of the laid-out content. (Its
+                // trailing `add_space` is horizontal in this wrapping layout
+                // and adds no height.)
+                let bottom = (child.min_rect().bottom() - rect.top()) + frontier.row_top;
                 sc.measure_frontier = None;
                 sc.observed_extent_bottom = 0.0;
                 if let Some(page_size) = &mut sc.page_size {
-                    page_size.y = measured + padding;
+                    page_size.y = bottom;
                 }
             }
         }
@@ -2928,12 +2943,15 @@ impl CommonMarkViewerInternal {
                 sc.observed_extent_bottom = 0.0;
                 sc.measure_frontier = None;
             }
-            // A requested offset whose window reaches past the measured part
-            // of a progressively measured document: measure all of it now,
-            // as a full bootstrap at that offset (today's behaviour), rather
-            // than clamp the offset against an estimated extent.
-            if let (Some(frontier), Some(offset)) = (sc.measure_frontier, pending_scroll_offset) {
-                if offset + available_size.y > frontier.y {
+            // A requested offset past the estimated extent of a progressively
+            // measured document would be clamped against an estimate: measure
+            // all of it now, as a full bootstrap at that offset (today's
+            // behaviour). Offsets inside the estimate (Page Down, a fragment
+            // near the top) are handled by the viewport pass's catch-up.
+            if let (Some(_), Some(offset), Some(page_size)) =
+                (sc.measure_frontier, pending_scroll_offset, sc.page_size)
+            {
+                if offset + available_size.y > page_size.y {
                     sc.page_size = None;
                     sc.observed_extent_bottom = 0.0;
                     sc.measure_frontier = None;
