@@ -1009,8 +1009,8 @@ fn inline_code_floor(ui: &Ui, cell: &[(pulldown_cmark::Event, Range<usize>)]) ->
 
 fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32) -> f32 {
     let font_id = egui::TextStyle::Body.resolve(ui.style());
-    if fits_on_one_row(ui, text, &font_id, (column_width - 8.0).max(1.0)) {
-        return line_height;
+    if let Some(rows) = replayed_row_count(ui, text, &font_id, (column_width - 8.0).max(1.0)) {
+        return line_height * rows as f32;
     }
     let galley = ui.painter().layout(
         text.to_owned(),
@@ -1021,28 +1021,161 @@ fn wrapped_text_height(ui: &Ui, text: &str, column_width: f32, line_height: f32)
     line_height * galley.rows.len().max(1) as f32
 }
 
-/// Whether `text` lays out as a single row at `wrap_width`, decided without
+/// The number of rows `text` lays out to at `wrap_width`, computed without
 /// laying it out at that width.
 ///
 /// The table column optimizer measures every cell at many candidate widths
-/// (devlog 102), and each measurement used to shape the text again. Shaping
-/// does not depend on the wrap width, so the unwrapped galley (already built,
-/// and cached for the frame, by `natural_text_width`) gives the paragraph's
-/// width once. epaint keeps a paragraph on one row when that width is at most
-/// `effective_wrap_width()`, which is `max_width` or `max_width + 0.5`. The
-/// reported galley width is within 0.5 of the paragraph width, so a margin of
-/// 0.5 makes `true` exact. Text near the boundary, and text with a newline
-/// (several paragraphs), returns `false` and is laid out in full.
-fn fits_on_one_row(ui: &Ui, text: &str, font_id: &egui::FontId, wrap_width: f32) -> bool {
-    if text.contains('\n') {
-        return false;
+/// (devlog 102), and each measurement shaped the text again only to count its
+/// rows. Shaping does not depend on the wrap width; only line breaking does.
+/// So this takes the glyphs of the unwrapped galley (already built, and cached
+/// for the frame, by `natural_text_width`) and replays epaint's own line
+/// breaking over them: `rows_from_paragraphs` and `line_break` with
+/// `RowBreakCandidates` in `epaint/src/text/text_layout.rs`, which are the same
+/// in the vendored and the crates.io epaint 0.37. A change there must be
+/// mirrored here; `replayed_row_count_matches_a_full_layout` compares the two.
+///
+/// `None` (lay it out in full) for text with a newline, which is several
+/// paragraphs, and for text with right-to-left characters, whose glyphs bidi
+/// reordering moves.
+fn replayed_row_count(
+    ui: &Ui,
+    text: &str,
+    font_id: &egui::FontId,
+    wrap_width: f32,
+) -> Option<usize> {
+    if text.contains('\n')
+        || text.chars().any(|c| {
+            matches!(
+                unicode_bidi::bidi_class(c),
+                unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL
+            )
+        })
+    {
+        return None;
     }
-    let natural = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), font_id.clone(), egui::Color32::WHITE)
-        .size()
-        .x;
-    natural + 0.5 < wrap_width
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font_id.clone(), egui::Color32::WHITE);
+    let [row] = galley.rows.as_slice() else {
+        return None;
+    };
+    // The same job `Painter::layout` builds, for its effective wrap width
+    // (`max_width + 0.5` with `round_output_to_gui`).
+    let wrap = egui::text::LayoutJob::simple(
+        String::new(),
+        font_id.clone(),
+        egui::Color32::WHITE,
+        wrap_width,
+    )
+    .effective_wrap_width();
+    let glyphs = &row.glyphs;
+    // `rows_from_paragraphs`: an empty paragraph, or one that fits, is one row.
+    if glyphs.is_empty() || row.size.x <= wrap {
+        return Some(1);
+    }
+    // `line_break`, counting rows instead of building them.
+    let mut candidates = BreakCandidates::default();
+    let mut first_row_indentation = glyphs[0].pos.x;
+    let mut row_start_x = 0.0;
+    let mut row_start_idx = 0;
+    let mut rows = 0;
+    for i in 0..glyphs.len() {
+        let potential_row_width = glyphs[i].max_x() - row_start_x;
+        if wrap < potential_row_width {
+            if first_row_indentation > 0.0 && !candidates.has_word_boundary() {
+                rows += 1;
+                row_start_x += first_row_indentation;
+                first_row_indentation = 0.0;
+            } else if let Some(last_kept_index) = candidates.get() {
+                rows += 1;
+                row_start_idx = last_kept_index + 1;
+                row_start_x = glyphs[row_start_idx].pos.x;
+                candidates.forget_before(row_start_idx);
+            }
+        }
+        candidates.add(i, &glyphs[i..]);
+    }
+    if row_start_idx < glyphs.len() {
+        rows += 1;
+    }
+    Some(rows)
+}
+
+/// epaint's `RowBreakCandidates` (`break_anywhere` off, as `Painter::layout`
+/// leaves it), for `replayed_row_count`.
+#[derive(Default)]
+struct BreakCandidates {
+    space: Option<usize>,
+    cjk: Option<usize>,
+    pre_cjk: Option<usize>,
+    dash: Option<usize>,
+    punctuation: Option<usize>,
+    any: Option<usize>,
+}
+
+impl BreakCandidates {
+    fn add(&mut self, index: usize, glyphs: &[egui::epaint::text::Glyph]) {
+        let chr = glyphs[0].chr;
+        const NON_BREAKING_SPACE: char = '\u{A0}';
+        if chr.is_whitespace() && chr != NON_BREAKING_SPACE {
+            self.space = Some(index);
+        } else if epaint_is_cjk(chr)
+            && (glyphs.len() == 1 || epaint_is_cjk_break_allowed(glyphs[1].chr))
+        {
+            self.cjk = Some(index);
+        } else if chr == '-' {
+            self.dash = Some(index);
+        } else if chr.is_ascii_punctuation() {
+            self.punctuation = Some(index);
+        } else if glyphs.len() > 1 && epaint_is_cjk(glyphs[1].chr) {
+            self.pre_cjk = Some(index);
+        }
+        self.any = Some(index);
+    }
+
+    fn word_boundary(&self) -> Option<usize> {
+        [self.space, self.cjk, self.pre_cjk].into_iter().max().flatten()
+    }
+
+    fn has_word_boundary(&self) -> bool {
+        self.word_boundary().is_some()
+    }
+
+    fn get(&self) -> Option<usize> {
+        self.word_boundary()
+            .or(self.dash)
+            .or(self.punctuation)
+            .or(self.any)
+    }
+
+    fn forget_before(&mut self, index: usize) {
+        for candidate in [
+            &mut self.space,
+            &mut self.cjk,
+            &mut self.pre_cjk,
+            &mut self.dash,
+            &mut self.punctuation,
+            &mut self.any,
+        ] {
+            if candidate.is_some_and(|i| i < index) {
+                *candidate = None;
+            }
+        }
+    }
+}
+
+/// epaint's `is_cjk` (`epaint/src/text/unicode.rs`, crate-private).
+fn epaint_is_cjk(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+        || ('\u{3400}'..='\u{4DBF}').contains(&c)
+        || ('\u{2B740}'..='\u{2B81F}').contains(&c)
+        || ('\u{3040}'..='\u{309F}').contains(&c)
+        || ('\u{30A0}'..='\u{30FF}').contains(&c)
+}
+
+/// epaint's `is_cjk_break_allowed` (`epaint/src/text/unicode.rs`, crate-private).
+fn epaint_is_cjk_break_allowed(c: char) -> bool {
+    !")]｝〕〉》」』】〙〗〟'\"｠»ヽヾーァィゥェォッャュョヮヵヶぁぃぅぇぉっゃゅょゎゕゖㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ々〻‐゠–〜?!‼⁇⁈⁉・、:;,。.！％），．：；？］”’…".contains(c)
 }
 
 pub(crate) fn body_line_height(ui: &Ui, options: &CommonMarkOptions) -> f32 {
@@ -5217,83 +5350,110 @@ mod tests {
         assert!((widths[1] - widths[2]).abs() < 0.01);
     }
 
+    const REPLAY_TEXTS: &[&str] = &[
+        "",
+        "a",
+        "word",
+        "two words",
+        "eiusmod ut render viewer markdown labore dolore magna aliqua",
+        "trailing space ",
+        "  two leading spaces",
+        "averyveryverylongunbreakabletokenwithoutanyspaces",
+        "`code` and **bold** text, with punctuation; and more!",
+        "a-dashed-compound-word and www.example.com/a/path?query=1",
+        "non\u{a0}breaking\u{a0}spaces\u{a0}only here",
+        "中文混合 English 文本，还有更多的中文字符在这里",
+        "日本語のテキスト「かぎかっこ」と、句読点。",
+        "emoji 😀 in a cell 👍🏽 with ❤️ more",
+        "tab\tseparated\tcells",
+        "combining e\u{301} accents and Ångström",
+    ];
+
+    fn full_layout_rows(ui: &egui::Ui, text: &str, font_id: &egui::FontId, wrap_width: f32) -> usize {
+        ui.painter()
+            .layout(text.to_owned(), font_id.clone(), egui::Color32::WHITE, wrap_width)
+            .rows
+            .len()
+            .max(1)
+    }
+
     #[test]
-    fn one_row_shortcut_matches_a_full_layout() {
-        // `fits_on_one_row` lets `wrapped_text_height` skip laying out a cell
-        // at each candidate width (devlog 102). It may only answer "one row"
-        // when a full layout would too, so compare against the full layout at
-        // widths swept in quarter points across each text's natural width,
-        // where the two could disagree.
-        let texts = [
-            "",
-            "a",
-            "word",
-            "two words",
-            "eiusmod ut render viewer markdown",
-            "trailing space ",
-            " leading space",
-            "averyveryverylongunbreakabletokenwithoutanyspaces",
-            "`code` and **bold** text, with punctuation; and more!",
-            "中文混合 English 文本",
-            "עברית עם English",
-            "emoji 😀 in a cell",
-            "tab\tseparated",
-        ];
+    fn replayed_row_count_matches_a_full_layout() {
+        // `replayed_row_count` re-implements epaint's line breaking over the
+        // unwrapped glyphs (devlog 102). Its answer decides table row heights,
+        // so it must equal a full layout at every width, not just near one
+        // boundary: sweep every quarter point from 1 pt to past the natural
+        // width.
         egui::__run_test_ui(|ui| {
             let font_id = egui::TextStyle::Body.resolve(ui.style());
-            let line_height = 20.0;
-            let mut boundary_checks = 0;
-            for text in texts {
+            let mut compared = 0;
+            for &text in REPLAY_TEXTS {
                 let natural = ui
                     .painter()
                     .layout_no_wrap(text.to_owned(), font_id.clone(), egui::Color32::WHITE)
                     .size()
                     .x;
-                let mut wrap_width = (natural - 6.0).max(1.0);
-                while wrap_width <= natural + 6.0 {
-                    let column_width = wrap_width + 8.0;
-                    let full_rows = ui
-                        .painter()
-                        .layout(text.to_owned(), font_id.clone(), egui::Color32::WHITE, wrap_width)
-                        .rows
-                        .len()
-                        .max(1);
-                    let shortcut = fits_on_one_row(ui, text, &font_id, wrap_width);
-                    if shortcut {
+                let mut wrap_width = 1.0;
+                while wrap_width <= natural + 8.0 {
+                    let full = full_layout_rows(ui, text, &font_id, wrap_width);
+                    if let Some(replayed) = replayed_row_count(ui, text, &font_id, wrap_width) {
                         assert_eq!(
-                            full_rows, 1,
-                            "{text:?} at wrap width {wrap_width}: the shortcut said one row, \
-                             a full layout gives {full_rows}"
+                            replayed, full,
+                            "{text:?} at wrap width {wrap_width}: replay {replayed}, full layout {full}"
                         );
+                        compared += 1;
                     }
                     assert_eq!(
-                        wrapped_text_height(ui, text, column_width, line_height),
-                        line_height * full_rows as f32,
+                        wrapped_text_height(ui, text, wrap_width + 8.0, 20.0),
+                        20.0 * full as f32,
                         "{text:?} at wrap width {wrap_width}"
                     );
-                    boundary_checks += 1;
                     wrap_width += 0.25;
                 }
             }
-            assert!(boundary_checks > 500, "sweep ran {boundary_checks} checks");
+            assert!(compared > 5_000, "only {compared} replayed widths were compared");
         });
     }
 
     #[test]
-    fn one_row_shortcut_answers_for_text_that_clearly_fits() {
-        // The guard above passes trivially if the shortcut never fires, so
-        // pin that it does fire where it should: short text in a wide column.
+    fn replayed_row_count_answers_for_single_left_to_right_paragraphs() {
+        // The equality test above would pass if the replay always fell back to
+        // a full layout, so pin which texts it must answer itself.
         egui::__run_test_ui(|ui| {
             let font_id = egui::TextStyle::Body.resolve(ui.style());
-            assert!(fits_on_one_row(ui, "two words", &font_id, 400.0));
-            assert!(!fits_on_one_row(ui, "two\nlines", &font_id, 400.0));
-            assert!(!fits_on_one_row(
-                ui,
-                "eiusmod ut render viewer markdown",
-                &font_id,
-                40.0
-            ));
+            for &text in REPLAY_TEXTS {
+                assert!(
+                    replayed_row_count(ui, text, &font_id, 40.0).is_some(),
+                    "{text:?} fell back to a full layout"
+                );
+            }
+            assert_eq!(replayed_row_count(ui, "two\nlines", &font_id, 400.0), None);
+            assert_eq!(replayed_row_count(ui, "עברית עם English", &font_id, 400.0), None);
+            assert_eq!(replayed_row_count(ui, "عربي", &font_id, 400.0), None);
+            assert!(replayed_row_count(ui, "eiusmod ut render viewer markdown", &font_id, 40.0)
+                .is_some_and(|rows| rows > 1));
         });
+    }
+
+    #[test]
+    fn copied_cjk_break_rules_match_epaint() {
+        // `epaint_is_cjk_break_allowed` copies a private epaint table. Read the
+        // table out of the epaint source this build uses and compare.
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../epaint/src/text/unicode.rs"
+        ));
+        let start = source.find("fn is_cjk_break_allowed").expect("epaint function");
+        let body = &source[start..];
+        let open = body.find("!\"").expect("table start") + 2;
+        let close = body[open..].find("\".contains(c)").expect("table end") + open;
+        let table = body[open..close].replace("\\\"", "\"");
+        for c in table.chars() {
+            assert!(!epaint_is_cjk_break_allowed(c), "{c:?} should forbid a break");
+        }
+        for c in ['a', '中', 'あ', ' ', '-'] {
+            assert_eq!(epaint_is_cjk_break_allowed(c), !table.contains(c), "{c:?}");
+        }
     }
 
     #[test]
