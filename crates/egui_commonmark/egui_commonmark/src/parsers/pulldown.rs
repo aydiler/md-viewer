@@ -5367,6 +5367,11 @@ mod tests {
         "emoji 😀 in a cell 👍🏽 with ❤️ more",
         "tab\tseparated\tcells",
         "combining e\u{301} accents and Ångström",
+        // A dash is preferred over later punctuation in the same row.
+        "alpha-beta.gamma.delta-epsilon.zeta.eta-theta.iota",
+        // An ideograph followed by a Latin letter is a break candidate of its
+        // own (not only the position before the next ideograph).
+        "中a中b中c中d中e中f中g中h中i中j中k中l",
     ];
 
     fn full_layout_rows(ui: &egui::Ui, text: &str, font_id: &egui::FontId, wrap_width: f32) -> usize {
