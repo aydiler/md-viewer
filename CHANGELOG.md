@@ -13,6 +13,7 @@ All notable changes to markdown-viewer will be documented in this file.
 ### Fixed
 - **Interface symbols no longer show as boxes (#255).** The explorer's Refresh, Expand all and Collapse all buttons, the Dark Mode menu entry, the find bar's arrows and close button and the menu check marks used symbols that no bundled font covered since the egui 0.37 upgrade, so on systems without DejaVu Sans or Noto Sans Symbols they painted as missing-glyph boxes. md-viewer now bundles a 4.7 KB subset of DejaVu Sans with those symbols as a last-resort fallback.
 - **Mermaid diagrams follow the dark theme (#257).** In dark mode diagrams were white cards with dark text. They are now recoloured for the dark page: white becomes the code-block background, text turns light, and coloured boxes keep their hue. Toggling the theme renders them again; light mode is unchanged.
+- **The code-block copy button's frame fits the icon, and every part of it copies (#256).** Its hover frame was twice as tall as the icon because the label wrapped onto two rows. With Full Width, the right half of the button also lay under the document's scrollbar, so clicks there scrolled instead of copying. The button now sits inside the block's corner, clear of the scrollbar.
 
 ## [0.3.8] - 2026-11-16
 
