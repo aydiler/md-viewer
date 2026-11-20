@@ -10,6 +10,9 @@ All notable changes to markdown-viewer will be documented in this file.
 - **Table-heavy documents open several times faster.** To fit table columns, the renderer measures every cell at many candidate widths, and each measurement laid the cell's text out in full. It now counts the rows by replaying the layout's line breaking over glyphs that are already shaped, which gives the same answer without a layout. A 1 MB document of about 3,000 tables showed its first screen after 3.5 s instead of 16 s (median).
 - **Large documents show their first screen at once.** The first frame used to lay out the entire document to learn its height and where each block sits, so a 5 MB document took several seconds to appear. Now the first frame lays out only the first two screens; the rest is measured a few milliseconds per frame afterwards while the document is already readable, and the scrollbar shows an estimate until then. Scrolling or jumping ahead of the measured part measures up to where you land. When measurement finishes, every block position is the same as before.
 
+### Fixed
+- **Interface symbols no longer show as boxes (#255).** The explorer's Refresh, Expand all and Collapse all buttons, the Dark Mode menu entry, the find bar's arrows and close button and the menu check marks used symbols that no bundled font covered since the egui 0.37 upgrade, so on systems without DejaVu Sans or Noto Sans Symbols they painted as missing-glyph boxes. md-viewer now bundles a 4.7 KB subset of DejaVu Sans with those symbols as a last-resort fallback.
+
 ## [0.3.8] - 2026-11-16
 
 No change to the app: this release carries the refreshed package descriptions to the stores.
