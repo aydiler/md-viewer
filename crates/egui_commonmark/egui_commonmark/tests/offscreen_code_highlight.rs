@@ -43,6 +43,10 @@ fn frame(
             out = Some(
                 CommonMarkViewer::new()
                     .default_width(Some(600))
+                    // md-viewer always sets one (the preset's); without it the
+                    // plain and highlighted jobs share egui's default height
+                    // and a line-height mismatch between them goes unseen.
+                    .code_line_height(1.6)
                     .show_scrollable("doc", ui, cache, md),
             );
         });
