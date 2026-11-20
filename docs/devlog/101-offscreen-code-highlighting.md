@@ -1,6 +1,6 @@
 # Off-screen code blocks are highlighted only once they are visible
 
-**Status:** 🚧 In progress
+**Status:** ✅ Complete
 **Branch:** `perf/offscreen-code-highlight`
 **Date:** 2026-11-20
 
@@ -29,6 +29,22 @@ frame:
 
 The table cost is a separate fix.
 
+After the change, release builds with the startup probe, alternating with main
+run by run on Xvfb (7 runs each, load average around 100 from unrelated jobs).
+Time from launch to the first frame with content, in ms:
+
+| document | main: fastest / median | branch: fastest / median |
+|---|---|---|
+| code_heavy (2.7 MB, 3,000 code blocks) | 14 738 / 19 406 | **2 539 / 3 050** |
+| README | 652 / 775 | 388 / 675 |
+| prose 1 MB | 1 111 / 1 259 | 1 026 / 1 262 |
+| mixed scripts 1.6 MB | 3 338 / 3 962 | 3 225 / 4 336 |
+| 30 restored tabs incl. 3 large | 1 557 / 2 672 | 1 461 / 2 715 |
+
+The first frame itself on code_heavy went from 18 953 to 2 776 ms (median),
+and on the README from 429 to 269 ms. The other documents are unchanged within
+noise.
+
 ## Key Discoveries
 
 - **Highlighting does not change geometry.** Both the syntect and the plain job
@@ -40,6 +56,12 @@ The table cost is a separate fix.
   screen only if twice its line count times the line height, plus room for the
   frame, still ends above the clip. An underestimate would paint a block that
   reaches into view without colors for one frame.
+- **A mutant that changes nothing in the test style is not a test of
+  anything.** Making the plain job use the body font turned nothing red,
+  because egui's test style sets both fonts to 13 pt and the galleys came out
+  identical. The meaningful mutant is a plain job that drops the code line
+  height: the unit test caught it, and the integration extent test did only
+  after its viewer was given a code line height, as md-viewer always sets one.
 - **samply needs `perf_event_paranoid` ≤ 1.** It is 2 here, a system setting,
   so callgrind on 10 % slices was used instead.
 
