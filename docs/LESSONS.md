@@ -273,6 +273,14 @@ if raw_scroll.abs() > 0.0 {
 **Fix:** Gate document-level shortcut handling on UI state and modifiers. Let search consume arrows while the find bar is open, and ignore Ctrl/Alt/Command-modified keypresses so existing app and system shortcuts keep priority. Defer the chosen scroll action through `pending_scroll_offset` rather than mutating renderer-owned scroll state directly.
 **Files:** `src/main.rs`, `docs/devlog/035-keyboard-scroll-keys.md`
 
+### An unfocused TextEdit collapses its selection; a scrollbar click unfocuses it
+**Context:** #258. In Edit mode a click on the editor's scrollbar *track* cleared the selection; dragging the thumb did not.
+**Root cause:** the track click is a press outside the TextEdit, so egui moves the focus away, and `TextEdit::show` collapses the cursor range to its primary end on every frame it does not own the IME events. Restoring the focus alone brings back a bare cursor.
+**Fix:** `EditorFocus` (`src/main.rs`) saves the selection on every focused frame; when a press in the scrollbar strip takes the focus, it writes the selection back into `TextEditState` and calls `request_focus`.
+**Gotchas:** a quick click (press and release in one frame) has no `press_origin()`, so use `latest_pos()`; read focus with `ctx.memory(|m| m.has_focus(id))`, not from the response; on Xvfb, `xdotool key` reaches the app only after `xdotool windowfocus --sync`, otherwise every build looks like it lost focus.
+**Also:** a TextEdit scrolls to its cursor only when the cursor moves, so a drag held still past the edge never scrolls. Drive the offset yourself while the response is `dragged()` (`edge_autoscroll_speed`).
+**Files:** `src/main.rs`, `docs/devlog/107-edit-selection-scroll.md`
+
 ### Resize handle and scrollbar overlap causes jitter
 **Context:** Resizing outline panel caused mouse jitter when near content scrollbar
 **Problem:** The SidePanel resize handle sensing area overlaps with the adjacent ScrollArea scrollbar, causing rapid switching between resize and scroll modes.
