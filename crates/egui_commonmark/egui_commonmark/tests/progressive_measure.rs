@@ -384,3 +384,51 @@ fn invalidation_mid_measurement_restarts_cleanly() {
         "after a content change mid-measurement",
     );
 }
+
+/// A block taller than a screen right below the viewport leaves exactly one
+/// split point past it, and without the cap at the frontier the slice would
+/// then run to the end of the document.
+#[test]
+fn a_tall_block_at_the_frontier_does_not_paint_the_rest_of_the_document() {
+    let mut md = String::new();
+    for i in 1..=30 {
+        md.push_str(&format!("Opening paragraph {i}, short.\n\n"));
+    }
+    md.push_str("```text\n");
+    for i in 1..=80 {
+        md.push_str(&format!("code line {i}\n"));
+    }
+    md.push_str("```\n\n");
+    md.push_str(&document());
+
+    // Where the tall block starts, from a one-shot measurement.
+    let reference = one_shot_geometry(&md, 600.0);
+    let tall = reference
+        .splits
+        .iter()
+        .find(|(_, start, end)| end - start > VIEWPORT_HEIGHT)
+        .expect("fixture has a block taller than the viewport");
+
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    let first = render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
+    assert!(frontier(&mut cache).is_some());
+    // Viewport bottom just inside the tall block.
+    let offset = (tall.1 - VIEWPORT_HEIGHT + 40.0).max(0.0);
+    common::store_offset(&ctx, first.out.id, first.out.state, Vec2::new(0.0, offset));
+    let frame = render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
+
+    let frontier = frontier(&mut cache).expect("the document is still being measured");
+    let content_top = frame.out.inner_rect.top() - frame.out.state.unclamped_offset().y;
+    let deepest = frame
+        .texts
+        .iter()
+        .map(|r| r.bottom() - content_top)
+        .fold(0.0_f32, f32::max);
+    assert!(visible_count(&frame) > 0, "the frame painted nothing visible");
+    assert!(
+        deepest <= frontier.y + 1.0,
+        "painted text reaches content y {deepest:.1}, past the frontier at {:.1}",
+        frontier.y
+    );
+}

@@ -2608,7 +2608,6 @@ impl CommonMarkViewerInternal {
                                 y: end_y,
                                 src_end,
                                 row_top: (row.top() - origin_screen_y) + origin_content_y,
-                                row_height: row.height(),
                                 min_rect_bottom: (ui.min_rect().bottom() - origin_screen_y)
                                     + origin_content_y,
                             });
@@ -2776,9 +2775,10 @@ impl CommonMarkViewerInternal {
             return;
         };
         let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
-        // Start on the bootstrap's own cursor row at the frontier (its top
-        // and height), so the next block's leading newline and a heading's
-        // `end_row` move the cursor exactly as they do in a full bootstrap.
+        // Start on the bootstrap's own cursor row at the frontier, reaching as
+        // far down as its laid-out content, so the next block's leading
+        // newline and a heading's `end_row` move the cursor exactly as they
+        // do in a full bootstrap.
         let rect = egui::Rect::from_min_size(
             egui::pos2(content_left, content_top + frontier.row_top),
             egui::vec2(max_width, 0.0),
@@ -2791,7 +2791,7 @@ impl CommonMarkViewerInternal {
                 .invisible(),
         );
         child.spacing_mut().item_spacing.x = 0.0;
-        child.set_row_height(frontier.row_height);
+        child.set_row_height(0.0);
         child.expand_to_include_y(rect.top() + (frontier.min_rect_bottom - frontier.row_top));
 
         let mut measurer = CommonMarkViewerInternal::new();

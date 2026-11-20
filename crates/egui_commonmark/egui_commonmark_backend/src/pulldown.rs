@@ -63,11 +63,10 @@ pub struct MeasureFrontier {
     pub y: f32,
     /// Source byte offset where the last measured block ends.
     pub src_end: usize,
-    /// Content y of the top of egui's cursor row at the frontier, and that
-    /// row's height. A resumed run starts on exactly this row: the next
-    /// block's leading newline lands on it, as it does in a full bootstrap.
+    /// Content y of the top of egui's cursor row at the frontier. A resumed
+    /// run starts on this row: the next block's leading newline lands on it,
+    /// as it does in a full bootstrap.
     pub row_top: f32,
-    pub row_height: f32,
     /// Content y of the bottom of the laid-out content (`Ui::min_rect`) at
     /// the frontier. egui starts a wrapped row below it, so the resumed run's
     /// child must reach as far down as the bootstrap's ui did.
