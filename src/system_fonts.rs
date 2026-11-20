@@ -1816,14 +1816,19 @@ mod tests {
         // Symbol blocks (arrows, math operators, technical, shapes, misc
         // symbols, dingbats) and ×, anywhere in the app's non-test source.
         let source = include_str!("main.rs");
-        let app = &source[..source.find("#[cfg(test)]\nmod tests {").expect("test module marker")];
+        // `\nmod tests {` rather than the `#[cfg(test)]` line before it: a
+        // Windows checkout has CRLF line endings.
+        let app = &source[..source.find("\nmod tests {").expect("test module marker")];
         let mut symbols: Vec<char> = app
             .chars()
             .filter(|&c| matches!(c as u32, 0x2190..=0x2BFF | 0xD7))
             .collect();
         symbols.sort_unstable();
         symbols.dedup();
-        assert!(symbols.contains(&'\u{229E}'), "scan found no UI symbols: {symbols:?}");
+        assert!(
+            symbols.contains(&'\u{229E}'),
+            "scan found no UI symbols: {symbols:?}"
+        );
 
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
             let font_id = egui::FontId::new(14.0, family.clone());
@@ -1832,7 +1837,10 @@ mod tests {
                 .filter(|&&ch| !ctx.fonts_mut(|f| f.has_glyph(&font_id, ch)))
                 .map(|ch| format!("{ch} U+{:04X}", *ch as u32))
                 .collect();
-            assert!(missing.is_empty(), "{family:?} has no glyph for {missing:?}");
+            assert!(
+                missing.is_empty(),
+                "{family:?} has no glyph for {missing:?}"
+            );
         }
     }
 
