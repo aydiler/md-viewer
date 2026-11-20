@@ -939,6 +939,41 @@ fn install_emoji_fonts(definitions: &mut FontDefinitions, include_color: bool) {
     }
 }
 
+/// A 29-glyph subset of DejaVu Sans with the symbols md-viewer's own UI uses:
+/// ⊞ ⊟ ↻ (explorer), ☾ ✓ (View menu), ← ↑ → ↓ ✕ ● (find bar, history, error
+/// bar) and a few close relatives (#255).
+///
+/// egui 0.37 dropped `emoji-icon-font` from its defaults, which used to draw
+/// ⊞ ⊟ ↻, and none of the remaining bundled faces has ☾ ✓ ✕. Without DejaVu or
+/// Noto Symbols installed these painted as missing-glyph boxes. Made with:
+///
+/// ```text
+/// pyftsubset /usr/share/fonts/TTF/DejaVuSans.ttf --no-hinting --layout-features='' \
+///   --output-file=assets/fonts/DejaVuSans-UiSymbols.ttf \
+///   --unicodes=U+00D7,U+2190-2193,U+21BB,U+21BA,U+27F3,U+2248,U+2260,U+229E,U+229F,\
+///   U+229D,U+25B2,U+25B6,U+25BC,U+25C0,U+25CF,U+25CB,U+2600,U+263E,U+26A0,\
+///   U+2713,U+2714,U+2715,U+2716,U+2717,U+2026,U+00B7
+/// ```
+///
+/// (ttf-dejavu 2.37). License in `THIRD_PARTY_NOTICES`.
+const UI_SYMBOL_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/DejaVuSans-UiSymbols.ttf");
+
+/// Install the faces md-viewer bundles as last-resort fallbacks: the emoji
+/// faces, then the UI symbol face. Appended last, so any installed font and
+/// the bundled emoji face still draw a character they have.
+fn install_bundled_fallbacks(definitions: &mut FontDefinitions, include_color: bool) {
+    install_emoji_fonts(definitions, include_color);
+    definitions.font_data.insert(
+        "UiSymbols".to_owned(),
+        FontData::from_static(UI_SYMBOL_FONT_BYTES).into(),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        if let Some(chain) = definitions.families.get_mut(&family) {
+            chain.push("UiSymbols".to_owned());
+        }
+    }
+}
+
 /// Which faces [`FontLoader::definitions`] installs.
 ///
 /// Loading every script and emoji fallback took about 180 ms of each launch
@@ -1017,7 +1052,7 @@ impl FontLoader {
                 preset_mono_families,
             )
         };
-        install_emoji_fonts(&mut definitions, full);
+        install_bundled_fallbacks(&mut definitions, full);
         if installed.is_empty() {
             log::warn!("No suitable system font fallbacks found; using egui defaults.");
         } else {
@@ -1201,7 +1236,7 @@ mod tests {
         if !mono.is_empty() {
             install_preset_mono_font(&mut collection, &mut source_cache, &mut definitions, mono);
         }
-        install_emoji_fonts(&mut definitions, true);
+        install_bundled_fallbacks(&mut definitions, true);
         definitions
     }
 
@@ -1756,6 +1791,55 @@ mod tests {
             assert!(
                 missing.is_empty(),
                 "copy button label {label:?} has no glyph for {missing:?}"
+            );
+        }
+    }
+
+    /// Every symbol md-viewer's own UI shows (explorer, menus, find bar, error
+    /// bar) has a glyph without any system font (#255). egui 0.37 dropped
+    /// `emoji-icon-font`, which used to draw ⊞ ⊟ ↻, and no bundled face has
+    /// ☾ ✓ ✕, so on a system without DejaVu or Noto Symbols they painted as
+    /// missing-glyph boxes.
+    #[test]
+    fn ui_symbols_render_without_system_fonts() {
+        let mut definitions = FontDefinitions::default();
+        install_bundled_fallbacks(&mut definitions, true);
+        definitions.font_data.remove("ColorEmoji");
+        for chain in definitions.families.values_mut() {
+            chain.retain(|name| name != "ColorEmoji");
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(definitions);
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
+
+        // Symbol blocks (arrows, math operators, technical, shapes, misc
+        // symbols, dingbats) and ×, anywhere in the app's non-test source.
+        let source = include_str!("main.rs");
+        // `\nmod tests {` rather than the `#[cfg(test)]` line before it: a
+        // Windows checkout has CRLF line endings.
+        let app = &source[..source.find("\nmod tests {").expect("test module marker")];
+        let mut symbols: Vec<char> = app
+            .chars()
+            .filter(|&c| matches!(c as u32, 0x2190..=0x2BFF | 0xD7))
+            .collect();
+        symbols.sort_unstable();
+        symbols.dedup();
+        assert!(
+            symbols.contains(&'\u{229E}'),
+            "scan found no UI symbols: {symbols:?}"
+        );
+
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let font_id = egui::FontId::new(14.0, family.clone());
+            let missing: Vec<String> = symbols
+                .iter()
+                .filter(|&&ch| !ctx.fonts_mut(|f| f.has_glyph(&font_id, ch)))
+                .map(|ch| format!("{ch} U+{:04X}", *ch as u32))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{family:?} has no glyph for {missing:?}"
             );
         }
     }

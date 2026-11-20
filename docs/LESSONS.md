@@ -1835,6 +1835,7 @@ An empty first list is the assertion worth making. It also explains rises in the
 - **`textures_delta` must be consumed.** Headless test frames debug-assert on an unconsumed delta. Clear it in the frame helper, not in each test.
 - **A workaround can be what you are measuring.** The old scroll-while-selecting workaround re-applied every wheel delta, so 0.33 scrolled 2× egui's speed. Removing it, because its API is gone, halved scrolling; `line_scroll_speed = 80` restores it. And `forward_shift_wheel_to_horizontal_scroll` never acted at all: egui converts Shift+wheel to a horizontal delta before app code sees it.
 - **Opt-in eframe features.** `clipboard` and `links` became opt-in. Without them, copy and link opening fail with no error.
+- **`emoji-icon-font` is gone from the defaults.** It drew ⊞ ⊟ ↻ and other UI symbols; after the upgrade they came from system fonts only and showed as boxes on machines without DejaVu or Noto Symbols (#255). The bundled `DejaVuSans-UiSymbols.ttf` covers them now, and `ui_symbols_render_without_system_fonts` scans `main.rs` for any new symbol that lacks a glyph.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs`, `crates/egui_commonmark/egui_commonmark/tests/common/mod.rs`, `src/main.rs`, `Cargo.toml`, `docs/devlog/089-egui-0.37.md`
 
 ### Bidi in md-viewer: what the vendored epaint fixes and what it cannot
