@@ -289,6 +289,29 @@ impl<'f> CommonMarkViewer<'f> {
         self
     }
 
+    /// Measure a large document over several frames in
+    /// [`show_scrollable`](Self::show_scrollable).
+    ///
+    /// Off by default: the first frame lays out the whole document to find
+    /// its extent and block positions. With this on, the first frame lays out
+    /// only the top of the document; later frames paint the visible part and
+    /// measure the rest in time-limited chunks, and the scroll extent is an
+    /// estimate until measurement finishes. Scrolling past the measured part,
+    /// a scroll offset passed in, and [`force_full_render`](Self::force_full_render)
+    /// measure what they need at once.
+    pub fn progressive_measure(mut self, enabled: bool) -> Self {
+        self.options.progressive_measure = enabled;
+        self
+    }
+
+    /// Test hook: with progressive measurement, measure `blocks` block
+    /// boundaries per frame instead of using the time budget.
+    #[doc(hidden)]
+    pub fn progressive_measure_blocks(mut self, blocks: Option<usize>) -> Self {
+        self.options.progressive_measure_blocks = blocks;
+        self
+    }
+
     /// Parse a leading `---` block as YAML frontmatter and render it as a
     /// key/value table instead of as document content.
     ///

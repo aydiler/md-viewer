@@ -4272,6 +4272,11 @@ impl MarkdownApp {
                             .table_max_width(Some(content_width))
                             .indentation_spaces(2)
                             .use_strong_font_family(true)
+                            // Large documents: lay out the first screens in the
+                            // first frame and measure the rest over the next
+                            // frames, instead of all of it before the first
+                            // paint (devlog 103).
+                            .progressive_measure(true)
                             // Frontmatter is metadata, not prose: show it as a
                             // key/value table rather than a thematic break plus a
                             // paragraph of raw `key: value` lines (#117).

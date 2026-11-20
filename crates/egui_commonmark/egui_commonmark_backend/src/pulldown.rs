@@ -47,6 +47,30 @@ pub struct ScrollableCache {
     /// excluded, because their paint runs past the document and would grow the
     /// extent with every over-eager scroll. Reset wherever `page_size` is.
     pub observed_extent_bottom: f32,
+    /// Where measurement resumes while the document is only partly measured
+    /// (progressive measurement, devlog 103). While this is `Some`,
+    /// `page_size` holds an estimated extent and `split_points` end at the
+    /// frontier. Reset wherever `split_points` are.
+    pub measure_frontier: Option<MeasureFrontier>,
+}
+
+/// The point up to which a progressively measured document is laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasureFrontier {
+    /// Index of the next event to measure.
+    pub event_index: usize,
+    /// Content y of the cursor after the last measured block.
+    pub y: f32,
+    /// Source byte offset where the last measured block ends.
+    pub src_end: usize,
+    /// Content y of the top of egui's cursor row at the frontier. A resumed
+    /// run starts on this row: the next block's leading newline lands on it,
+    /// as it does in a full bootstrap.
+    pub row_top: f32,
+    /// Content y of the bottom of the laid-out content (`Ui::min_rect`) at
+    /// the frontier. egui starts a wrapped row below it, so the resumed run's
+    /// child must reach as far down as the bootstrap's ui did.
+    pub min_rect_bottom: f32,
 }
 
 /// Layout geometry of the content column, captured at bootstrap.

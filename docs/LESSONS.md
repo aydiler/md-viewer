@@ -1577,6 +1577,17 @@ test, a silent probe, a zero, a clean diff. What distinguishes evidence from
 decoration is whether you can say what the *other* outcome would have looked
 like, and have seen it at least once.
 
+### A layout pass that resumes mid-document must restore egui's cursor state, not just the y
+**Context:** Devlog 103. Progressive measurement lays a document out in chunks; each chunk resumes at the previous one's last safe block boundary, in a fresh child `Ui` placed at the recorded y.
+**Problem:** the equivalence test (progressive split points against a one-frame bootstrap) found points up to 15 px off, and the error grew with every chunk. A wrapping egui `Ui` at a block boundary carries more than a y:
+- **the cursor row**: a block ends with a newline label (`ui.label("\n")`), which leaves the cursor on an empty row, and the next block's own leading newline lands on that row. A fresh child has no such row;
+- **`min_rect`**: egui starts a wrapped row at `min_rect.bottom() + spacing` (`layout.rs`, "tighter packing"), and a fresh child's `min_rect` is empty;
+- **renderer flags**: `should_not_start_newline_forced` is cleared after event 0 in the bootstrap, and a fresh renderer has it set, so a heading at the boundary was laid out as if it opened the document.
+**Fix:** record the cursor row's top and `min_rect().bottom()` with the frontier; start the child on that row, `expand_to_include_y` to that bottom, and clear the flag before the first event. Recorded y values are row *bottoms* (`next_widget_position` is the centre of a zero-size bottom-aligned frame), so the content origin of the resumed run is the row top, not the recorded y.
+**Related:** the viewport slice pass starts from a fresh renderer too, which is why a slice beginning at a heading sits a few pixels off the bootstrap (the 32 px tolerance in "Viewport slices must reproduce the bootstrap's layout exactly").
+**Test lesson:** a check on *painted* shapes cannot show how far a pass laid out: labels outside the clip are laid out but not painted (`is_rect_visible`). The frontier-cap test passed with the cap removed until it observed recorded heading positions instead, which are set on layout.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`run_events`, `measure_from_frontier`), `crates/egui_commonmark/egui_commonmark/tests/progressive_measure.rs`, `docs/devlog/103-progressive-measure.md`
+
 ### A test runner that stops at the first failing target reports nothing about the targets it never ran
 
 **Context:** Reviewing PR #182 (Phase 2 dense-table overflow). The contributor had
