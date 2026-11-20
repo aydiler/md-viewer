@@ -1568,6 +1568,63 @@ const MAX_TABLE_MEASURED_CELLS: usize = 4_096;
 /// at every text size.
 const TRAILING_PADDING_BODY_LINES: f32 = 2.0;
 
+/// What a measuring run must achieve before it may stop at a block boundary
+/// (progressive measurement, devlog 103): reach `min_y`, then spend `budget`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MeasureStop {
+    /// Content y the run must pass before it may stop.
+    pub(crate) min_y: f32,
+    pub(crate) budget: MeasureBudget,
+    /// Safe block boundaries passed so far in this run.
+    blocks: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MeasureBudget {
+    /// Stop as soon as `min_y` is reached.
+    Nothing,
+    /// Stop after this many block boundaries (deterministic, for tests).
+    Blocks(usize),
+    /// Stop once this instant has passed.
+    #[cfg(not(target_arch = "wasm32"))]
+    Until(std::time::Instant),
+}
+
+impl MeasureBudget {
+    /// A time budget from now. `std::time::Instant` panics on wasm32, so the
+    /// web build measures a fixed number of blocks per chunk instead.
+    fn millis(ms: u64) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::Until(std::time::Instant::now() + std::time::Duration::from_millis(ms))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::Blocks((ms as usize) * 8)
+        }
+    }
+}
+
+impl MeasureStop {
+    pub(crate) fn new(min_y: f32, budget: MeasureBudget) -> Self {
+        Self { min_y, budget, blocks: 0 }
+    }
+
+    /// Called at every safe block boundary with the content y after it.
+    fn reached(&mut self, y: f32) -> bool {
+        self.blocks += 1;
+        if y < self.min_y {
+            return false;
+        }
+        match self.budget {
+            MeasureBudget::Nothing => true,
+            MeasureBudget::Blocks(n) => self.blocks >= n,
+            #[cfg(not(target_arch = "wasm32"))]
+            MeasureBudget::Until(deadline) => std::time::Instant::now() >= deadline,
+        }
+    }
+}
+
 /// Tolerance (in points) when deciding whether a slice reached the measured
 /// document bottom: the viewport's bottom edge may exceed `page_size` by up
 /// to this much and still count as non-overshoot. Without it, float drift
@@ -2411,6 +2468,137 @@ impl CommonMarkViewerInternal {
         hasher.finish()
     }
 
+    /// Lay out `events` in order, recording a split point at every safe block
+    /// boundary when `split_points_id` is set. This is the measuring loop of
+    /// the bootstrap pass, shared with progressive measurement (devlog 103).
+    ///
+    /// `first_index` is the stream index of the first event yielded, and
+    /// `origin_screen_y` is the screen y that corresponds to content y
+    /// `origin_content_y`: 0 and the column's top for a full bootstrap, the
+    /// frontier for a measurement that resumes part-way.
+    ///
+    /// With a `stop` rule the run may end after any safe boundary once the
+    /// rule is satisfied; it then returns where measurement must resume.
+    /// It returns `None` when the stream was laid out to its end.
+    #[allow(clippy::too_many_arguments)]
+    fn run_events<'e>(
+        &mut self,
+        ui: &mut Ui,
+        events: &mut Peekable<impl Iterator<Item = EventIteratorItem<'e>>>,
+        first_index: usize,
+        event_count: usize,
+        origin_screen_y: f32,
+        origin_content_y: f32,
+        cache: &mut CommonMarkCache,
+        options: &CommonMarkOptions,
+        max_width: f32,
+        split_points_id: Option<Id>,
+        mut stop: Option<MeasureStop>,
+    ) -> Option<MeasureFrontier> {
+        let content_y = |screen_y: f32| (screen_y - origin_screen_y).max(0.0) + origin_content_y;
+        while let Some((index, (e, src_span))) = events.next() {
+            let start_position = ui.next_widget_position();
+            let src_end = src_span.end;
+            // Add a viewport-skip waypoint at every block-level end (not
+            // just list-internal ends as the original code did). Without
+            // this, docs whose content is mostly headings + paragraphs
+            // produce empty split_points, the viewport-skip math falls
+            // back to Pos2::ZERO, and rendered content overlaps. This is
+            // the root cause of the "buggy in scenarios more complex
+            // than the example application" warning on show_scrollable.
+            let is_block_end = matches!(
+                &e,
+                pulldown_cmark::Event::End(end) if is_block_end_tag(end)
+            );
+            // `table()` consumes the complete table, including its End
+            // event, from `events`. The outer loop therefore never sees
+            // TagEnd::Table and must record that block boundary from its
+            // Start event after processing finishes.
+            let is_atomic_table = matches!(
+                &e,
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_))
+            );
+
+            if events.peek().is_none() {
+                self.line.should_end_newline_forced = false;
+            }
+
+            self.process_event(ui, events, e, src_span, cache, options, max_width);
+
+            // Defense in depth: only add a split point when we're at a
+            // block end (or just consumed an atomic table) AND outside any
+            // stateful container (list, table, blockquote). The
+            // viewport-skip path in `show_scrollable`
+            // recreates the renderer with `CommonMarkViewerInternal::new`
+            // each frame, so the transient state of `self.list`,
+            // `self.is_table`, and `self.is_blockquote` is *not* replayed
+            // when iteration jumps in via `skip(first_event_index)`. A
+            // split point inside one of those containers would land
+            // iteration mid-state — for lists this fires
+            // `List::start_item` on an empty stack and panics
+            // (`lib.rs:566 unreachable!()`); for tables / blockquotes it
+            // would visually corrupt rendering. The container-state
+            // check below must run after `process_event` (above) since
+            // that's where the start/end of these containers updates
+            // `self.list` / `self.is_table` / `self.is_blockquote`.
+            let safe_for_split = (is_block_end || is_atomic_table)
+                && !self.list.is_inside_a_list()
+                && !self.is_table
+                && !self.is_blockquote;
+
+            if let Some(source_id) = split_points_id {
+                if safe_for_split {
+                    let end_position = ui.next_widget_position();
+                    let split_index = if is_atomic_table {
+                        events
+                            .peek()
+                            .map(|(next_index, _)| *next_index)
+                            .unwrap_or(event_count)
+                    } else {
+                        index.saturating_add(1)
+                    };
+                    let end_y = content_y(end_position.y);
+                    let scroll_cache = scroll_cache(cache, &source_id);
+                    let split_point_exists = scroll_cache
+                        .split_points
+                        .iter()
+                        .any(|(i, _, _)| *i == split_index);
+
+                    if !split_point_exists {
+                        let relative_start =
+                            egui::pos2(start_position.x, content_y(start_position.y));
+                        let relative_end = egui::pos2(end_position.x, end_y);
+                        // Resume after this complete block. Starting at
+                        // its End tag would omit the matching Start state.
+                        scroll_cache.split_points.push((
+                            split_index,
+                            relative_start,
+                            relative_end,
+                        ));
+                    }
+
+                    if let Some(stop) = stop.as_mut() {
+                        if split_index < event_count && stop.reached(end_y) {
+                            if index == first_index {
+                                self.line.should_not_start_newline_forced = false;
+                            }
+                            return Some(MeasureFrontier {
+                                event_index: split_index,
+                                y: end_y,
+                                src_end,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if index == first_index {
+                self.line.should_not_start_newline_forced = false;
+            }
+        }
+        None
+    }
+
     /// Be aware that this acquires egui::Context internally.
     /// If split Id is provided then split points will be populated
     pub(crate) fn show(
@@ -2472,108 +2660,28 @@ impl CommonMarkViewerInternal {
             let content_origin_x = ui.max_rect().left();
             self.render_origin_y = content_origin_y;
 
-            // Use cached events — clone the Vec reference data for iteration
-            // (events are 'static so this is cheap pointer copies, not re-parsing)
-            let events_data = cache.get_cached_events(content_hash)
-                .expect("events just cached")
-                .to_vec();
+            // Iterate the cached events by reference and clone them one at a
+            // time; the whole stream used to be copied here with `to_vec`.
+            let events_data = cache
+                .take_cached_events(content_hash)
+                .expect("events just cached");
             let event_count = events_data.len();
-            let mut events = events_data
-                .into_iter()
-                .enumerate()
-                .peekable();
-
-            while let Some((index, (e, src_span))) = events.next() {
-                let start_position = ui.next_widget_position();
-                // Add a viewport-skip waypoint at every block-level end (not
-                // just list-internal ends as the original code did). Without
-                // this, docs whose content is mostly headings + paragraphs
-                // produce empty split_points, the viewport-skip math falls
-                // back to Pos2::ZERO, and rendered content overlaps. This is
-                // the root cause of the "buggy in scenarios more complex
-                // than the example application" warning on show_scrollable.
-                let is_block_end = matches!(
-                    &e,
-                    pulldown_cmark::Event::End(end) if is_block_end_tag(end)
-                );
-                // `table()` consumes the complete table, including its End
-                // event, from `events`. The outer loop therefore never sees
-                // TagEnd::Table and must record that block boundary from its
-                // Start event after processing finishes.
-                let is_atomic_table = matches!(
-                    &e,
-                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_))
-                );
-
-                if events.peek().is_none() {
-                    self.line.should_end_newline_forced = false;
-                }
-
-                self.process_event(ui, &mut events, e, src_span, cache, options, max_width);
-
-                // Defense in depth: only add a split point when we're at a
-                // block end (or just consumed an atomic table) AND outside any
-                // stateful container (list, table, blockquote). The
-                // viewport-skip path in `show_scrollable`
-                // recreates the renderer with `CommonMarkViewerInternal::new`
-                // each frame, so the transient state of `self.list`,
-                // `self.is_table`, and `self.is_blockquote` is *not* replayed
-                // when iteration jumps in via `skip(first_event_index)`. A
-                // split point inside one of those containers would land
-                // iteration mid-state — for lists this fires
-                // `List::start_item` on an empty stack and panics
-                // (`lib.rs:566 unreachable!()`); for tables / blockquotes it
-                // would visually corrupt rendering. The container-state
-                // check below must run after `process_event` (above) since
-                // that's where the start/end of these containers updates
-                // `self.list` / `self.is_table` / `self.is_blockquote`.
-                let safe_for_split = (is_block_end || is_atomic_table)
-                    && !self.list.is_inside_a_list()
-                    && !self.is_table
-                    && !self.is_blockquote;
-
-                if let Some(source_id) = split_points_id {
-                    if safe_for_split {
-                        let scroll_cache = scroll_cache(cache, &source_id);
-                        let end_position = ui.next_widget_position();
-
-                        let split_index = if is_atomic_table {
-                            events
-                                .peek()
-                                .map(|(next_index, _)| *next_index)
-                                .unwrap_or(event_count)
-                        } else {
-                            index.saturating_add(1)
-                        };
-                        let split_point_exists = scroll_cache
-                            .split_points
-                            .iter()
-                            .any(|(i, _, _)| *i == split_index);
-
-                        if !split_point_exists {
-                            let relative_start = egui::pos2(
-                                start_position.x,
-                                (start_position.y - content_origin_y).max(0.0),
-                            );
-                            let relative_end = egui::pos2(
-                                end_position.x,
-                                (end_position.y - content_origin_y).max(0.0),
-                            );
-                            // Resume after this complete block. Starting at
-                            // its End tag would omit the matching Start state.
-                            scroll_cache.split_points.push((
-                                split_index,
-                                relative_start,
-                                relative_end,
-                            ));
-                        }
-                    }
-                }
-
-                if index == 0 {
-                    self.line.should_not_start_newline_forced = false;
-                }
-            }
+            let mut events = events_data.iter().cloned().enumerate().peekable();
+            self.run_events(
+                ui,
+                &mut events,
+                0,
+                event_count,
+                content_origin_y,
+                0.0,
+                cache,
+                options,
+                max_width,
+                split_points_id,
+                None,
+            );
+            drop(events);
+            cache.set_cached_events(content_hash, events_data);
 
             // Trailing breathing room below the last block: see
             // TRAILING_PADDING_BODY_LINES.

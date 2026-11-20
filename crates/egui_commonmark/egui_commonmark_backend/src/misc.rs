@@ -2822,6 +2822,19 @@ impl CommonMarkCache {
         self.cached_events = Some((content_hash, events));
     }
 
+    /// Move the cached events for `content_hash` out of the cache, so a pass
+    /// can iterate them by reference while it holds the cache mutably. Put
+    /// them back with [`Self::set_cached_events`].
+    pub fn take_cached_events(&mut self, content_hash: u64) -> Option<Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>> {
+        match self.cached_events.take() {
+            Some((hash, events)) if hash == content_hash => Some(events),
+            other => {
+                self.cached_events = other;
+                None
+            }
+        }
+    }
+
     /// Record which paragraphs and headings (by source start offset) are laid
     /// out right to left. Replaces the previous set.
     pub fn set_rtl_block_starts(&mut self, starts: std::collections::HashSet<usize>) {

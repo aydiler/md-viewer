@@ -47,6 +47,22 @@ pub struct ScrollableCache {
     /// excluded, because their paint runs past the document and would grow the
     /// extent with every over-eager scroll. Reset wherever `page_size` is.
     pub observed_extent_bottom: f32,
+    /// Where measurement resumes while the document is only partly measured
+    /// (progressive measurement, devlog 103). While this is `Some`,
+    /// `page_size` holds an estimated extent and `split_points` end at the
+    /// frontier. Reset wherever `split_points` are.
+    pub measure_frontier: Option<MeasureFrontier>,
+}
+
+/// The point up to which a progressively measured document is laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasureFrontier {
+    /// Index of the next event to measure.
+    pub event_index: usize,
+    /// Content y of the cursor after the last measured block.
+    pub y: f32,
+    /// Source byte offset where the last measured block ends.
+    pub src_end: usize,
 }
 
 /// Layout geometry of the content column, captured at bootstrap.
