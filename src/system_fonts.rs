@@ -1236,7 +1236,7 @@ mod tests {
         if !mono.is_empty() {
             install_preset_mono_font(&mut collection, &mut source_cache, &mut definitions, mono);
         }
-        install_emoji_fonts(&mut definitions, true);
+        install_bundled_fallbacks(&mut definitions, true);
         definitions
     }
 
