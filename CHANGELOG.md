@@ -2,6 +2,11 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Double-clicking the title bar maximizes and restores the window on GNOME (#266).** On Wayland compositors that leave window decorations to the app (GNOME, weston), md-viewer drew a minimal fallback title bar that only moved the window; a double-click did nothing. It now draws the Adwaita-style title bar that eframe apps get by default, which shows the window title and maximizes or restores on a double-click. KDE, Hyprland, Sway and X11 sessions, where the compositor or window manager draws the title bar, are unchanged.
+
 ## [0.3.9] - 2026-11-21
 
 Large documents open much faster, and four interface bugs are fixed: missing symbol glyphs, Mermaid in dark mode, the code-block copy button, and drag-selection in Edit mode.
