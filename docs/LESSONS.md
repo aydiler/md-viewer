@@ -281,6 +281,16 @@ if raw_scroll.abs() > 0.0 {
 **Also:** a TextEdit scrolls to its cursor only when the cursor moves, so a drag held still past the edge never scrolls. Drive the offset yourself while the response is `dragged()` (`edge_autoscroll_speed`).
 **Files:** `src/main.rs`, `docs/devlog/107-edit-selection-scroll.md`
 
+### A floating scrollbar is drawn over the content, so the column must leave room for it
+**Context:** devlog 111. In Full Width, code-block backgrounds, table frames and long lines ran under the document's scrollbar.
+**Root cause:** egui's floating scrollbar is painted on top of the scroll area's content and takes no layout space (a solid bar does). With no `default_width`, the renderer's column was the whole scroll area.
+**Fix:** `show_scrollable` sets `scrollbar_gutter` (`bar_inner_margin + bar_width + bar_outer_margin`, 0 for a solid bar) and `show_measuring` caps the column at `max_rect().right() - gutter`; the width flows into `ContentGeometry`, so slices and progressive measurement agree.
+**Three traps on the way, each caught by a measurement rather than by reading:**
+- *Centering moves a narrowed column.* The column is centred in the viewport, so narrowing it by 14 px moved it 7 px right instead of freeing the right side. The margin is now the old centred margin, clamped so the column never reaches into the gutter.
+- *Inside the column, `max_rect` is already the column.* A table cap of `max_rect().right() - gutter` subtracted the gutter twice and left tables 14 px short. Print `max_rect`, cursor and bound before reasoning about which coordinate space a `Ui` is in.
+- *A cap that applies with no gutter changes other callers.* Capping tables at `max_rect` unconditionally changed plain `show()` layouts (`html_table_uses_height_aware_column_widths` went red), so the cap applies only when a gutter is reserved. That failure surfaced only on a `--no-fail-fast` run: a plain `cargo test` stopped at the first failing target.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`floating_scrollbar_reach`, `show_measuring`, both table sites), `crates/egui_commonmark/egui_commonmark/tests/scrollbar_gutter.rs`, `docs/devlog/111-scrollbar-gutter.md`
+
 ### Resize handle and scrollbar overlap causes jitter
 **Context:** Resizing outline panel caused mouse jitter when near content scrollbar
 **Problem:** The SidePanel resize handle sensing area overlaps with the adjacent ScrollArea scrollbar, causing rapid switching between resize and scroll modes.
