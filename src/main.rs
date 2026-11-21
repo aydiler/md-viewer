@@ -2286,6 +2286,73 @@ impl FileWatcher {
     }
 }
 
+/// The Fonts dialog's family list. The scan behind it probes every installed
+/// family's Latin coverage (`scan_pickable_font_families`, about 0.5 s of
+/// CPU), so it starts only when the dialog first asks for it, at most once per
+/// run (devlog 109).
+#[derive(Default)]
+struct FontFamilyList {
+    /// One canonical name per body-capable family. Empty until the scan lands.
+    names: Vec<String>,
+    /// Lowercased `names`, computed once so the dialog's search filter does
+    /// not re-lowercase every name on every frame.
+    names_lower: Vec<String>,
+    pending: Option<Receiver<Vec<String>>>,
+    requested: bool,
+}
+
+impl FontFamilyList {
+    /// Starts the scan unless one was already started in this run.
+    fn request(&mut self, spawn: impl FnOnce() -> Option<Receiver<Vec<String>>>) {
+        if self.requested {
+            return;
+        }
+        self.requested = true;
+        self.pending = spawn();
+    }
+
+    /// True while a started scan has not delivered yet.
+    fn scanning(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Collects a finished scan without blocking. Returns true when the list
+    /// arrived this call.
+    fn poll(&mut self) -> bool {
+        let Some(rx) = &self.pending else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(names) => {
+                self.names_lower = names.iter().map(|name| name.to_ascii_lowercase()).collect();
+                self.names = names;
+                self.pending = None;
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                // The scan thread ended without sending (it panicked): stop
+                // polling and keep "System Default" as the only choice.
+                self.pending = None;
+                false
+            }
+        }
+    }
+}
+
+/// Runs `scan_pickable_font_families` on its own thread. `None` if the thread
+/// could not be spawned; the dialog then offers only "System Default".
+fn spawn_font_family_scan() -> Option<Receiver<Vec<String>>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("font-family-scan".to_owned())
+        .spawn(move || {
+            let _ = tx.send(scan_pickable_font_families());
+        })
+        .ok()
+        .map(|_| rx)
+}
+
 struct MarkdownApp {
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -2308,18 +2375,9 @@ struct MarkdownApp {
     show_color_settings_dialog: bool,
     // Document body/heading font. `None` = auto-detected system sans-serif.
     selected_font_family: Option<String>,
-    // Body-font families the picker offers, scanned in a background thread:
-    // one canonical name per family, only families that can actually serve
-    // as the body font. Empty until the scan lands (the dialog shows a
-    // scanning note; "System Default" always works).
-    available_font_families: Vec<String>,
-    // Lowercased copy of `available_font_families`, precomputed once so the
-    // font-picker search filter doesn't re-lowercase every name on every
-    // frame it's open (see docs/EGUI_WORKFLOW.md: never allocate in the
-    // render loop what can be cached).
-    available_font_families_lower: Vec<String>,
-    // In-flight background scan producing `available_font_families`.
-    pending_font_family_scan: Option<Receiver<Vec<String>>>,
+    // Body-font families the picker offers, scanned in a background thread
+    // the first time the Fonts dialog opens (devlog 109).
+    font_families: FontFamilyList,
     // Mirrors the font setup inputs (picked family, preset, size class): only
     // reload fonts when this tuple changes.
     last_applied_font_config: Option<(Option<String>, FontPreset, TextSizeClass)>,
@@ -2424,19 +2482,6 @@ impl MarkdownApp {
             FontScope::Base,
         );
         install_fonts(&cc.egui_ctx, base_fonts.clone(), text_size_class);
-
-        // Scan the picker's family list off the UI thread: probing every
-        // family's Latin coverage takes ~0.5s on a stock Arch system (see
-        // `scan_pickable_font_families`). Until the result lands, the font
-        // dialog shows "System Default" plus a scanning note.
-        let (font_family_tx, font_family_rx) = mpsc::channel();
-        let scan_spawned = std::thread::Builder::new()
-            .name("font-family-scan".to_owned())
-            .spawn(move || {
-                let _ = font_family_tx.send(scan_pickable_font_families());
-            })
-            .is_ok();
-        let pending_font_family_scan = scan_spawned.then_some(font_family_rx);
 
         // Clear stale egui widget data loaded from disk (scroll offsets, panel sizes, etc.)
         // We don't persist egui memory (see persist_egui_memory), but eframe always
@@ -2629,9 +2674,7 @@ impl MarkdownApp {
                 text_size_class,
             )),
             selected_font_family,
-            available_font_families: Vec::new(),
-            available_font_families_lower: Vec::new(),
-            pending_font_family_scan,
+            font_families: FontFamilyList::default(),
             pending_full_fonts: None,
             show_font_dialog: false,
             font_filter: String::new(),
@@ -4871,10 +4914,13 @@ impl MarkdownApp {
         if !self.show_font_dialog {
             return;
         }
+        // The family list is only needed here, so scan on first open rather
+        // than at every startup (devlog 109).
+        self.font_families.request(spawn_font_family_scan);
 
         let mut open = true;
         // Set inside the window closure, applied after `.show()` returns —
-        // the list rows borrow `available_font_families` while the closure
+        // the list rows borrow `font_families.names` while the closure
         // runs, so a picked name can't mutate `self` in place.
         let mut new_selection: Option<Option<String>> = None;
 
@@ -4956,11 +5002,9 @@ impl MarkdownApp {
                 });
 
                 // One canonical name per body-capable family, scanned once in
-                // the background at startup. While the scan is running, only
-                // "System Default" is offered.
-                if self.available_font_families.is_empty()
-                    && self.pending_font_family_scan.is_some()
-                {
+                // the background when the dialog first opens. While the scan is
+                // running, only "System Default" is offered.
+                if self.font_families.scanning() {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Scanning installed fonts…");
@@ -4968,7 +5012,7 @@ impl MarkdownApp {
                 }
 
                 // Only the empty-filter (common) case avoids allocating: it
-                // reuses `available_font_families` directly. A non-empty
+                // reuses `font_families.names` directly. A non-empty
                 // filter needs one Vec<usize> of matching indices, built from
                 // the precomputed lowercase names (no per-name allocation).
                 let filter = self.font_filter.to_ascii_lowercase();
@@ -4976,7 +5020,8 @@ impl MarkdownApp {
                     None
                 } else {
                     Some(
-                        self.available_font_families_lower
+                        self.font_families
+                            .names_lower
                             .iter()
                             .enumerate()
                             .filter(|(_, lower)| lower.contains(&filter))
@@ -4986,7 +5031,7 @@ impl MarkdownApp {
                 };
                 let match_count = filtered_indices
                     .as_ref()
-                    .map_or(self.available_font_families.len(), Vec::len);
+                    .map_or(self.font_families.names.len(), Vec::len);
 
                 let row_height = ui.spacing().interact_size.y;
                 // auto_shrink_x = false: egui's default (TRUE) shrinks the
@@ -5020,7 +5065,7 @@ impl MarkdownApp {
                                 let font_index = filtered_indices
                                     .as_ref()
                                     .map_or(row - 1, |indices| indices[row - 1]);
-                                let name = &self.available_font_families[font_index];
+                                let name = &self.font_families.names[font_index];
                                 let is_selected =
                                     self.selected_font_family.as_deref() == Some(name.as_str());
                                 if ui.selectable_label(is_selected, name).clicked() {
@@ -5496,30 +5541,10 @@ impl eframe::App for MarkdownApp {
         }
 
         // Collect the background font-family scan (async phase: poll the
-        // channel, never block the UI thread). Fills the picker's family
-        // list once, then drops the channel.
-        if self.pending_font_family_scan.is_some() {
-            let received = self
-                .pending_font_family_scan
-                .as_ref()
-                .map(Receiver::try_recv);
-            match received {
-                Some(Ok(names)) => {
-                    self.available_font_families_lower =
-                        names.iter().map(|name| name.to_ascii_lowercase()).collect();
-                    self.available_font_families = names;
-                    self.pending_font_family_scan = None;
-                    // The list may have landed while the font dialog was
-                    // already open; repaint so it appears without input.
-                    self.egui_ctx.request_repaint();
-                }
-                Some(Err(TryRecvError::Empty)) | None => {}
-                Some(Err(TryRecvError::Disconnected)) => {
-                    // Sender dropped without sending (thread spawn raced or
-                    // panicked) — stop polling, keep whatever list we have.
-                    self.pending_font_family_scan = None;
-                }
-            }
+        // channel, never block the UI thread). The list may land while the
+        // font dialog is open; repaint so it appears without input.
+        if self.font_families.poll() {
+            self.egui_ctx.request_repaint();
         }
 
         // Install the full font set built after a base-set startup, unless the
@@ -8058,5 +8083,54 @@ mod tests {
             "sctk-adwaita is not in the dependency graph: winit falls back to a \
              title bar that cannot maximize on double-click (#266)"
         );
+    }
+
+    #[test]
+    fn the_font_family_scan_does_not_start_at_startup() {
+        let list = FontFamilyList::default();
+        assert!(!list.requested, "a new app must not have started the scan");
+        assert!(!list.scanning());
+    }
+
+    #[test]
+    fn the_font_family_scan_starts_once_and_delivers() {
+        let spawns = std::cell::Cell::new(0);
+        let (tx, rx) = mpsc::channel();
+        let mut rx = Some(rx);
+        let mut list = FontFamilyList::default();
+        list.request(|| {
+            spawns.set(spawns.get() + 1);
+            rx.take()
+        });
+        assert!(list.scanning());
+        assert!(!list.poll(), "nothing sent yet");
+
+        tx.send(vec!["Noto Sans".to_owned(), "DejaVu Serif".to_owned()])
+            .unwrap();
+        assert!(list.poll(), "the list arrived");
+        assert!(!list.scanning());
+        assert_eq!(list.names, ["Noto Sans", "DejaVu Serif"]);
+        assert_eq!(list.names_lower, ["noto sans", "dejavu serif"]);
+
+        // Reopening the dialog must not scan again.
+        list.request(|| {
+            spawns.set(spawns.get() + 1);
+            None
+        });
+        assert_eq!(spawns.get(), 1, "the scan ran more than once");
+        assert_eq!(list.names.len(), 2);
+    }
+
+    #[test]
+    fn a_scan_that_ends_without_a_result_stops_scanning() {
+        let mut list = FontFamilyList::default();
+        list.request(|| {
+            let (tx, rx) = mpsc::channel::<Vec<String>>();
+            drop(tx);
+            Some(rx)
+        });
+        assert!(!list.poll());
+        assert!(!list.scanning(), "a dead scan must not spin forever");
+        assert!(list.names.is_empty());
     }
 }
