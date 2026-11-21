@@ -138,7 +138,9 @@ fn a_solid_scrollbar_gets_no_extra_gutter() {
     let (painted, _, inner) = render(false, None);
     let right = content_right(&painted, inner, inner.right());
     assert!(
-        right > inner.right() - 30.0,
+        // Code-block backgrounds fill the column exactly, so the column's
+        // right edge is the content's.
+        right > inner.right() - 1.0,
         "content ends at {right}, well short of the content edge {}: a second gutter",
         inner.right()
     );
