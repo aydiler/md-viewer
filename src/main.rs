@@ -1754,6 +1754,15 @@ fn has_markdown_extension(path: &Path) -> bool {
 /// author writing `bad%FF.md` plainly means a Markdown file, and it has to pass
 /// this gate for a click to be able to *report* that it cannot be opened.
 fn is_local_markdown_link(destination: &str) -> bool {
+    // The extension test needs a literal `.` in the source spelling, so a
+    // destination without one can never pass. This answers most of a
+    // document's words without classifying them: `parse_local_links` asks
+    // about every word of plain text, which took 93 ms on 5 MB of prose
+    // (devlog 110).
+    destination.contains('.') && classified_as_local_markdown(destination)
+}
+
+fn classified_as_local_markdown(destination: &str) -> bool {
     match classify_destination(destination) {
         DestinationShape::Local { raw, .. } => has_markdown_extension(Path::new(raw)),
         DestinationShape::Fragment | DestinationShape::External => false,
@@ -8132,5 +8141,62 @@ mod tests {
         assert!(!list.poll());
         assert!(!list.scanning(), "a dead scan must not spin forever");
         assert!(list.names.is_empty());
+    }
+
+    /// `is_local_markdown_link` skips classification for a destination
+    /// without a `.`; that shortcut must never change an answer.
+    #[test]
+    fn the_dot_shortcut_never_rejects_a_markdown_destination() {
+        let mut corpus: Vec<String> = [
+            "guide.md",
+            "GUIDE.MD",
+            "a/b.markdown",
+            "notes.txt",
+            "file:///tmp/x.md",
+            "file:///tmp/%2Emd",
+            "bad%FF.md",
+            "guide.md?v=2#s",
+            "#anchor",
+            "md",
+            "%2Emd",
+            "dir/",
+            "",
+            "?q=1",
+            "a#b.md",
+            "https://e.com/x.md",
+            "//host/x.md",
+            "C:\\docs\\guide.md",
+            "readme",
+            "\u{212A}.md",
+            "x.m\u{212A}d",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for path in ["README.md", "CHANGELOG.md", "docs/LESSONS.md"] {
+            if let Ok(text) =
+                std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/").to_owned() + path)
+            {
+                corpus.extend(text.split_whitespace().map(str::to_owned));
+            }
+        }
+        assert!(
+            corpus.len() > 1000,
+            "the corpus did not load: {}",
+            corpus.len()
+        );
+        for destination in &corpus {
+            if classified_as_local_markdown(destination) {
+                assert!(
+                    destination.contains('.'),
+                    "{destination:?} names a Markdown file without a dot"
+                );
+            }
+            assert_eq!(
+                is_local_markdown_link(destination),
+                classified_as_local_markdown(destination),
+                "{destination:?}"
+            );
+        }
     }
 }
