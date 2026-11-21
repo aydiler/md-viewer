@@ -1187,8 +1187,7 @@ impl Tab {
         // Canonicalize path for consistent comparison with watcher events
         let path = path.canonicalize().unwrap_or(path);
         let content = String::from_utf8_lossy(&fs::read(&path)?).into_owned();
-        let parsed = parse_headers(&content);
-        let local_links = parse_local_links(&content, &path);
+        let (parsed, local_links) = parse_document(&content, &path);
         let content_lines = content.lines().count();
         let base_uri = Self::compute_base_uri(&path);
 
@@ -1309,12 +1308,12 @@ impl Tab {
         }
         self.base_uri = Self::compute_base_uri(&self.path);
 
-        let parsed = parse_headers(&self.content);
+        let (parsed, local_links) = parse_document(&self.content, &self.path);
         self.document_title = parsed.document_title;
         self.outline_headers = parsed.outline_headers;
         self.collapsed_headers.clear();
 
-        self.local_links = parse_local_links(&self.content, &self.path);
+        self.local_links = local_links;
         for link in &self.local_links {
             self.cache.add_link_hook(link);
         }
@@ -1563,40 +1562,75 @@ fn handle_local_link_click(
 
 /// Parse explicit links plus bare local Markdown file references, skipping code blocks.
 fn parse_local_links(content: &str, document_path: &Path) -> Vec<String> {
-    let mut links = HashSet::new();
-    let document_dir = document_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut in_code_block = false;
+    let mut links = LinkCollector::new(document_path);
+    for event in pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()) {
+        links.event(&event);
+    }
+    links.finish()
+}
+
+/// The outline and the link hooks of a document from one parse. Loading a
+/// document used to parse it once for each (devlog 110).
+fn parse_document(content: &str, document_path: &Path) -> (ParsedHeaders, Vec<String>) {
+    let mut headers = HeaderCollector::new(content);
+    let mut links = LinkCollector::new(document_path);
+    for (event, range) in
+        pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()).into_offset_iter()
+    {
+        headers.event(&event, &range);
+        links.event(&event);
+    }
+    (headers.finish(), links.finish())
+}
+
+/// The per-event half of [`parse_local_links`].
+struct LinkCollector<'p> {
+    links: HashSet<String>,
+    document_dir: &'p Path,
+    in_code_block: bool,
+}
+
+impl<'p> LinkCollector<'p> {
+    fn new(document_path: &'p Path) -> Self {
+        Self {
+            links: HashSet::new(),
+            document_dir: document_path.parent().unwrap_or_else(|| Path::new(".")),
+            in_code_block: false,
+        }
+    }
 
     // Let CommonMark decide which bytes are visible text. Event::Text excludes
     // fenced/indented code and link destinations, while Event::Code preserves
     // the viewer extension that makes an inline-code filename clickable.
-    for event in pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()) {
+    fn event(&mut self, event: &pulldown_cmark::Event<'_>) {
         match event {
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
-                in_code_block = true;
+                self.in_code_block = true;
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
-                in_code_block = false;
+                self.in_code_block = false;
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
                 let destination = dest_url.as_ref();
                 if is_local_markdown_link(destination) || destination.starts_with('#') {
-                    links.insert(destination.to_owned());
+                    self.links.insert(destination.to_owned());
                 }
             }
             pulldown_cmark::Event::Code(code) => {
-                register_existing_markdown_path(&code, document_dir, &mut links);
+                register_existing_markdown_path(code, self.document_dir, &mut self.links);
             }
-            pulldown_cmark::Event::Text(text) if !in_code_block => {
-                register_bare_markdown_paths(&text, document_dir, &mut links);
+            pulldown_cmark::Event::Text(text) if !self.in_code_block => {
+                register_bare_markdown_paths(text, self.document_dir, &mut self.links);
             }
             _ => {}
         }
     }
 
-    let mut links: Vec<_> = links.into_iter().collect();
-    links.sort();
-    links
+    fn finish(self) -> Vec<String> {
+        let mut links: Vec<_> = self.links.into_iter().collect();
+        links.sort();
+        links
+    }
 }
 
 fn register_bare_markdown_paths(text: &str, document_dir: &Path, links: &mut HashSet<String>) {
@@ -1824,40 +1858,65 @@ fn resolve_local_link_path(destination: &str, document_dir: &Path) -> io::Result
 
 /// Parse headings with the same CommonMark rules used by the renderer.
 fn parse_headers(content: &str) -> ParsedHeaders {
-    use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
-
-    fn level_number(level: HeadingLevel) -> u8 {
-        match level {
-            HeadingLevel::H1 => 1,
-            HeadingLevel::H2 => 2,
-            HeadingLevel::H3 => 3,
-            HeadingLevel::H4 => 4,
-            HeadingLevel::H5 => 5,
-            HeadingLevel::H6 => 6,
-        }
-    }
-
-    let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(content.match_indices('\n').map(|(offset, _)| offset + 1))
-        .collect();
-    let mut all_headers = Vec::new();
-    let mut current: Option<(u8, usize, usize, String)> = None;
-
+    let mut headers = HeaderCollector::new(content);
     for (event, range) in
         pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()).into_offset_iter()
     {
+        headers.event(&event, &range);
+    }
+    headers.finish()
+}
+
+/// The per-event half of [`parse_headers`].
+struct HeaderCollector {
+    line_starts: Vec<usize>,
+    all_headers: Vec<Header>,
+    current: Option<(u8, usize, usize, String)>,
+}
+
+impl HeaderCollector {
+    fn new(content: &str) -> Self {
+        Self {
+            line_starts: std::iter::once(0)
+                .chain(content.match_indices('\n').map(|(offset, _)| offset + 1))
+                .collect(),
+            all_headers: Vec::new(),
+            current: None,
+        }
+    }
+
+    fn event(&mut self, event: &pulldown_cmark::Event<'_>, range: &std::ops::Range<usize>) {
+        use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
+
+        fn level_number(level: HeadingLevel) -> u8 {
+            match level {
+                HeadingLevel::H1 => 1,
+                HeadingLevel::H2 => 2,
+                HeadingLevel::H3 => 3,
+                HeadingLevel::H4 => 4,
+                HeadingLevel::H5 => 5,
+                HeadingLevel::H6 => 6,
+            }
+        }
+
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                let line_number = line_starts
+                let line_number = self
+                    .line_starts
                     .partition_point(|line_start| *line_start <= range.start)
                     .saturating_sub(1);
-                current = Some((level_number(level), range.start, line_number, String::new()));
+                self.current = Some((
+                    level_number(*level),
+                    range.start,
+                    line_number,
+                    String::new(),
+                ));
             }
             Event::End(TagEnd::Heading(_)) => {
-                if let Some((level, source_start, line_number, title)) = current.take() {
+                if let Some((level, source_start, line_number, title)) = self.current.take() {
                     let title = title.trim().to_owned();
                     if !title.is_empty() {
-                        all_headers.push(Header {
+                        self.all_headers.push(Header {
                             level,
                             title,
                             source_start,
@@ -1867,24 +1926,24 @@ fn parse_headers(content: &str) -> ParsedHeaders {
                 }
             }
             Event::Text(text) | Event::Code(text) => {
-                if let Some((_, _, _, title)) = current.as_mut() {
-                    title.push_str(&text);
+                if let Some((_, _, _, title)) = self.current.as_mut() {
+                    title.push_str(text);
                 }
             }
             Event::InlineMath(text) | Event::DisplayMath(text) => {
-                if let Some((_, _, _, title)) = current.as_mut() {
-                    title.push_str(&text);
+                if let Some((_, _, _, title)) = self.current.as_mut() {
+                    title.push_str(text);
                 }
             }
             Event::FootnoteReference(label) => {
-                if let Some((_, _, _, title)) = current.as_mut() {
+                if let Some((_, _, _, title)) = self.current.as_mut() {
                     title.push('[');
-                    title.push_str(&label);
+                    title.push_str(label);
                     title.push(']');
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                if let Some((_, _, _, title)) = current.as_mut() {
+                if let Some((_, _, _, title)) = self.current.as_mut() {
                     title.push(' ');
                 }
             }
@@ -1892,15 +1951,18 @@ fn parse_headers(content: &str) -> ParsedHeaders {
         }
     }
 
-    let document_title = all_headers
-        .iter()
-        .find(|h| h.level == 1)
-        .map(|h| h.title.clone());
-    let outline_headers = all_headers;
+    fn finish(self) -> ParsedHeaders {
+        let all_headers = self.all_headers;
+        let document_title = all_headers
+            .iter()
+            .find(|h| h.level == 1)
+            .map(|h| h.title.clone());
+        let outline_headers = all_headers;
 
-    ParsedHeaders {
-        document_title,
-        outline_headers,
+        ParsedHeaders {
+            document_title,
+            outline_headers,
+        }
     }
 }
 
@@ -8198,5 +8260,47 @@ mod tests {
                 "{destination:?}"
             );
         }
+    }
+
+    /// `parse_document` gives exactly what the two separate passes give.
+    #[test]
+    fn one_document_parse_matches_the_separate_outline_and_link_passes() {
+        let dir = std::env::temp_dir().join(format!("mdv-parse-doc-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "# Guide\n").unwrap();
+        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
+        let document = dir.join("doc.md");
+        let fixture = "# Title\n\nSee docs/guide.md and [notes](notes.md), [x](#title).\n\n\
+                       ## Dup\n\n## Dup\n\n```\ndocs/guide.md in code\n```\n\n\
+                       ### `code` heading with $x^2$ and a footnote[^1]\n\n[^1]: note\n\n\
+                       Inline `notes.md` and https://example.com/a.md\n";
+        let readme = include_str!("../README.md");
+        for content in [fixture, readme] {
+            let (headers, links) = parse_document(content, &document);
+            let separate = parse_headers(content);
+            assert_eq!(headers.document_title, separate.document_title);
+            let key = |h: &Header| (h.level, h.title.clone(), h.source_start, h.line_number);
+            assert_eq!(
+                headers.outline_headers.iter().map(key).collect::<Vec<_>>(),
+                separate.outline_headers.iter().map(key).collect::<Vec<_>>()
+            );
+            assert_eq!(links, parse_local_links(content, &document));
+        }
+        let (headers, links) = parse_document(fixture, &document);
+        assert_eq!(
+            headers.outline_headers.len(),
+            4,
+            "{:?}",
+            headers
+                .outline_headers
+                .iter()
+                .map(|h| &h.title)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            links.contains(&"docs/guide.md".to_owned()) && links.contains(&"notes.md".to_owned()),
+            "{links:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
