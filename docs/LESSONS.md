@@ -1834,6 +1834,14 @@ An empty first list is the assertion worth making. It also explains rises in the
 **Testing gotcha:** confirm the test window is really on a hidden workspace (`hyprctl clients -j`); this Hyprland uses Lua dispatch syntax (`hl.dsp.window.move({ workspace = "special:x", follow = false })`) and rejects the legacy form silently enough to fake a pass.
 **Files:** `src/main.rs` (`wayland_session`, `run_native_once`), `docs/devlog/073-wayland-hidden-vsync-hang.md`
 
+### `eframe` with `default-features = false` loses winit's Adwaita title bar
+**Context:** #266. On GNOME/Wayland, double-clicking md-viewer's title bar did nothing; only the maximize button worked.
+**Root cause:** mutter offers no server-side decorations, so winit draws the title bar. Which frame it draws is a compile-time choice: `sctk_adwaita::AdwaitaFrame` with winit's `wayland-csd-adwaita` feature, otherwise sctk's `FallbackFrame`, whose `on_click` ignores the timestamp, so a header press is always a move. eframe enables the feature only through `winit/default` in its own default features. md-viewer has turned those off since its first commit, so `sctk-adwaita` was never in `Cargo.lock` and every release had the fallback frame there.
+**Fix:** a Linux-only direct dependency `winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }`; feature unification turns it on for eframe's winit. The test `wayland_title_bar_uses_the_adwaita_frame` checks `Cargo.lock` for the package.
+**General lesson:** `default-features = false` on a framework crate also drops features of *its* dependencies that the framework only enables by default. Diff `cargo tree -e features` against the crate's default set when trimming features.
+**Reproducing without GNOME:** weston's X11 backend runs nested on Xvfb and, like mutter, leaves decorations to the client. Run md-viewer inside it with `WAYLAND_DISPLAY` set and `DISPLAY` unset, then drive the frame with `xdotool` on the Xvfb display. The runtime dir must be short: Wayland socket paths are limited to 108 bytes, so the scratchpad path fails.
+**Files:** `Cargo.toml`, `Cargo.lock`, `src/main.rs` (test), `docs/devlog/108-wayland-titlebar.md`
+
 ### egui 0.33 → 0.37: the traps that compiled cleanly
 **Context:** The egui 0.37 upgrade (devlog 089). The compile errors were mechanical. These were not: each one built, and most passed the tests.
 - **Row heights snap to pixels.** epaint 0.37 rounds a row's height (`round_to_pixel(max_row_height)`). A table row reserved from an unsnapped line height (19.5 px) clips the last line of a cell that lays out at 20 px. Any height the renderer computes ahead of layout must be snapped the same way (`body_line_height`).
