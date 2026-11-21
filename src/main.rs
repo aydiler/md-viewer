@@ -1169,6 +1169,8 @@ struct Tab {
     /// builder on the following frame (egui 0.37 keeps `State::offset`
     /// private; the old direct `State` store also took effect one frame later).
     pending_edit_offset: Option<f32>,
+    /// The editor's focus and selection, kept through a scrollbar press (#258).
+    edit_focus: EditorFocus,
     /// View-mode content height captured when entering edit mode; converts
     /// the edit scroll ratio back to an absolute offset when leaving edit.
     pre_edit_view_content_height: f32,
@@ -1222,6 +1224,7 @@ impl Tab {
             save_flash: None,
             pending_edit_scroll: None,
             pending_edit_offset: None,
+            edit_focus: EditorFocus::default(),
             pre_edit_view_content_height: 0.0,
         })
     }
@@ -4232,16 +4235,42 @@ impl MarkdownApp {
                             ui.vertical(|ui| {
                                 let frame = egui::Frame::NONE
                                     .inner_margin(egui::Margin::symmetric(4_i8, 2_i8));
-                                frame.show(ui, |ui| {
-                                    egui::TextEdit::multiline(&mut tab.content)
-                                        .id_salt(ui.scope_id().with("edit"))
-                                        .desired_width(content_rect.width() - 8.0)
-                                        .desired_rows(24)
-                                        .frame(egui::Frame::NONE)
-                                        .ui(ui);
-                                });
-                            });
+                                frame
+                                    .show(ui, |ui| {
+                                        egui::TextEdit::multiline(&mut tab.content)
+                                            .id_salt(ui.scope_id().with("edit"))
+                                            .desired_width(content_rect.width() - 8.0)
+                                            .desired_rows(24)
+                                            .frame(egui::Frame::NONE)
+                                            .ui(ui)
+                                    })
+                                    .inner
+                            })
+                            .inner
                         });
+                    // Drag-selecting past the top or bottom edge scrolls the
+                    // text (#258). egui's TextEdit only scrolls to its cursor
+                    // when the selection changes, and a pointer held still
+                    // below the area changes nothing, so the view never moved.
+                    if edit_out.inner.dragged() {
+                        if let Some(pointer) = ui.ctx().pointer_latest_pos() {
+                            let area = edit_out.inner_rect;
+                            let speed = edge_autoscroll_speed(pointer.y, area.top(), area.bottom());
+                            if speed != 0.0 {
+                                let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.1);
+                                let max_offset = (edit_out.content_size.y - area.height()).max(0.0);
+                                let offset = (edit_out.state.unclamped_offset().y + speed * dt)
+                                    .clamp(0.0, max_offset);
+                                tab.pending_edit_offset = Some(offset);
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                    }
+                    tab.edit_focus.keep_through_scrollbar_press(
+                        ui,
+                        edit_out.inner.id,
+                        edit_out.inner_rect,
+                    );
                     tab.scroll_offset = edit_out.state.unclamped_offset().y;
                     tab.last_viewport_height = edit_out.inner_rect.height();
                     tab.last_content_height = edit_out.content_size.y;
@@ -5232,6 +5261,92 @@ impl MarkdownApp {
             self.lightbox = None;
         }
     }
+}
+
+/// Height of the band inside each edge of the edit area where a drag
+/// selection starts scrolling (#258). On a touchpad the pointer often cannot
+/// leave the window, so scrolling must begin before the edge.
+const EDGE_AUTOSCROLL_ZONE: f32 = 24.0;
+
+/// Scroll speed, in points per second (negative is up), for a drag selection
+/// whose pointer is at `pointer_y` in an area spanning `top..bottom`. Zero
+/// away from the edges; inside the edge band it starts at a crawl and grows
+/// with how far the pointer has gone, up to a cap.
+fn edge_autoscroll_speed(pointer_y: f32, top: f32, bottom: f32) -> f32 {
+    const MIN_SPEED: f32 = 120.0;
+    const SPEED_PER_POINT: f32 = 12.0;
+    const MAX_SPEED: f32 = 3000.0;
+    let zone = EDGE_AUTOSCROLL_ZONE.min((bottom - top) / 4.0).max(0.0);
+    let speed = |depth: f32| (MIN_SPEED + depth * SPEED_PER_POINT).min(MAX_SPEED);
+    if pointer_y > bottom - zone {
+        speed(pointer_y - (bottom - zone))
+    } else if pointer_y < top + zone {
+        -speed((top + zone) - pointer_y)
+    } else {
+        0.0
+    }
+}
+
+/// The editor's focus and selection as of the end of the previous frame.
+///
+/// A press on the editor's scrollbar is a press outside the TextEdit: egui
+/// takes the focus away, and an unfocused TextEdit collapses its selection to
+/// the cursor (`TextEdit::show`, when it does not own the IME events), so the
+/// selection was gone after a click on the scrollbar track (#258).
+#[derive(Default)]
+struct EditorFocus {
+    had_focus: bool,
+    selection: Option<egui::text::CCursorRange>,
+}
+
+impl EditorFocus {
+    /// Call after the editor's ScrollArea has been shown. If a press in its
+    /// scrollbar strip took the focus this frame, restores the selection and
+    /// the focus; then records both for the next frame.
+    fn keep_through_scrollbar_press(
+        &mut self,
+        ui: &egui::Ui,
+        edit_id: egui::Id,
+        inner_rect: egui::Rect,
+    ) {
+        let focused = ui.memory(|m| m.has_focus(edit_id));
+        if self.had_focus && !focused {
+            // A press and release in one frame (a quick click) has no
+            // press origin any more; the pointer is still where it pressed.
+            let press = ui.input(|i| {
+                i.pointer
+                    .any_pressed()
+                    .then(|| i.pointer.press_origin().or(i.pointer.latest_pos()))
+                    .flatten()
+            });
+            let strip = edit_scrollbar_strip(inner_rect, &ui.spacing().scroll);
+            if press.is_some_and(|pos| strip.contains(pos)) {
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                    state.cursor.set_char_range(self.selection);
+                    state.store(ui.ctx(), edit_id);
+                }
+                ui.memory_mut(|m| m.request_focus(edit_id));
+                ui.ctx().request_repaint();
+            }
+        }
+        self.had_focus = ui.memory(|m| m.has_focus(edit_id));
+        if self.had_focus {
+            self.selection = egui::TextEdit::load_state(ui.ctx(), edit_id)
+                .and_then(|state| state.cursor.char_range());
+        }
+    }
+}
+
+/// The strip along the right edge of the editor's ScrollArea where its
+/// vertical scrollbar is drawn and takes presses. Depending on the style the
+/// bar lies over the content inside `inner_rect` or just outside it, so the
+/// strip covers both sides of the edge.
+fn edit_scrollbar_strip(inner_rect: egui::Rect, scroll: &egui::style::ScrollStyle) -> egui::Rect {
+    let reach = scroll.bar_inner_margin + scroll.bar_width + scroll.bar_outer_margin;
+    egui::Rect::from_x_y_ranges(
+        inner_rect.right() - reach..=inner_rect.right() + reach,
+        inner_rect.y_range(),
+    )
 }
 
 /// Frame milestones for the `MDV_SELFTEST` harness: scroll injection and
@@ -7794,5 +7909,138 @@ mod tests {
         assert_eq!(restored_sidebar_width(Some(f32::NAN), 200.0), 200.0);
         assert_eq!(restored_sidebar_width(Some(f32::INFINITY), 200.0), 200.0);
         assert_eq!(restored_sidebar_width(None, 200.0), 200.0);
+    }
+
+    #[test]
+    fn edge_autoscroll_speed_is_zero_inside_and_signed_at_the_edges() {
+        let (top, bottom) = (100.0, 700.0);
+        assert_eq!(edge_autoscroll_speed(400.0, top, bottom), 0.0);
+        assert_eq!(
+            edge_autoscroll_speed(top + EDGE_AUTOSCROLL_ZONE + 1.0, top, bottom),
+            0.0
+        );
+        let near_bottom = edge_autoscroll_speed(bottom - 1.0, top, bottom);
+        let past_bottom = edge_autoscroll_speed(bottom + 100.0, top, bottom);
+        assert!(near_bottom > 0.0, "inside the bottom band scrolls down");
+        assert!(past_bottom > near_bottom, "speed grows past the edge");
+        assert!(
+            edge_autoscroll_speed(top - 50.0, top, bottom) < 0.0,
+            "above scrolls up"
+        );
+        assert_eq!(
+            edge_autoscroll_speed(bottom + 1.0e6, top, bottom),
+            3000.0,
+            "capped"
+        );
+        // A very short area keeps a usable middle instead of being all edge.
+        assert_eq!(edge_autoscroll_speed(110.0, 100.0, 120.0), 0.0);
+    }
+
+    /// Drives one frame of an editor laid out like md-viewer's: a vertical
+    /// ScrollArea holding a multiline TextEdit, followed by the focus keeper.
+    fn editor_frame(
+        ctx: &egui::Context,
+        text: &mut String,
+        focus: &mut EditorFocus,
+        events: Vec<egui::Event>,
+    ) -> (egui::Id, egui::Rect) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut ids = None;
+        let mut out = ctx.run_pass(input, |ctx| {
+            ctx.root_ui(|root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    let out = egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| ui.add(egui::TextEdit::multiline(text)));
+                    focus.keep_through_scrollbar_press(ui, out.inner.id, out.inner_rect);
+                    ids = Some((out.inner.id, out.inner_rect));
+                });
+            });
+        });
+        out.textures_delta.clear();
+        ids.expect("editor shown")
+    }
+
+    #[test]
+    fn a_click_on_the_editor_scrollbar_keeps_focus_and_selection() {
+        let ctx = egui::Context::default();
+        let mut text: String = (0..300).map(|i| format!("line {i:03}\n")).collect();
+        let mut focus = EditorFocus::default();
+        let (id, inner) = editor_frame(&ctx, &mut text, &mut focus, vec![]);
+
+        let selection = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(9),
+            egui::text::CCursor::new(45),
+        );
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(selection));
+        state.store(&ctx, id);
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        assert!(ctx.memory(|m| m.has_focus(id)), "setup: editor focused");
+
+        // A quick click on the scrollbar track: press and release in one frame.
+        let pos = egui::pos2(inner.right() - 3.0, inner.bottom() - 40.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        editor_frame(
+            &ctx,
+            &mut text,
+            &mut focus,
+            vec![egui::Event::PointerMoved(pos), button(true), button(false)],
+        );
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+
+        assert!(
+            ctx.memory(|m| m.has_focus(id)),
+            "editor lost focus to its scrollbar"
+        );
+        let kept = egui::TextEdit::load_state(&ctx, id).and_then(|s| s.cursor.char_range());
+        assert_eq!(kept, Some(selection), "selection collapsed");
+    }
+
+    #[test]
+    fn a_click_outside_the_scrollbar_still_takes_the_focus() {
+        let ctx = egui::Context::default();
+        let mut text: String = (0..300).map(|i| format!("line {i:03}\n")).collect();
+        let mut focus = EditorFocus::default();
+        let (id, _inner) = editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        ctx.memory_mut(|m| m.request_focus(id));
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        assert!(ctx.memory(|m| m.has_focus(id)), "setup: editor focused");
+        // The editor fills the panel, so press on the panel's margin, outside
+        // both the TextEdit and the scrollbar strip.
+        let pos = egui::pos2(2.0, 2.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        editor_frame(
+            &ctx,
+            &mut text,
+            &mut focus,
+            vec![egui::Event::PointerMoved(pos), button(true), button(false)],
+        );
+        editor_frame(&ctx, &mut text, &mut focus, vec![]);
+        assert!(
+            !ctx.memory(|m| m.has_focus(id)),
+            "a click elsewhere must still unfocus"
+        );
     }
 }
