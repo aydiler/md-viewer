@@ -20,10 +20,10 @@ mod data_url_loader;
 // For ease of use in proc macros
 #[doc(hidden)]
 pub use {
-    alerts::{Alert, AlertBundle, alert_ui},
+    alerts::{alert_ui, Alert, AlertBundle},
     // Pretty much every single element in this module is used by the proc macros
     elements::*,
-    misc::{CodeBlock, CommonMarkOptions, Image, Link, prepare_show},
+    misc::{prepare_show, CodeBlock, CommonMarkOptions, Image, Link},
     typography::{Measurement, TypographyConfig},
 };
 

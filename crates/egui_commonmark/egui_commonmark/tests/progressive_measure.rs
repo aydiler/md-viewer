@@ -153,11 +153,19 @@ fn frontier(cache: &mut CommonMarkCache) -> Option<MeasureFrontier> {
 /// position is recorded when it is laid out, painted or not (labels outside
 /// the clip are laid out but not painted, so painted shapes cannot show how
 /// far a pass ran).
-fn headings_laid_out_past_frontier(cache: &CommonMarkCache, md: &str, frontier: &MeasureFrontier) -> Vec<usize> {
+fn headings_laid_out_past_frontier(
+    cache: &CommonMarkCache,
+    md: &str,
+    frontier: &MeasureFrontier,
+) -> Vec<usize> {
     heading_starts(md)
         .into_iter()
         .filter(|start| *start >= frontier.src_end)
-        .filter(|start| cache.get_header_position(&header_position_key(*start)).is_some())
+        .filter(|start| {
+            cache
+                .get_header_position(&header_position_key(*start))
+                .is_some()
+        })
         .collect()
 }
 
@@ -206,7 +214,12 @@ fn assert_same_geometry(progressive: &Geometry, reference: &Geometry, what: &str
         progressive.page_height,
         reference.page_height
     );
-    for (i, (p, r)) in progressive.headers.iter().zip(&reference.headers).enumerate() {
+    for (i, (p, r)) in progressive
+        .headers
+        .iter()
+        .zip(&reference.headers)
+        .enumerate()
+    {
         let (Some(p), Some(r)) = (p, r) else {
             panic!("{what}: heading {i} position progressive {p:?}, one-shot {r:?}");
         };
@@ -316,7 +329,10 @@ fn scrolling_into_the_estimated_region_paints_content() {
         "the offset {offset:.1} must land past the first frame's frontier {:.1}",
         frontier_before.y
     );
-    assert!(visible_count(&deep) > 0, "the deep frame painted nothing visible");
+    assert!(
+        visible_count(&deep) > 0,
+        "the deep frame painted nothing visible"
+    );
     if let Some(after) = frontier(&mut cache) {
         assert!(
             after.y >= offset + deep.out.inner_rect.height(),
@@ -345,7 +361,10 @@ fn force_full_render_completes_measurement_at_once() {
             ..PROGRESSIVE
         },
     );
-    assert!(frontier(&mut cache).is_none(), "force_full_render left the document partly measured");
+    assert!(
+        frontier(&mut cache).is_none(),
+        "force_full_render left the document partly measured"
+    );
     let g = geometry(&mut cache, &md);
     assert_eq!(g.splits.len(), reference.splits.len());
 }
@@ -358,7 +377,10 @@ fn invalidation_mid_measurement_restarts_cleanly() {
     for _ in 0..4 {
         render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
     }
-    assert!(frontier(&mut cache).is_some(), "still measuring at width 600");
+    assert!(
+        frontier(&mut cache).is_some(),
+        "still measuring at width 600"
+    );
 
     // A width change mid-measurement.
     run_to_completion(&ctx, &mut cache, &md, 380.0);
@@ -374,7 +396,10 @@ fn invalidation_mid_measurement_restarts_cleanly() {
     for _ in 0..4 {
         render(&ctx, &mut cache, &changed, 380.0, PROGRESSIVE);
     }
-    assert!(frontier(&mut cache).is_some(), "still measuring the changed text");
+    assert!(
+        frontier(&mut cache).is_some(),
+        "still measuring the changed text"
+    );
     run_to_completion(&ctx, &mut cache, &changed, 380.0);
     render(&ctx, &mut cache, &changed, 380.0, PROGRESSIVE);
     let after = geometry(&mut cache, &changed);
@@ -424,7 +449,10 @@ fn a_tall_block_at_the_frontier_does_not_lay_out_the_rest_of_the_document() {
     let frame = render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
 
     let frontier = frontier(&mut cache).expect("the document is still being measured");
-    assert!(visible_count(&frame) > 0, "the frame painted nothing visible");
+    assert!(
+        visible_count(&frame) > 0,
+        "the frame painted nothing visible"
+    );
     let past = headings_laid_out_past_frontier(&cache, &md, &frontier);
     assert!(
         past.is_empty(),

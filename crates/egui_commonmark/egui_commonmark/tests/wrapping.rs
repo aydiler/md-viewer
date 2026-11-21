@@ -108,8 +108,7 @@ fn render_geometry_inner(
     // The pass gets a real screen rect: without one egui falls back to a
     // 10000-wide pane, and the centered reading column would center within
     // that instead of the width these assertions reason about.
-    let screen =
-        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(ui_width, 3600.0));
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(ui_width, 3600.0));
     for pass in 0..2 {
         ctx.begin_pass(egui::RawInput {
             screen_rect: Some(screen),
@@ -152,7 +151,10 @@ fn fitted_columns_do_not_split_short_header_words() {
         .find(|entry| entry.text == "Required")
         .unwrap_or_else(|| panic!("missing Required header: {painted:#?}"));
 
-    assert_eq!(required.rows, 1, "short header word was split: {required:?}");
+    assert_eq!(
+        required.rows, 1,
+        "short header word was split: {required:?}"
+    );
 }
 
 #[test]
@@ -193,7 +195,10 @@ fn fitted_markdown_cells_keep_visible_horizontal_padding() {
         .unwrap();
     let gap = right.rect.left() - left.rect.right();
 
-    assert!(gap >= 8.0, "adjacent cell text gap was only {gap}: {painted:#?}");
+    assert!(
+        gap >= 8.0,
+        "adjacent cell text gap was only {gap}: {painted:#?}"
+    );
 }
 
 #[test]
@@ -371,15 +376,20 @@ fn long_inline_code_path_keeps_clickable_link_styling_after_wrapping() {
 #[test]
 fn long_markdown_table_text_wraps_and_expands_its_row() {
     let prose = "WRAPPED_MARKDOWN_CELL ".repeat(18);
-    let markdown = format!(
-        "| Key | Description |\n|---|---|\n| signal | {prose} |\n\nAFTER_MARKDOWN_TABLE"
-    );
+    let markdown =
+        format!("| Key | Description |\n|---|---|\n| signal | {prose} |\n\nAFTER_MARKDOWN_TABLE");
     let (_, row_height, painted) = render_geometry(&markdown, 360.0);
     let cell = text_rect(&painted, "WRAPPED_MARKDOWN_CELL");
     let after = text_rect(&painted, "AFTER_MARKDOWN_TABLE");
 
-    assert!(cell.height() > row_height * 1.5, "cell did not wrap: {cell:?}");
-    assert!(cell.bottom() <= after.top(), "wrapped row clipped/overlapped: {cell:?} {after:?}");
+    assert!(
+        cell.height() > row_height * 1.5,
+        "cell did not wrap: {cell:?}"
+    );
+    assert!(
+        cell.bottom() <= after.top(),
+        "wrapped row clipped/overlapped: {cell:?} {after:?}"
+    );
 }
 
 #[test]
@@ -392,8 +402,14 @@ fn long_html_table_text_wraps_and_expands_its_row() {
     let cell = text_rect(&painted, "WRAPPED_HTML_CELL");
     let after = text_rect(&painted, "AFTER_HTML_TABLE");
 
-    assert!(cell.height() > row_height * 1.5, "cell did not wrap: {cell:?}");
-    assert!(cell.bottom() <= after.top(), "wrapped row clipped/overlapped: {cell:?} {after:?}");
+    assert!(
+        cell.height() > row_height * 1.5,
+        "cell did not wrap: {cell:?}"
+    );
+    assert!(
+        cell.bottom() <= after.top(),
+        "wrapped row clipped/overlapped: {cell:?} {after:?}"
+    );
 }
 
 fn table_cell_height_after_widths(markdown: &str, widths: &[f32], marker: &str) -> Vec<f32> {
@@ -430,16 +446,23 @@ fn table_cell_height_after_widths(markdown: &str, widths: &[f32], marker: &str) 
 fn markdown_table_reflows_after_panel_width_changes() {
     let prose = "MARKDOWN_REFLOW_CELL ".repeat(16);
     let markdown = format!("| Key | Description |\n|---|---|\n| signal | {prose} |");
-    let heights = table_cell_height_after_widths(
-        &markdown,
-        &[220.0, 560.0, 180.0],
-        "MARKDOWN_REFLOW_CELL",
-    );
+    let heights =
+        table_cell_height_after_widths(&markdown, &[220.0, 560.0, 180.0], "MARKDOWN_REFLOW_CELL");
 
     // Responsive table policy: widening the panel expands the column, reflowing
     // prose into fewer rows (lower height); narrowing the panel wraps into more rows.
-    assert!(heights[1] < heights[0], "widen must reflow text into fewer lines: {} vs {}", heights[1], heights[0]);
-    assert!(heights[2] > heights[1], "narrow must reflow text into more lines: {} vs {}", heights[2], heights[1]);
+    assert!(
+        heights[1] < heights[0],
+        "widen must reflow text into fewer lines: {} vs {}",
+        heights[1],
+        heights[0]
+    );
+    assert!(
+        heights[2] > heights[1],
+        "narrow must reflow text into more lines: {} vs {}",
+        heights[2],
+        heights[1]
+    );
 }
 
 #[test]
@@ -452,8 +475,18 @@ fn html_table_reflows_after_panel_width_changes() {
         table_cell_height_after_widths(&markdown, &[220.0, 560.0, 180.0], "HTML_REFLOW_CELL");
 
     // Responsive table policy: widening the panel expands the column and reduces height.
-    assert!(heights[1] < heights[0], "widen must reflow text into fewer lines: {} vs {}", heights[1], heights[0]);
-    assert!(heights[2] > heights[1], "narrow must reflow text into more lines: {} vs {}", heights[2], heights[1]);
+    assert!(
+        heights[1] < heights[0],
+        "widen must reflow text into fewer lines: {} vs {}",
+        heights[1],
+        heights[0]
+    );
+    assert!(
+        heights[2] > heights[1],
+        "narrow must reflow text into more lines: {} vs {}",
+        heights[2],
+        heights[1]
+    );
 }
 
 const FRONTMATTER_FIXTURE: &str = "\
@@ -794,7 +827,10 @@ fn deep_scroll_keeps_content_extent_and_paints_visible_text() {
         );
     }
     for (index, visible_text) in viewport_visible_text.iter().enumerate() {
-        assert!(*visible_text > 0, "viewport {index} painted no visible text");
+        assert!(
+            *visible_text > 0,
+            "viewport {index} painted no visible text"
+        );
     }
 }
 
@@ -809,9 +845,15 @@ fn deeply_nested_list_renders() {
 - L1 second
 ";
     let (rect, _) = render(md, 540.0);
-    assert!(rect.height() > 0.0, "deeply nested list rect was empty: {rect:?}");
+    assert!(
+        rect.height() > 0.0,
+        "deeply nested list rect was empty: {rect:?}"
+    );
     let rect2 = render_scrollable(md, 540.0, 200.0, None);
-    assert!(rect2.height() > 0.0, "deeply nested via scrollable empty: {rect2:?}");
+    assert!(
+        rect2.height() > 0.0,
+        "deeply nested via scrollable empty: {rect2:?}"
+    );
 }
 
 #[test]

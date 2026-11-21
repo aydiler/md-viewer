@@ -141,7 +141,13 @@ fn indented_wide_blocks_do_not_paint_past_the_pane() {
     // full paint, pass 1 the steady-state viewport slice that re-anchors the
     // recorded geometry at an offset content column.
     for pass in 0..2 {
-        let shapes = render_doc_frame(&ctx, &mut cache, &mut pane_right, Vec::new(), INDENTED_WIDE_BLOCKS);
+        let shapes = render_doc_frame(
+            &ctx,
+            &mut cache,
+            &mut pane_right,
+            Vec::new(),
+            INDENTED_WIDE_BLOCKS,
+        );
         if pass == 1 {
             for clipped in shapes {
                 collect(&clipped.shape, clipped.clip_rect, &mut painted);
@@ -167,7 +173,13 @@ fn wide_block_content_actually_reaches_the_pane_edge() {
     let mut pane_right = f32::NAN;
     let mut painted = Vec::new();
     for pass in 0..2 {
-        let shapes = render_doc_frame(&ctx, &mut cache, &mut pane_right, Vec::new(), INDENTED_WIDE_BLOCKS);
+        let shapes = render_doc_frame(
+            &ctx,
+            &mut cache,
+            &mut pane_right,
+            Vec::new(),
+            INDENTED_WIDE_BLOCKS,
+        );
         if pass == 1 {
             for clipped in shapes {
                 collect(&clipped.shape, clipped.clip_rect, &mut painted);
@@ -200,7 +212,13 @@ fn dragging_a_table_column_rightward_never_paints_past_the_pane() {
     let mut settle_painted = Vec::new();
 
     for pass in 0..2 {
-        let shapes = render_doc_frame(&ctx, &mut cache, &mut pane_right, Vec::new(), PLAIN_WIDE_TABLE);
+        let shapes = render_doc_frame(
+            &ctx,
+            &mut cache,
+            &mut pane_right,
+            Vec::new(),
+            PLAIN_WIDE_TABLE,
+        );
         if pass == 1 {
             for clipped in shapes {
                 collect(&clipped.shape, clipped.clip_rect, &mut settle_painted);
@@ -257,7 +275,11 @@ fn dragging_a_table_column_rightward_never_paints_past_the_pane() {
              drag is not moving, the test cannot exercise the leak"
         );
         let widest = widest_visible_pixel(&painted);
-        let fr = painted.iter().filter(|p| p.text.is_none()).map(|p| p.rect.right()).fold(f32::NEG_INFINITY, f32::max);
+        let fr = painted
+            .iter()
+            .filter(|p| p.text.is_none())
+            .map(|p| p.rect.right())
+            .fold(f32::NEG_INFINITY, f32::max);
         eprintln!("DBG step={step} widest={widest:.1} frame_right={fr:.1} pane={pane_right:.1}");
         assert!(
             widest <= pane_right + CLIP_SLACK,
@@ -286,7 +308,8 @@ fn table_right_edge_after(widths: &[f32], settle: usize) -> f32 {
     for width in frames {
         ctx.begin_pass(egui::RawInput::default());
         egui::CentralPanel::default().show_ctx(&ctx, |ui| {
-            let pane = Rect::from_min_size(ui.max_rect().min, egui::vec2(width, ui.max_rect().height()));
+            let pane =
+                Rect::from_min_size(ui.max_rect().min, egui::vec2(width, ui.max_rect().height()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
                 CommonMarkViewer::new()
                     .default_width(Some(width as usize))

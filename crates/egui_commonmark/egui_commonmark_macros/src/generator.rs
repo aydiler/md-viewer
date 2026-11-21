@@ -1,7 +1,7 @@
 use std::iter::Peekable;
 
 use egui_commonmark_backend_extended::{
-    CodeBlock, CommonMarkOptions, Image, alerts::Alert, misc::Style, pulldown::*,
+    alerts::Alert, misc::Style, pulldown::*, CodeBlock, CommonMarkOptions, Image,
 };
 
 use proc_macro2::TokenStream;

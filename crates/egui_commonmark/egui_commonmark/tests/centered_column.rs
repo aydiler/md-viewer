@@ -69,7 +69,11 @@ fn render_two_frames() -> (Vec<PaintedText>, Vec<PaintedText>) {
                     .show_scrollable("test-doc", ui, &mut cache, PARAGRAPH);
             });
         });
-        let sink = if frame == 0 { &mut bootstrap } else { &mut slice };
+        let sink = if frame == 0 {
+            &mut bootstrap
+        } else {
+            &mut slice
+        };
         sink.clear();
         for clipped in full.shapes {
             collect(&clipped.shape, sink);
@@ -83,15 +87,9 @@ fn assert_column_geometry(pass: &str, texts: &[PaintedText]) {
         .iter()
         .filter(|t| t.text.contains("Lorem ipsum"))
         .collect();
-    assert!(
-        !body.is_empty(),
-        "{pass}: no paragraph text painted at all"
-    );
+    assert!(!body.is_empty(), "{pass}: no paragraph text painted at all");
 
-    let left = body
-        .iter()
-        .map(|t| t.pos.x)
-        .fold(f32::INFINITY, f32::min);
+    let left = body.iter().map(|t| t.pos.x).fold(f32::INFINITY, f32::min);
     let right = body
         .iter()
         .map(|t| t.pos.x + t.galley.rect.right())
@@ -169,10 +167,7 @@ fn centered_column_survives_resize_in_both_directions() {
             .filter(|t| t.text.contains("Lorem ipsum"))
             .collect();
         assert!(!body.is_empty(), "frame {frame}: nothing painted");
-        let left = body
-            .iter()
-            .map(|t| t.pos.x)
-            .fold(f32::INFINITY, f32::min);
+        let left = body.iter().map(|t| t.pos.x).fold(f32::INFINITY, f32::min);
         let right = body
             .iter()
             .map(|t| t.pos.x + t.galley.rect.right())
@@ -201,9 +196,9 @@ fn centered_column_survives_resize_in_both_directions() {
 fn collect_textured(shape: &Shape, rects: &mut Vec<egui::Rect>) {
     match shape {
         Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() => rects.push(r.rect),
-        Shape::Mesh(m) if m.texture_id != egui::TextureId::default() => {
-            rects.push(egui::Rect::from_points(&m.vertices.iter().map(|v| v.pos).collect::<Vec<_>>()))
-        }
+        Shape::Mesh(m) if m.texture_id != egui::TextureId::default() => rects.push(
+            egui::Rect::from_points(&m.vertices.iter().map(|v| v.pos).collect::<Vec<_>>()),
+        ),
         Shape::Vec(shapes) => {
             for shape in shapes {
                 collect_textured(shape, rects);
@@ -279,10 +274,17 @@ fn prose_after_display_math_wraps_at_the_column() {
             .collect()
     };
     let paragraphs: Vec<&PaintedText> = texts.iter().filter(|t| t.text.contains("hhhh")).collect();
-    assert_eq!(paragraphs.len(), 2, "expected both paragraphs painted: {:?}",
-        texts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    assert_eq!(
+        paragraphs.len(),
+        2,
+        "expected both paragraphs painted: {:?}",
+        texts.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
     let (before, after) = (rows(paragraphs[0]), rows(paragraphs[1]));
-    assert!(before.len() > 1, "the paragraph must wrap for the test to mean anything");
+    assert!(
+        before.len() > 1,
+        "the paragraph must wrap for the test to mean anything"
+    );
     assert_eq!(before, after, "prose after the formula wraps differently");
 
     // The formula stays centered in the column the prose occupies.
