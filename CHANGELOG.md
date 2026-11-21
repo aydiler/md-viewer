@@ -2,7 +2,9 @@
 
 All notable changes to markdown-viewer will be documented in this file.
 
-## [Unreleased]
+## [0.3.9] - 2026-11-21
+
+Large documents open much faster, and four interface bugs are fixed: missing symbol glyphs, Mermaid in dark mode, the code-block copy button, and drag-selection in Edit mode.
 
 ### Performance
 - **Faster startup for documents that need no fallback fonts.** The script fallbacks (CJK, Arabic, Hebrew, Devanagari, Thai), the symbol face and the color emoji font are now loaded on a background thread after the first frame when the opened document does not use them. Font setup at startup takes about half as long: 60–110 ms → 35–70 ms, and 137 → 55 ms with a cold page cache. Documents that do use other scripts or emoji still get every font before the first frame, as before.
@@ -15,6 +17,9 @@ All notable changes to markdown-viewer will be documented in this file.
 - **Mermaid diagrams follow the dark theme (#257).** In dark mode diagrams were white cards with dark text. They are now recoloured for the dark page: white becomes the code-block background, text turns light, and coloured boxes keep their hue. Toggling the theme renders them again; light mode is unchanged.
 - **The code-block copy button's frame fits the icon, and every part of it copies (#256).** Its hover frame was twice as tall as the icon because the label wrapped onto two rows. With Full Width, the right half of the button also lay under the document's scrollbar, so clicks there scrolled instead of copying. The button now sits inside the block's corner, clear of the scrollbar.
 - **Selecting text in Edit mode scrolls, and the scrollbar keeps the selection (#258).** Dragging a selection to the top or bottom of the editor now scrolls the text, faster the further the pointer goes, so a selection can extend past what is on screen; before, the view stayed put. A click on the editor's scrollbar track no longer clears the selection and moves the keyboard focus away, so the selection can still be copied or typed over.
+
+### Internal
+- **The vendored renderer moves to 0.30.0**, carrying the performance work (with the new opt-in `CommonMarkViewer::progressive_measure`), #256 and #257.
 
 ## [0.3.8] - 2026-11-16
 
