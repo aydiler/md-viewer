@@ -124,6 +124,26 @@ fn full_width_content_stays_clear_of_the_floating_scrollbar() {
         right <= line + 0.5,
         "content reaches {right}, under the floating bar that starts at {line} (pane {inner:?})"
     );
+    // Both the code block and the markdown table (the two block frames of
+    // this fixture taller than 40 px that fill the column) end at the
+    // gutter line, not short of it: a gutter reserved twice would leave the
+    // table 14 px further in.
+    let mut heights_at_line: Vec<i32> = painted
+        .iter()
+        .filter(|(rect, _)| {
+            rect.left() >= inner.left() - 1.0
+                && rect.height() > 40.0
+                && rect.height() < 300.0
+                && (rect.right() - line).abs() < 1.0
+        })
+        .map(|(rect, _)| rect.height().round() as i32)
+        .collect();
+    heights_at_line.sort();
+    heights_at_line.dedup();
+    assert!(
+        heights_at_line.len() >= 2,
+        "only blocks of heights {heights_at_line:?} reach the gutter line {line}: a block stops short"
+    );
     // ... and still uses the column: the widest block ends near the gutter.
     assert!(
         right > line - 40.0,

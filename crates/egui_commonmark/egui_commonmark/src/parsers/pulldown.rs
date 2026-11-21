@@ -3625,13 +3625,13 @@ impl CommonMarkViewerInternal {
                 .table_max_width
                 .map(|w| w as f32)
                 .unwrap_or(max_width);
-            // Never past a floating scrollbar in the renderer's own scroll area
-            // (devlog 111): the caller's bound is the whole pane. Only then:
-            // elsewhere a table may still reach past the pane as before.
+            // In the renderer's own scroll area the column already ends at the
+            // floating scrollbar's gutter, but the caller's bound is the whole
+            // pane: cap the table at the column so its frame is not laid out
+            // under the bar and clipped (devlog 111). Elsewhere a table may
+            // still reach past the pane as before.
             let table_bound = if self.scrollbar_gutter > 0.0 {
-                table_bound.min(
-                    (ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0),
-                )
+                table_bound.min((ui.max_rect().right() - ui.cursor().left()).max(0.0))
             } else {
                 table_bound
             };
@@ -3745,7 +3745,7 @@ impl CommonMarkViewerInternal {
             // ScrollArea still pans the columns within whatever width
             // remains.
             table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
-                .min(ui.max_rect().right() - self.scrollbar_gutter)
+                .min(ui.max_rect().right())
                 .max(table_scope_rect.min.x);
             // Reserve the table's own height rather than "everything below the
             // cursor".
@@ -4812,12 +4812,13 @@ impl CommonMarkViewerInternal {
             .table_max_width
             .map(|w| w as f32)
             .unwrap_or(max_width);
-        // Never past a floating scrollbar in the renderer's own scroll area
-        // (devlog 111): the caller's bound is the whole pane. Only then:
-        // elsewhere a table may still reach past the pane as before.
+        // In the renderer's own scroll area the column already ends at the
+        // floating scrollbar's gutter, but the caller's bound is the whole
+        // pane: cap the table at the column so its frame is not laid out
+        // under the bar and clipped (devlog 111). Elsewhere a table may
+        // still reach past the pane as before.
         let table_bound = if self.scrollbar_gutter > 0.0 {
-            table_bound
-                .min((ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0))
+            table_bound.min((ui.max_rect().right() - ui.cursor().left()).max(0.0))
         } else {
             table_bound
         };
@@ -4913,7 +4914,7 @@ impl CommonMarkViewerInternal {
         // for why the bound is `max_rect`, not `clip_rect`).
         let mut table_scope_rect = ui.cursor();
         table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
-            .min(ui.max_rect().right() - self.scrollbar_gutter)
+            .min(ui.max_rect().right())
             .max(table_scope_rect.min.x);
         table_scope_rect.max.y = ui.max_rect().bottom();
         let _ = ui
