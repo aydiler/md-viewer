@@ -80,6 +80,12 @@ percent-encoding = "2.3"
 # graph via accesskit_unix; this only adds the blocking API on top.
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.5", default-features = false, features = ["async-io", "blocking-api"] }
+# Title bar on Wayland compositors without server-side decorations (GNOME,
+# weston): winit draws it, and only its Adwaita frame maximizes on a
+# double-click (#266). eframe enables this through its default features, which
+# are off above, so ask winit for it directly; feature unification applies it to
+# eframe's winit.
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 
 [features]
 # No `color-emoji` feature since egui 0.37: stock epaint draws color glyphs
