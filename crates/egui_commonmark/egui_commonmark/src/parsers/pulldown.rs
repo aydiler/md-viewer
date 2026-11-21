@@ -2082,6 +2082,11 @@ pub struct CommonMarkViewerInternal {
     /// pane, so flow sub-UIs must not derive their bound from `max_rect` —
     /// they read this instead. `INFINITY` keeps the old behavior if unset.
     column_right: f32,
+    /// Width kept free at the right of the renderer's own scroll area for a
+    /// floating scrollbar, which egui draws on top of the content (devlog
+    /// 111). Zero outside `show_scrollable` and for a solid bar, which egui
+    /// already makes room for.
+    scrollbar_gutter: f32,
     /// Raw text of the frontmatter block being collected. `Some` only between
     /// `Tag::MetadataBlock` and its end, so ordinary text is unaffected.
     frontmatter: Option<String>,
@@ -2123,7 +2128,19 @@ impl CommonMarkViewerInternal {
             slice_start_y: 0.0,
             render_origin_y: 0.0,
             column_right: f32::INFINITY,
+            scrollbar_gutter: 0.0,
         }
+    }
+}
+
+/// How far a floating scrollbar reaches into a scroll area's content: the
+/// bar plus its margins. A solid bar takes its room before the content is
+/// laid out, so it needs none.
+fn floating_scrollbar_reach(scroll: &egui::style::ScrollStyle) -> f32 {
+    if scroll.floating {
+        scroll.bar_inner_margin + scroll.bar_width + scroll.bar_outer_margin
+    } else {
+        0.0
     }
 }
 
@@ -2691,14 +2708,23 @@ impl CommonMarkViewerInternal {
         // content (only the *scrolled* dimension gets tightened in
         // `ScrollArea::begin`). `max_rect` *is* the viewport, so cap the
         // document column at its right edge.
-        let max_width = max_width.min((ui.max_rect().right() - scroll_area_left).max(0.0));
+        // In the renderer's own scroll area, also keep clear of a floating
+        // scrollbar, which egui paints over the content's right edge.
+        let max_width = max_width
+            .min((ui.max_rect().right() - self.scrollbar_gutter - scroll_area_left).max(0.0));
         // Center the content column in the viewport: allocate the bootstrap
         // region at a centered left edge. The margin is recorded below as
         // `left_offset` (`content_origin_x - scroll_area_left`) and the
         // viewport-slice pass re-anchors slices at the same column, so the
         // two passes stay aligned. Zero margin in full-width mode and when
         // the pane is narrower than the column.
-        let column_margin = ((ui.available_width() - max_width) / 2.0).max(0.0);
+        // Centred as before, but never so far right that the column reaches
+        // into the scrollbar gutter: Full Width keeps its left edge and the
+        // gutter stays on the right, while a narrower reading column with
+        // room on both sides does not move (devlog 111).
+        let column_margin = ((ui.available_width() - max_width) / 2.0)
+            .min(ui.available_width() - self.scrollbar_gutter - max_width)
+            .max(0.0);
         let column_rect = egui::Rect::from_min_size(
             egui::pos2(ui.cursor().left() + column_margin, ui.cursor().top()),
             egui::vec2(max_width, 0.0),
@@ -2808,6 +2834,7 @@ impl CommonMarkViewerInternal {
         let mut measurer = CommonMarkViewerInternal::new();
         measurer.source_id = Some(source_id);
         measurer.column_right = content_left + max_width;
+        measurer.scrollbar_gutter = self.scrollbar_gutter;
         measurer.slice_start_y = frontier.row_top;
         measurer.render_origin_y = rect.top();
         // The bootstrap clears this after event 0: a resumed run is never at
@@ -2876,6 +2903,7 @@ impl CommonMarkViewerInternal {
         scroll_source: Option<egui::scroll_area::ScrollSource>,
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
         self.source_id = Some(source_id);
+        self.scrollbar_gutter = floating_scrollbar_reach(&ui.spacing().scroll);
         let available_size = ui.available_size();
         let scroll_id = source_id.with("_scroll_area");
         let layout_sig = compute_layout_signature(ui, options);
@@ -3596,7 +3624,10 @@ impl CommonMarkViewerInternal {
             let table_bound = options
                 .table_max_width
                 .map(|w| w as f32)
-                .unwrap_or(max_width);
+                .unwrap_or(max_width)
+                // Never past a floating scrollbar in the renderer's own scroll
+                // area (devlog 111): the caller's bound is the whole pane.
+                .min((ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0));
             let minimum_widths: Vec<f32> = (0..num_cols)
                 .map(|column| {
                     let header_floor = header
@@ -3707,7 +3738,7 @@ impl CommonMarkViewerInternal {
             // ScrollArea still pans the columns within whatever width
             // remains.
             table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
-                .min(ui.max_rect().right())
+                .min(ui.max_rect().right() - self.scrollbar_gutter)
                 .max(table_scope_rect.min.x);
             // Reserve the table's own height rather than "everything below the
             // cursor".
@@ -4773,7 +4804,10 @@ impl CommonMarkViewerInternal {
         let table_bound = options
             .table_max_width
             .map(|w| w as f32)
-            .unwrap_or(max_width);
+            .unwrap_or(max_width)
+            // Never past a floating scrollbar in the renderer's own scroll
+            // area (devlog 111): the caller's bound is the whole pane.
+            .min((ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0));
         let table_rows: Vec<(bool, &[String])> = table
             .header
             .iter()
@@ -4866,7 +4900,7 @@ impl CommonMarkViewerInternal {
         // for why the bound is `max_rect`, not `clip_rect`).
         let mut table_scope_rect = ui.cursor();
         table_scope_rect.max.x = (table_scope_rect.min.x + table_bound)
-            .min(ui.max_rect().right())
+            .min(ui.max_rect().right() - self.scrollbar_gutter)
             .max(table_scope_rect.min.x);
         table_scope_rect.max.y = ui.max_rect().bottom();
         let _ = ui
