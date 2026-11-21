@@ -13,8 +13,8 @@ mod common;
 
 use common::{FrameExt as _, PanelExt as _};
 use egui::{
-    Context, Event, Modifiers, MouseWheelSource, MouseWheelUnit, Pos2, RawInput, Rect, Shape,
-    TouchPhase, vec2,
+    vec2, Context, Event, Modifiers, MouseWheelSource, MouseWheelUnit, Pos2, RawInput, Rect, Shape,
+    TouchPhase,
 };
 use egui_commonmark_extended::{CommonMarkCache, CommonMarkViewer};
 
@@ -81,7 +81,11 @@ fn scrolled_cell_x(shift: bool) -> (f32, f32) {
     }
     let start = start.expect("table cell painted");
     let pointer = Pos2::new(PANE.center().x, start.center().y);
-    let modifiers = if shift { Modifiers::SHIFT } else { Modifiers::NONE };
+    let modifiers = if shift {
+        Modifiers::SHIFT
+    } else {
+        Modifiers::NONE
+    };
     let wheel = Event::MouseWheel {
         unit: MouseWheelUnit::Point,
         delta: vec2(0.0, -120.0),
@@ -94,7 +98,10 @@ fn scrolled_cell_x(shift: bool) -> (f32, f32) {
         &mut cache,
         &md,
         // egui 0.37 keeps modifier state from `ModifiersChanged` events.
-        vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(pointer)],
+        vec![
+            Event::ModifiersChanged(modifiers),
+            Event::PointerMoved(pointer),
+        ],
         "CELL_01",
     );
     frame(&ctx, &mut cache, &md, vec![wheel], "CELL_01");
@@ -122,7 +129,10 @@ fn plain_wheel_leaves_a_wide_table_alone() {
     // Control: the same fixture and wheel event with Shift do scroll, so a
     // pass below cannot come from a table too narrow to scroll at all.
     let (shift_start, shift_end) = scrolled_cell_x(true);
-    assert!(shift_end < shift_start - 20.0, "control: fixture does not scroll");
+    assert!(
+        shift_end < shift_start - 20.0,
+        "control: fixture does not scroll"
+    );
 
     let (start, end) = scrolled_cell_x(false);
     assert!(

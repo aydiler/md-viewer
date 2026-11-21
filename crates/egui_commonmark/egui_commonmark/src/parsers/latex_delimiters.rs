@@ -402,8 +402,7 @@ mod tests {
     #[test]
     fn display_pair_across_lines_converts() {
         let text = "\\[\nr_a=1\n\\]";
-        let (event, slice) =
-            find_math(text, "r_a=1").expect("display math expected");
+        let (event, slice) = find_math(text, "r_a=1").expect("display math expected");
         assert!(event.contains("DisplayMath"));
         assert_eq!(slice, "\\[\nr_a=1\n\\]");
     }
@@ -554,9 +553,8 @@ mod tests {
     #[test]
     fn math_disabled_leaves_everything_alone() {
         let events = parse_events("\\(x\\)", false, false);
-        assert!(events.iter().all(|(e, _)| !matches!(
-            e,
-            Event::InlineMath(_) | Event::DisplayMath(_)
-        )));
+        assert!(events
+            .iter()
+            .all(|(e, _)| !matches!(e, Event::InlineMath(_) | Event::DisplayMath(_))));
     }
 }

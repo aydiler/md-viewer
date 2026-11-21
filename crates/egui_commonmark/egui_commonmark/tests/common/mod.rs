@@ -6,8 +6,8 @@
 //! clear the deltas and keep the old call shapes.
 #![allow(dead_code)]
 
-use egui::{CentralPanel, Context, FullOutput, Id, InnerResponse, RawInput, Ui, Vec2};
 use egui::scroll_area::State;
+use egui::{CentralPanel, Context, FullOutput, Id, InnerResponse, RawInput, Ui, Vec2};
 
 pub trait FrameExt {
     /// `Context::run_pass`, with the texture deltas cleared.
@@ -51,6 +51,10 @@ pub fn store_offset(ctx: &Context, id: Id, state: State, offset: Vec2) {
     let mut value = serde_json::to_value(state).expect("State serializes");
     value["offset"] = serde_json::to_value(offset).expect("Vec2 serializes");
     let patched: State = serde_json::from_value(value).expect("State deserializes");
-    assert_eq!(patched.unclamped_offset(), offset, "offset injection failed");
+    assert_eq!(
+        patched.unclamped_offset(),
+        offset,
+        "offset injection failed"
+    );
     patched.store(ctx, id);
 }

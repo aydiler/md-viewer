@@ -1,6 +1,6 @@
 use crate::alerts::AlertBundle;
 use crate::typography::TypographyConfig;
-use egui::{RichText, TextStyle, Ui, text::LayoutJob};
+use egui::{text::LayoutJob, RichText, TextStyle, Ui};
 use std::collections::HashMap;
 #[cfg(feature = "math")]
 use std::collections::HashSet;
@@ -28,13 +28,16 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-#[cfg(any(feature = "better_syntax_highlighting", feature = "mermaid", feature = "math"))]
+#[cfg(any(
+    feature = "better_syntax_highlighting",
+    feature = "mermaid",
+    feature = "math"
+))]
 use std::sync::LazyLock;
 
 #[cfg(feature = "better_syntax_highlighting")]
 static GLOBAL_SYNTAX_SET: LazyLock<Arc<SyntaxSet>> =
     LazyLock::new(|| Arc::new(SyntaxSet::load_defaults_newlines()));
-
 
 #[cfg(feature = "better_syntax_highlighting")]
 const DEFAULT_THEME_LIGHT: &str = "base16-ocean.light";
@@ -114,7 +117,10 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             .field("typography", &self.typography)
             .field("use_strong_font_family", &self.use_strong_font_family)
             .field("progressive_measure", &self.progressive_measure)
-            .field("progressive_measure_blocks", &self.progressive_measure_blocks)
+            .field(
+                "progressive_measure_blocks",
+                &self.progressive_measure_blocks,
+            )
             .field("render_frontmatter", &self.render_frontmatter)
             .field("math_scale", &self.math_scale)
             .finish()
@@ -245,12 +251,12 @@ impl Style {
             // Research: Nielsen Norman Group "layer-cake" scanning pattern requires distinct hierarchy
             // H1: 2× base (32px), H2: 1.6× (26px), H3: 1.25× (20px), H4: 1.125× (18px)
             let (size, is_bold) = match level {
-                0 => (base_font_size * 2.0, true),      // H1: 32px (2×)
-                1 => (base_font_size * 1.6, true),     // H2: 26px (1.6×)
-                2 => (base_font_size * 1.25, true),    // H3: 20px (1.25×)
-                3 => (base_font_size * 1.125, true),   // H4: 18px (1.125×)
-                4 => (base_font_size, false),          // H5: 16px (base, no bold)
-                _ => (base_font_size * 0.875, false),  // H6: 14px (0.875×, no bold)
+                0 => (base_font_size * 2.0, true),    // H1: 32px (2×)
+                1 => (base_font_size * 1.6, true),    // H2: 26px (1.6×)
+                2 => (base_font_size * 1.25, true),   // H3: 20px (1.25×)
+                3 => (base_font_size * 1.125, true),  // H4: 18px (1.125×)
+                4 => (base_font_size, false),         // H5: 16px (base, no bold)
+                _ => (base_font_size * 0.875, false), // H6: 14px (0.875×, no bold)
             };
 
             rich_text = rich_text.size(size);
@@ -390,9 +396,18 @@ mod tests {
             let options = CommonMarkOptions::default();
             for line_height in [None, Some(21.0)] {
                 for lang in ["rs", "py", "toml", "not-a-language"] {
-                    let block = CodeBlock { lang: Some(lang.to_owned()), content: code.to_owned() };
-                    let mut highlighted =
-                        block.syntax_highlighting(&mut cache, &options, lang, ui, code, line_height);
+                    let block = CodeBlock {
+                        lang: Some(lang.to_owned()),
+                        content: code.to_owned(),
+                    };
+                    let mut highlighted = block.syntax_highlighting(
+                        &mut cache,
+                        &options,
+                        lang,
+                        ui,
+                        code,
+                        line_height,
+                    );
                     let mut plain = plain_highlighting(ui, code, line_height);
                     // `CodeBlock::end` disables wrapping for both.
                     highlighted.wrap.max_width = f32::INFINITY;
@@ -503,7 +518,15 @@ mod tests {
     fn math_cache_key_includes_the_point_size() {
         // Without this, the first rendered size is served for every later
         // scale and changing the setting appears to do nothing.
-        let at = |pt| math_cache_hash("x + y", true, egui::Color32::BLACK, egui::Color32::WHITE, pt);
+        let at = |pt| {
+            math_cache_hash(
+                "x + y",
+                true,
+                egui::Color32::BLACK,
+                egui::Color32::WHITE,
+                pt,
+            )
+        };
         assert_ne!(at(16.0), at(20.0));
         assert_ne!(at(16.0), at(16.5));
     }
@@ -514,7 +537,15 @@ mod tests {
         // The size derives from a resolved font height, which fluctuates in the
         // last float digits between frames. Re-keying on that would recompile
         // every formula through typst on every paint.
-        let at = |pt| math_cache_hash("x + y", true, egui::Color32::BLACK, egui::Color32::WHITE, pt);
+        let at = |pt| {
+            math_cache_hash(
+                "x + y",
+                true,
+                egui::Color32::BLACK,
+                egui::Color32::WHITE,
+                pt,
+            )
+        };
         assert_eq!(at(16.0), at(16.0001));
     }
 
@@ -1035,13 +1066,10 @@ impl CodeBlock {
         // In dark mode the rendering is recoloured onto the code-block
         // background (`mermaid_dark_pixel`), so the theme and that colour are
         // part of the diagram's identity: toggling the theme renders it again.
-        let dark_background = ui
-            .visuals()
-            .dark_mode
-            .then(|| {
-                let c = ui.visuals().extreme_bg_color;
-                [c.r(), c.g(), c.b()]
-            });
+        let dark_background = ui.visuals().dark_mode.then(|| {
+            let c = ui.visuals().extreme_bg_color;
+            [c.r(), c.g(), c.b()]
+        });
         let mut hasher = DefaultHasher::new();
         self.content.hash(&mut hasher);
         dark_background.hash(&mut hasher);
@@ -1071,7 +1099,9 @@ impl CodeBlock {
                     );
                 }
                 Err(err) => {
-                    cache.mermaid_states.insert(result.hash, MermaidState::Error(err));
+                    cache
+                        .mermaid_states
+                        .insert(result.hash, MermaidState::Error(err));
                 }
             }
         }
@@ -1092,8 +1122,10 @@ impl CodeBlock {
         // Promote: if this diagram is waiting and no thread is active, spawn now.
         // Since egui processes blocks in document order, the first Rendering block
         // encountered after the slot clears is always the topmost waiting one.
-        if matches!(cache.mermaid_states.get(&hash), Some(MermaidState::Rendering))
-            && cache.mermaid_rendering.is_none()
+        if matches!(
+            cache.mermaid_states.get(&hash),
+            Some(MermaidState::Rendering)
+        ) && cache.mermaid_rendering.is_none()
         {
             Self::spawn_mermaid_render(hash, &self.content, dark_background, cache);
         }
@@ -1105,8 +1137,7 @@ impl CodeBlock {
             Some(MermaidState::Rendering) => {
                 // Placeholder with loading text
                 let w = max_width.min(options.max_width(ui));
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(w, 200.0), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 200.0), egui::Sense::hover());
                 if ui.is_rect_visible(rect) {
                     ui.painter()
                         .rect_filled(rect, 4.0, ui.visuals().faint_bg_color);
@@ -1364,7 +1395,9 @@ impl CodeBlock {
 
         while let Some(text_start) = remaining.find("<text") {
             let text_rest = &remaining[text_start..];
-            let Some(open_end) = text_rest.find('>') else { break };
+            let Some(open_end) = text_rest.find('>') else {
+                break;
+            };
 
             // Capture the first <text ...> tag as template (all share same attrs)
             if open_tag_template.is_empty() {
@@ -1372,14 +1405,18 @@ impl CodeBlock {
             }
 
             let inner = &text_rest[open_end + 1..];
-            let Some(close_pos) = inner.find("</text>") else { break };
+            let Some(close_pos) = inner.find("</text>") else {
+                break;
+            };
             let inner_content = &inner[..close_pos];
 
             // Extract tspan content
             let mut tspan_remaining = inner_content;
             while let Some(ts) = tspan_remaining.find("<tspan") {
                 let ts_rest = &tspan_remaining[ts..];
-                let Some(ts_close) = ts_rest.find("</tspan>") else { break };
+                let Some(ts_close) = ts_rest.find("</tspan>") else {
+                    break;
+                };
                 let full_tspan = &ts_rest[..ts_close + 8];
 
                 if x_val.is_empty() {
@@ -1659,7 +1696,9 @@ static MATH_FONTS: LazyLock<Vec<typst::text::Font>> = LazyLock::new(|| {
         });
     if let Some(path) = fallback_path {
         if let Ok(data) = std::fs::read(path) {
-            fonts.extend(typst::text::Font::iter(typst::foundations::Bytes::new(data)));
+            fonts.extend(typst::text::Font::iter(typst::foundations::Bytes::new(
+                data,
+            )));
         }
     }
 
@@ -1872,10 +1911,7 @@ fn render_math_formula(
         }
     }
     let pixels = pixmap.data();
-    let colors: Vec<egui::Color32> = pixels
-        .chunks_exact(4)
-        .map(|c| lut[c[3] as usize])
-        .collect();
+    let colors: Vec<egui::Color32> = pixels.chunks_exact(4).map(|c| lut[c[3] as usize]).collect();
 
     let image = egui::ColorImage {
         size: [w, h],
@@ -2065,8 +2101,7 @@ fn render_math_with_layout(
             } else {
                 // Display: placeholder box
                 let w = ui.available_width().min(400.0);
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::hover());
                 if ui.is_rect_visible(rect) {
                     ui.painter()
                         .rect_filled(rect, 4.0, ui.visuals().faint_bg_color);
@@ -2145,8 +2180,10 @@ fn render_math_with_layout(
                 let draw_size = egui::vec2(size.x * fit_scale, size.y * fit_scale);
                 let sized_texture = egui::load::SizedTexture::new(texture.id(), draw_size);
                 let img = egui::Image::new(egui::ImageSource::Texture(sized_texture));
-                let (rect, _) = ui
-                    .allocate_exact_size(egui::vec2(draw_size.x, draw_size.y + lift), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(draw_size.x, draw_size.y + lift),
+                    egui::Sense::hover(),
+                );
                 img.paint_at(ui, egui::Rect::from_min_size(rect.min, draw_size));
             } else if is_inline {
                 ui.add(egui::Image::new(egui::ImageSource::Texture(sized_texture)));
@@ -2337,7 +2374,12 @@ impl CodeBlock {
     }
 }
 
-fn simple_highlighting(ui: &Ui, text: &str, extension: &str, code_line_height: Option<f32>) -> egui::text::LayoutJob {
+fn simple_highlighting(
+    ui: &Ui,
+    text: &str,
+    extension: &str,
+    code_line_height: Option<f32>,
+) -> egui::text::LayoutJob {
     let mut job = egui_extras::syntax_highlighting::highlight(
         ui.ctx(),
         ui.style(),
@@ -2367,7 +2409,8 @@ fn code_block_is_offscreen(ui: &Ui, text: &str, code_line_height: Option<f32>) -
     if top > clip.bottom() {
         return true;
     }
-    let line_height = code_line_height.unwrap_or_else(|| ui.text_style_height(&TextStyle::Monospace));
+    let line_height =
+        code_line_height.unwrap_or_else(|| ui.text_style_height(&TextStyle::Monospace));
     let lines = text.lines().count().max(1) as f32;
     let generous_height = 2.0 * lines * line_height + 64.0;
     top + generous_height < clip.top()
@@ -2417,7 +2460,7 @@ pub struct CommonMarkCache {
 
     /// Cached parsed markdown events to avoid re-parsing every frame.
     /// Keyed by a hash of the source text. Cleared when cache is reset.
-    cached_events: Option<(u64, Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>)>,
+    cached_events: Option<(u64, crate::pulldown::ParsedEvents)>,
     /// Source offsets of the blocks the renderer lays out right to left
     /// (#108). Set together with `cached_events`, so it always describes the
     /// event stream currently cached.
@@ -2551,14 +2594,15 @@ impl Default for CommonMarkCache {
             #[cfg(feature = "mermaid")]
             mermaid_rx,
             #[cfg(feature = "mermaid")]
-            mermaid_renderer: merman::render::HeadlessRenderer::new()
-                .with_text_measurer(Arc::new(merman::render::DeterministicTextMeasurer {
+            mermaid_renderer: merman::render::HeadlessRenderer::new().with_text_measurer(Arc::new(
+                merman::render::DeterministicTextMeasurer {
                     // Wider than default (0.55) to accommodate Noto Sans/DejaVu Sans
                     // which are wider than the vendored Trebuchet MS metrics.
                     // 0.65 prevents text overlap in complex flowcharts with long labels.
                     char_width_factor: 0.65,
                     line_height_factor: 0.0, // use internal default
-                })),
+                },
+            )),
             #[cfg(feature = "mermaid")]
             clicked_mermaid: None,
             clicked_image: None,
@@ -2642,7 +2686,10 @@ impl CommonMarkCache {
 
     /// Clear the cache for a specific scrollable viewer. Returns false if the
     /// id was not in the cache.
-    pub fn clear_scrollable_with_id(&mut self, source_id: impl std::hash::Hash + std::fmt::Debug) -> bool {
+    pub fn clear_scrollable_with_id(
+        &mut self,
+        source_id: impl std::hash::Hash + std::fmt::Debug,
+    ) -> bool {
         self.scroll.remove(&egui::Id::unique(source_id)).is_some()
     }
 
@@ -2727,7 +2774,8 @@ impl CommonMarkCache {
     /// The `normalized_key` should be a pre-computed lowercase key for the header title.
     pub fn record_header_position(&mut self, normalized_key: &str, viewport_y: f32) {
         let content_y = self.current_scroll_offset + viewport_y;
-        self.header_positions.insert(normalized_key.to_string(), content_y);
+        self.header_positions
+            .insert(normalized_key.to_string(), content_y);
     }
 
     /// Record a header's already-content-relative y directly (no offset addition).
@@ -2737,7 +2785,8 @@ impl CommonMarkCache {
     /// is for `show_viewport`, whose cursor is already viewport-relative so
     /// the offset addition is needed.
     pub fn record_header_content_y(&mut self, normalized_key: &str, content_y: f32) {
-        self.header_positions.insert(normalized_key.to_string(), content_y);
+        self.header_positions
+            .insert(normalized_key.to_string(), content_y);
     }
 
     /// Same as `record_header_content_y` but only stores if the key isn't
@@ -2869,7 +2918,10 @@ impl CommonMarkCache {
     }
 
     /// Get cached parsed events if the content hash matches.
-    pub fn get_cached_events(&self, content_hash: u64) -> Option<&[(pulldown_cmark::Event<'static>, std::ops::Range<usize>)]> {
+    pub fn get_cached_events(
+        &self,
+        content_hash: u64,
+    ) -> Option<&[(pulldown_cmark::Event<'static>, std::ops::Range<usize>)]> {
         self.cached_events.as_ref().and_then(|(hash, events)| {
             if *hash == content_hash {
                 Some(events.as_slice())
@@ -2880,16 +2932,43 @@ impl CommonMarkCache {
     }
 
     /// Store parsed events in the cache.
-    pub fn set_cached_events(&mut self, content_hash: u64, events: Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>) {
+    pub fn set_cached_events(
+        &mut self,
+        content_hash: u64,
+        events: Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>,
+    ) {
+        self.cached_events = Some((content_hash, std::sync::Arc::new(events)));
+    }
+
+    /// The cached events for `content_hash` as a shared handle, so a scroll
+    /// cache can hold the same allocation instead of a second parse.
+    pub fn cached_events_shared(&self, content_hash: u64) -> Option<crate::pulldown::ParsedEvents> {
+        self.cached_events
+            .as_ref()
+            .filter(|(hash, _)| *hash == content_hash)
+            .map(|(_, events)| std::sync::Arc::clone(events))
+    }
+
+    /// Store an already shared event stream for `content_hash`.
+    pub fn set_cached_events_shared(
+        &mut self,
+        content_hash: u64,
+        events: crate::pulldown::ParsedEvents,
+    ) {
         self.cached_events = Some((content_hash, events));
     }
 
     /// Move the cached events for `content_hash` out of the cache, so a pass
     /// can iterate them by reference while it holds the cache mutably. Put
     /// them back with [`Self::set_cached_events`].
-    pub fn take_cached_events(&mut self, content_hash: u64) -> Option<Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>> {
+    pub fn take_cached_events(
+        &mut self,
+        content_hash: u64,
+    ) -> Option<Vec<(pulldown_cmark::Event<'static>, std::ops::Range<usize>)>> {
         match self.cached_events.take() {
-            Some((hash, events)) if hash == content_hash => Some(events),
+            Some((hash, events)) if hash == content_hash => {
+                Some(std::sync::Arc::try_unwrap(events).unwrap_or_else(|shared| (*shared).clone()))
+            }
             other => {
                 self.cached_events = other;
                 None
@@ -2979,7 +3058,10 @@ mod mermaid_dark_tests {
             );
         }
         let fill = mermaid_dark_pixel([0xEC, 0xEC, 0xFF], BG);
-        assert!(fill.iter().all(|&c| c < 64), "pale fill stayed light: {fill:?}");
+        assert!(
+            fill.iter().all(|&c| c < 64),
+            "pale fill stayed light: {fill:?}"
+        );
     }
 
     #[test]

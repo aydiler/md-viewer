@@ -325,10 +325,13 @@ mod tests {
     fn pending_cache_and_decode_job_can_share_the_uri_allocation() {
         let uri: Arc<str> = Arc::from("data:,hello");
         let cache = Arc::new(Mutex::new(DataUrlCache::default()));
-        cache.lock().entries.insert(Arc::clone(&uri), CacheEntry {
-            value: Poll::Pending,
-            last_used: 1,
-        });
+        cache.lock().entries.insert(
+            Arc::clone(&uri),
+            CacheEntry {
+                value: Poll::Pending,
+                last_used: 1,
+            },
+        );
         let job = DecodeJob {
             cache: Arc::clone(&cache),
             uri,

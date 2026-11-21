@@ -34,7 +34,10 @@ fn frame(
 ) -> egui::scroll_area::ScrollAreaOutput<()> {
     let mut out = None;
     let input = egui::RawInput {
-        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(WIDTH + 40.0, height))),
+        screen_rect: Some(Rect::from_min_size(
+            Pos2::ZERO,
+            egui::vec2(WIDTH + 40.0, height),
+        )),
         ..Default::default()
     };
     ctx.run_frame(input, |ctx| {
@@ -68,7 +71,10 @@ fn first_frame_highlights_only_the_visible_code_blocks() {
         first.content_size.y,
         first.inner_rect.height()
     );
-    assert!(highlighted > 0, "the visible code blocks were not highlighted");
+    assert!(
+        highlighted > 0,
+        "the visible code blocks were not highlighted"
+    );
     assert!(
         highlighted < BLOCKS / 4,
         "the first frame highlighted {highlighted} of {BLOCKS} code blocks; \

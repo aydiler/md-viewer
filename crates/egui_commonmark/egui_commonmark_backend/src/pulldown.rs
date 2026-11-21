@@ -3,6 +3,11 @@ use egui::{Pos2, Vec2};
 use pulldown_cmark::Options;
 use std::ops::Range;
 
+/// A parsed event stream, shared between [`crate::CommonMarkCache`] and a
+/// [`ScrollableCache`]: both hold the same allocation, so the document is
+/// parsed once and the two can never disagree (devlogs 027, 110).
+pub type ParsedEvents = std::sync::Arc<Vec<(pulldown_cmark::Event<'static>, Range<usize>)>>;
+
 #[derive(Default, Debug)]
 pub struct ScrollableCache {
     pub available_size: Vec2,
@@ -12,7 +17,7 @@ pub struct ScrollableCache {
     /// borrow of the source text. Repopulated only when `content_version`
     /// changes, replacing the per-frame `Parser::new_ext(text).collect()`
     /// that previously ran at every paint.
-    pub events: Vec<(pulldown_cmark::Event<'static>, Range<usize>)>,
+    pub events: ParsedEvents,
     /// Last content version this cache was populated for. The caller
     /// (typically a `Tab`) bumps a u64 on every load/reload; when the
     /// renderer sees a mismatch it re-parses and clears split_points.
@@ -131,10 +136,14 @@ pub fn delayed_events_list_item<'e>(
     let mut depth: i32 = 1;
     let mut total_events = Vec::new();
     for (_, (event, range)) in events {
-        let is_item_start =
-            matches!(&event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Item));
-        let is_item_end =
-            matches!(&event, pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item));
+        let is_item_start = matches!(
+            &event,
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Item)
+        );
+        let is_item_end = matches!(
+            &event,
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item)
+        );
         total_events.push((event, range));
         if is_item_start {
             depth += 1;
@@ -294,10 +303,7 @@ mod tests {
     /// `delayed_events_list_item`.
     fn parse_advance_past_first_item(
         md: &str,
-    ) -> (
-        Vec<(Event<'static>, std::ops::Range<usize>)>,
-        usize,
-    ) {
+    ) -> (Vec<(Event<'static>, std::ops::Range<usize>)>, usize) {
         let events: Vec<_> = Parser::new_ext(md, parser_options())
             .into_offset_iter()
             .map(|(e, r)| (e.into_static(), r))
@@ -314,19 +320,12 @@ mod tests {
     fn delayed_events_list_item_simple_item() {
         let md = "- alpha\n- beta\n";
         let (events, start) = parse_advance_past_first_item(md);
-        let mut iter = events
-            .clone()
-            .into_iter()
-            .enumerate()
-            .skip(start);
+        let mut iter = events.clone().into_iter().enumerate().skip(start);
         let collected = delayed_events_list_item(&mut iter);
         // Should contain the contents of the FIRST item and stop AT the
         // matching `TagEnd::Item` for it (inclusive).
         assert!(
-            matches!(
-                collected.last(),
-                Some((Event::End(TagEnd::Item), _))
-            ),
+            matches!(collected.last(), Some((Event::End(TagEnd::Item), _))),
             "expected last event to be TagEnd::Item, got {:?}",
             collected.last()
         );
@@ -352,11 +351,7 @@ mod tests {
 - outer-2
 ";
         let (events, start) = parse_advance_past_first_item(md);
-        let mut iter = events
-            .clone()
-            .into_iter()
-            .enumerate()
-            .skip(start);
+        let mut iter = events.clone().into_iter().enumerate().skip(start);
         let collected = delayed_events_list_item(&mut iter);
 
         // The captured slice must include the inner list's close (otherwise

@@ -116,7 +116,12 @@ fn offset_beyond_extent_frame_still_paints_visible_content() {
     // fallback) shortens the document while the offset sits deep; here it is
     // injected directly so the critical frame is deterministic.
     let stale_offset = content_height + 2000.0;
-    common::store_offset(&ctx, settled.out.id, settled.out.state, Vec2::new(0.0, stale_offset));
+    common::store_offset(
+        &ctx,
+        settled.out.id,
+        settled.out.state,
+        Vec2::new(0.0, stale_offset),
+    );
 
     // The frame under test: egui computes the viewport from the stored offset
     // before the renderer selects its slice (scroll_area.rs: `viewport =

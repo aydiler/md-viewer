@@ -1,5 +1,5 @@
 use crate::typography::TypographyConfig;
-use egui::{self, NumExt, RichText, Sense, TextStyle, Ui, Vec2, epaint};
+use egui::{self, epaint, NumExt, RichText, Sense, TextStyle, Ui, Vec2};
 
 /// Add extra vertical spacing based on typography configuration.
 /// Returns the amount of space added.

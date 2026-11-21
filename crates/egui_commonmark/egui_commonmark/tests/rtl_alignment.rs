@@ -310,7 +310,10 @@ fn rtl_bullet_item_puts_text_and_marker_at_the_right_edge() {
          ends at {:.1}",
         rtl.right()
     );
-    assert!(rtl.left() > left + 100.0, "RTL item starts at the left edge");
+    assert!(
+        rtl.left() > left + 100.0,
+        "RTL item starts at the left edge"
+    );
     let rtl_mid = rtl.pos.y + rtl.galley.rect.center().y;
     let marker = bullets
         .iter()
@@ -325,20 +328,26 @@ fn rtl_bullet_item_puts_text_and_marker_at_the_right_edge() {
 
     // The English item in the same list keeps its marker and text on the left.
     let ltr = find(&painted, "English item");
-    assert!(ltr.left() < left + 60.0, "LTR item moved to {:.1}", ltr.left());
+    assert!(
+        ltr.left() < left + 60.0,
+        "LTR item moved to {:.1}",
+        ltr.left()
+    );
     let ltr_mid = ltr.pos.y + ltr.galley.rect.center().y;
     let ltr_marker = bullets
         .iter()
         .find(|c| (c.y - ltr_mid).abs() < 12.0)
         .expect("bullet on the LTR item's line");
-    assert!(ltr_marker.x < ltr.left(), "LTR bullet is not left of its text");
+    assert!(
+        ltr_marker.x < ltr.left(),
+        "LTR bullet is not left of its text"
+    );
 }
 
 #[test]
 fn nested_rtl_items_indent_from_the_right_as_far_as_ltr_items_do_from_the_left() {
-    let doc = format!(
-        "{ENGLISH}\n\n- Outer item\n  - Inner item\n\n---\n\n- שלום עולם\n  - תת פריט\n"
-    );
+    let doc =
+        format!("{ENGLISH}\n\n- Outer item\n  - Inner item\n\n---\n\n- שלום עולם\n  - תת פריט\n");
     for (pass, painted) in ["bootstrap", "slice"].iter().zip(render(&doc)) {
         let ltr_step = find(&painted, "Inner item").left() - find(&painted, "Outer item").left();
         let outer = find(&painted, "שלום");
