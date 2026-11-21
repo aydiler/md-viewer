@@ -5,6 +5,7 @@ All notable changes to markdown-viewer will be documented in this file.
 ## [Unreleased]
 
 ### Performance
+- **Large documents open sooner and use less memory.** Opening a document parsed its full text four times: twice in the renderer, which also kept two copies of the result, and once each for the outline and for the clickable file links. It is now parsed once for the renderer and once for the outline and links together, and the link scan no longer classifies every word of plain text. Time to first content on the 6 MB GitLab changelog went from 624 to 421 ms (median of 9, interleaved), and from 276 to 210 ms on 5 MB of prose; peak memory on the changelog fell by 34 MB.
 - **Less work at startup.** md-viewer used to scan every installed font family at each launch to fill the font picker, about a quarter of the CPU time of a launch. The scan now runs the first time View → Fonts is opened; the dialog shows "Scanning installed fonts…" for a moment, as it already did when opened early. Startup CPU went from 1.13 s to 0.82 s (median of 15 launches with a README on Xvfb).
 
 ### Fixed

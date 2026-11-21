@@ -1092,6 +1092,7 @@ sc.events = Parser::new_ext(text, parser_options_math(math_enabled)).into_offset
 ```
 **Diagnostic that would have caught it sooner:** dump `sc.events[ev_idx]` for each entry in `sc.split_points`. If the kind is `Tag::*` (Start) rather than `Event::End`, the two parses have diverged — they were populated against different event streams.
 **Better long-term:** consolidate the two parses into one source so the divergence can't reappear. An `Arc<Vec<…>>` shared field on `CommonMarkCache` would also save the duplicated event storage (~tens of MB on large docs).
+**Done in devlog 110 (2026-11-21):** `parsed_events` is the only parse; `show()` and `show_scrollable` hold the same `Arc`, which `scrollable_and_bootstrap_share_one_parsed_stream` pins with `Arc::ptr_eq`. Measured on the 6 MB changelog: the second parse was 117–284 ms of time to first content and 34 MB of peak memory.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show_scrollable` cache-population branch)
 
 ### Split-points must be gated on renderer container state
