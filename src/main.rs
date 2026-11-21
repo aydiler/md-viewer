@@ -8043,4 +8043,20 @@ mod tests {
             "a click elsewhere must still unfocus"
         );
     }
+
+    /// #266: on compositors without server-side decorations (GNOME/mutter on
+    /// Wayland, weston) winit draws the title bar itself. Without its
+    /// `wayland-csd-adwaita` feature that is sctk's fallback frame, which
+    /// ignores double-clicks, so the title bar could not maximize the window.
+    /// eframe turns the feature on only through its default features, which
+    /// md-viewer disables; `Cargo.toml` asks winit for it directly.
+    #[test]
+    fn wayland_title_bar_uses_the_adwaita_frame() {
+        let lock = include_str!("../Cargo.lock");
+        assert!(
+            lock.lines().any(|l| l.trim() == "name = \"sctk-adwaita\""),
+            "sctk-adwaita is not in the dependency graph: winit falls back to a \
+             title bar that cannot maximize on double-click (#266)"
+        );
+    }
 }
