@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- **Less work at startup.** md-viewer used to scan every installed font family at each launch to fill the font picker, about a quarter of the CPU time of a launch. The scan now runs the first time View → Fonts is opened; the dialog shows "Scanning installed fonts…" for a moment, as it already did when opened early. Startup CPU went from 1.13 s to 0.82 s (median of 15 launches with a README on Xvfb).
+
 ### Fixed
 - **Double-clicking the title bar maximizes and restores the window on GNOME (#266).** On Wayland compositors that leave window decorations to the app (GNOME, weston), md-viewer drew a minimal fallback title bar that only moved the window; a double-click did nothing. It now draws the Adwaita-style title bar that eframe apps get by default, which shows the window title and maximizes or restores on a double-click. KDE, Hyprland, Sway and X11 sessions, where the compositor or window manager draws the title bar, are unchanged.
 
