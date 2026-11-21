@@ -1561,6 +1561,8 @@ fn handle_local_link_click(
 }
 
 /// Parse explicit links plus bare local Markdown file references, skipping code blocks.
+/// The app uses [`parse_document`]; this single pass is the tests' reference.
+#[cfg(test)]
 fn parse_local_links(content: &str, document_path: &Path) -> Vec<String> {
     let mut links = LinkCollector::new(document_path);
     for event in pulldown_cmark::Parser::new_ext(content, pulldown_cmark::Options::all()) {
@@ -1857,6 +1859,9 @@ fn resolve_local_link_path(destination: &str, document_dir: &Path) -> io::Result
 }
 
 /// Parse headings with the same CommonMark rules used by the renderer.
+/// The outline alone. The app uses [`parse_document`]; this single pass is
+/// the tests' reference.
+#[cfg(test)]
 fn parse_headers(content: &str) -> ParsedHeaders {
     let mut headers = HeaderCollector::new(content);
     for (event, range) in
