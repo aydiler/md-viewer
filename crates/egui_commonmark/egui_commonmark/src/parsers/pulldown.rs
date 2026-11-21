@@ -3624,10 +3624,17 @@ impl CommonMarkViewerInternal {
             let table_bound = options
                 .table_max_width
                 .map(|w| w as f32)
-                .unwrap_or(max_width)
-                // Never past a floating scrollbar in the renderer's own scroll
-                // area (devlog 111): the caller's bound is the whole pane.
-                .min((ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0));
+                .unwrap_or(max_width);
+            // Never past a floating scrollbar in the renderer's own scroll area
+            // (devlog 111): the caller's bound is the whole pane. Only then:
+            // elsewhere a table may still reach past the pane as before.
+            let table_bound = if self.scrollbar_gutter > 0.0 {
+                table_bound.min(
+                    (ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0),
+                )
+            } else {
+                table_bound
+            };
             let minimum_widths: Vec<f32> = (0..num_cols)
                 .map(|column| {
                     let header_floor = header
@@ -4804,10 +4811,16 @@ impl CommonMarkViewerInternal {
         let table_bound = options
             .table_max_width
             .map(|w| w as f32)
-            .unwrap_or(max_width)
-            // Never past a floating scrollbar in the renderer's own scroll
-            // area (devlog 111): the caller's bound is the whole pane.
-            .min((ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0));
+            .unwrap_or(max_width);
+        // Never past a floating scrollbar in the renderer's own scroll area
+        // (devlog 111): the caller's bound is the whole pane. Only then:
+        // elsewhere a table may still reach past the pane as before.
+        let table_bound = if self.scrollbar_gutter > 0.0 {
+            table_bound
+                .min((ui.max_rect().right() - self.scrollbar_gutter - ui.cursor().left()).max(0.0))
+        } else {
+            table_bound
+        };
         let table_rows: Vec<(bool, &[String])> = table
             .header
             .iter()
