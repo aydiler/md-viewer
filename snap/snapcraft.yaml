@@ -97,9 +97,17 @@ parts:
       - libxcb1
       - libxkbcommon0
       # winit dlopens its X11 stack at runtime, so snapcraft's link-time
-      # dependency staging never picks these up (#55):
+      # dependency staging never picks these up (#55). XConnection::new opens
+      # Xlib, Xcursor (which needs Xrender), Xlib-xcb and XInput2. Until 0.3.9
+      # libgtk-3-0 pulled several of them in as its own dependencies; removing
+      # it broke every X11 session (#272). scripts/snap-ci.sh checks the list.
       - libxkbcommon-x11-0
       - libx11-6
+      - libx11-xcb1
+      - libxcursor1
+      - libxrender1
+      - libxi6
+      - libxrandr2
       - libx11-data
       - xkb-data
       - libfontconfig1

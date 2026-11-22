@@ -75,6 +75,9 @@ build() {
 
 # The app dlopens these at runtime, so snapcraft's link-time dependency
 # staging cannot see them (#55, devlog 099). Fail the build if one is missing.
+# winit's X11 XConnection::new opens Xlib, Xcursor, Xlib-xcb and XInput2;
+# Xcursor needs Xrender and Xfixes, XInput2 needs Xext. None of them is in the
+# core22 base, and #272 shipped without Xcursor, Xrender and Xi (devlog 113).
 # libdbus-1.so.3 (rfd's portal dialog) is not listed: the core22 base has it.
 check_contents() {
     local snap=$1 listing lib missing=0
@@ -82,7 +85,9 @@ check_contents() {
         sudo apt-get install -y -q squashfs-tools
     fi
     listing=$(unsquashfs -l "$snap")
-    for lib in libxkbcommon-x11.so.0 libX11.so.6 libfontconfig.so.1; do
+    for lib in libxkbcommon-x11.so.0 libX11.so.6 libfontconfig.so.1 \
+        libX11-xcb.so.1 libXcursor.so.1 libXrender.so.1 libXfixes.so.3 \
+        libXi.so.6 libXext.so.6; do
         if grep -qE "/${lib//./\\.}\$" <<<"$listing"; then
             echo "snap contains $lib"
         else

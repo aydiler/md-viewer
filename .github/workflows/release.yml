@@ -381,6 +381,17 @@ jobs:
         id: build
         run: bash scripts/snap-ci.sh build
 
+      # A dry run keeps the snap it built, so it can be started in a core22
+      # sandbox before the tag (devlog 113): the contents check below catches
+      # a missing library only if someone listed it.
+      - name: Keep the dry run's snap
+        if: steps.check.outputs.proceed == 'true' && github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-dry-run
+          path: ${{ steps.build.outputs.snap }}
+          retention-days: 3
+
       - name: Upload to Snap Store (stable) and sync listing metadata
         if: steps.check.outputs.proceed == 'true' && github.event_name == 'push'
         run: bash scripts/snap-ci.sh publish "${{ steps.build.outputs.snap }}"
