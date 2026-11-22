@@ -182,3 +182,58 @@ fn the_reading_column_is_unchanged() {
         "reading column starts at {left}, expected {expected_left} (pane {inner:?})"
     );
 }
+
+#[test]
+fn the_copy_button_sits_in_the_block_corner_once_the_gutter_clears_the_bar() {
+    // The column already ends before the floating bar, so the copy button
+    // must not also reserve the bar's reach inside the block (that left it
+    // ~12 px short of the corner). Plain `show()` keeps that inset
+    // (tests/copy_button.rs).
+    let (painted, _, inner) = render(true, None);
+    let style = Context::default().global_style();
+    let reach = bar_reach(&egui::style::ScrollStyle::floating());
+    let line = inner.right() - reach;
+    let icons: Vec<Rect> = painted
+        .iter()
+        .filter(|(rect, _)| {
+            rect.left() >= inner.left() - 1.0
+                && rect.top() > inner.top()
+                && rect.bottom() < inner.bottom()
+                && rect.width() < 30.0
+                && rect.right() > line - 60.0
+                && rect.height() < 30.0
+        })
+        .map(|(rect, _)| *rect)
+        .collect();
+    // The code block background: tall-ish, ends at the gutter line.
+    let block = painted
+        .iter()
+        .map(|(rect, _)| *rect)
+        .find(|rect| {
+            rect.left() >= inner.left() - 1.0
+                && (rect.right() - line).abs() < 1.0
+                && rect.height() > 40.0
+                && rect.height() < 80.0
+                && rect.top() > inner.top()
+        })
+        .expect("code block background at the gutter line");
+    let icon = icons
+        .iter()
+        .filter(|r| r.top() >= block.top() && r.bottom() <= block.bottom())
+        .max_by(|a, b| a.right().total_cmp(&b.right()))
+        .copied()
+        .unwrap_or_else(|| panic!("no copy icon inside {block:?}: {icons:?}"));
+    // The slot keeps one button padding from the edge, nothing more.
+    let slack = style.spacing.button_padding.x + 1.5;
+    assert!(
+        icon.right() >= block.right() - slack,
+        "copy icon ends at {}, {} px short of the block corner {} (allowed {slack}): the bar is reserved twice",
+        icon.right(),
+        block.right() - icon.right(),
+        block.right()
+    );
+    assert!(
+        icon.right() <= line + 0.5,
+        "copy icon {icon:?} reaches under the bar at {line}"
+    );
+}

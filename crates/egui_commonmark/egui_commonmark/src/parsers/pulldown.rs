@@ -4772,6 +4772,16 @@ impl CommonMarkViewerInternal {
         if let Some(block) = self.code_block.take() {
             let id = ui.scope_id().with("_code_block").with(self.curr_code_block);
             self.curr_code_block += 1;
+            // Inside `show_scrollable` the column already leaves a gutter for
+            // a floating scrollbar, so the copy button need not keep clear of
+            // the bar itself (devlog 112). Written on every pass so the flag
+            // never outlives the gutter.
+            ui.data_mut(|d| {
+                d.insert_temp(
+                    egui_commonmark_backend_extended::elements::scrollbar_clear_id(id),
+                    self.scrollbar_gutter > 0.0,
+                )
+            });
             block.end(ui, cache, options, max_width, id);
             self.line.try_insert_end(ui);
         }

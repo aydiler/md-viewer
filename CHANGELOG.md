@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **The code-block copy button sits in the block's corner again in Full Width.** Since the document leaves a gap for the scrollbar (0.3.10), the button kept its own room for the scrollbar as well and stood 10 px further from the corner than intended. Inside md-viewer's document it now sits one button padding from the edge; other uses of the renderer, which own their scroll area, keep the inset.
+
 ## [0.3.10] - 2026-11-22
 
 Full Width content stays clear of the scrollbar, the title bar maximizes on a double-click on GNOME, and large documents open sooner.

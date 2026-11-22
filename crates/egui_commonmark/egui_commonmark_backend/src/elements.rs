@@ -326,6 +326,13 @@ pub const COPIED_ICON: &str = "\u{2714}";
 
 /// Enhanced/specialized version of egui's code blocks. This one features copy button and borders.
 /// Uses selectable Label instead of TextEdit to allow text selection across code block boundaries.
+/// Temp-memory key under which the renderer tells [`code_block`] that the
+/// column already leaves a gutter for a floating scrollbar.
+#[doc(hidden)]
+pub fn scrollbar_clear_id(block_id: egui::Id) -> egui::Id {
+    block_id.with("scrollbar_clear")
+}
+
 pub fn code_block(
     ui: &mut Ui,
     text: &str,
@@ -387,10 +394,15 @@ pub fn code_block(
     // The slot also keeps clear of a floating scrollbar. egui's default bars
     // float over the content, and with Full Width a code block reaches the
     // pane's right edge, so the right half of the button sat under the bar
-    // and a click there went to the scrollbar instead of copying.
+    // and a click there went to the scrollbar instead of copying. Inside the
+    // renderer's own scroll area the column already leaves a gutter for the
+    // bar (devlog 111), and reserving it here too left the button short of
+    // the corner (devlog 112).
+    let column_clears_bar =
+        ui.data(|d| d.get_temp::<bool>(scrollbar_clear_id(id)).unwrap_or(false));
     let spacing = ui.spacing();
     let scroll = spacing.scroll;
-    let bar_reach = if scroll.floating {
+    let bar_reach = if scroll.floating && !column_clears_bar {
         scroll.bar_width + scroll.bar_outer_margin
     } else {
         0.0
