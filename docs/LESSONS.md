@@ -189,6 +189,13 @@ fn setup_fonts(ctx: &egui::Context) {
 **Testing gotcha:** a mutant must not touch a helper the assertion itself calls. Making `face_is_proportional` always true left the "is monospace" assertion green, because the assertion used the same function.
 **Files:** `src/system_fonts.rs`, `docs/devlog/087-script-font-fallback.md`
 
+### fontique 0.11.1 panicked when fontconfig had no fonts at all
+**Context:** Checking #255 with an empty `fonts.conf` killed md-viewer at startup: `fontique-0.11.1/src/backend/fontconfig.rs:685:61: called Result::unwrap() on an Err value: NoMatch`.
+**Root cause:** `Collection::new` unwraps `FcFontSort` for each generic family; an empty font set answers `NoMatch`. md-viewer's own no-fonts fallback never got a chance to run.
+**Fix:** fontique 0.12+ skips the generic family instead (bumped to 0.13.0, devlog 114). `catch_unwind` is no workaround here, because release builds abort on panic.
+**Testing:** fontconfig reads `FONTCONFIG_FILE` once per process, so a test of font discovery under a different config must run in a child process (re-exec the test binary with `--exact` and require a marker line from the child).
+**Files:** `Cargo.toml`, `src/system_fonts.rs` (`startup_fonts_survive_a_fontconfig_with_no_fonts`), `docs/devlog/114-no-system-fonts.md`
+
 ### egui 0.33 FontData requires Arc wrapper
 **Context:** Compiler error when adding fonts
 **Problem:** `fonts.font_data.insert()` expects `Arc<FontData>`, not `FontData`

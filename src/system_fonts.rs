@@ -2268,4 +2268,60 @@ mod tests {
             primary.selected.family
         );
     }
+
+    /// fontique 0.11.1 panicked while building its collection when
+    /// fontconfig exposed no fonts at all (`font_sort(..).unwrap()` on
+    /// `NoMatch`), so md-viewer died before its first frame. fontconfig reads
+    /// `FONTCONFIG_FILE` once per process, so the check runs in a child copy of
+    /// this test binary pointed at an empty configuration.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_fonts_survive_a_fontconfig_with_no_fonts() {
+        const CHILD: &str = "MDV_NO_FONTS_CHILD";
+        const MARKER: &str = "no-fonts child: fonts built";
+        if std::env::var_os(CHILD).is_some() {
+            let definitions =
+                FontLoader::new().definitions(None, FontPreset::Current, FontScope::Full);
+            let chain = &definitions.families[&FontFamily::Proportional];
+            assert!(!chain.is_empty(), "no proportional faces at all");
+            for key in ["NotoEmoji", "UiSymbols"] {
+                assert!(
+                    definitions.font_data.contains_key(key) && chain.iter().any(|n| n == key),
+                    "bundled face {key} missing: {chain:?}"
+                );
+            }
+            // The font picker builds its own collection on a thread.
+            let _ = scan_pickable_font_families();
+            println!("{MARKER}");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("mdv-no-fonts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("fonts.conf");
+        std::fs::write(
+            &config,
+            "<?xml version=\"1.0\"?>\n<fontconfig></fontconfig>\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "system_fonts::tests::startup_fonts_survive_a_fontconfig_with_no_fonts",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("FONTCONFIG_FILE", &config)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains(MARKER),
+            "child failed ({}):\n{stdout}\n{stderr}",
+            output.status
+        );
+    }
 }
