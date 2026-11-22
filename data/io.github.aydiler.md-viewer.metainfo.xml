@@ -86,6 +86,16 @@
   </provides>
 
   <releases>
+    <release version="0.3.11" date="2026-11-22">
+      <description>
+        <p>The snap starts again in X11 sessions, and two rendering fixes.</p>
+        <ul>
+          <li>The snap no longer fails to start in X11 sessions with a missing libXcursor error</li>
+          <li>Text in SVG images renders when the system's default sans-serif or serif font is not installed</li>
+          <li>The code-block copy button sits in the block's corner again in Full Width</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.10" date="2026-11-22">
       <description>
         <p>Full Width content stays clear of the scrollbar, and large documents open sooner.</p>

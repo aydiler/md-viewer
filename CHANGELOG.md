@@ -4,10 +4,17 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-11-22
+
+The snap starts again in X11 sessions, text in SVG images renders when the system's default font is missing, and the code-block copy button sits back in its corner.
+
 ### Fixed
 - **The snap starts again in X11 sessions (#272, reported by [@The9Cat](https://github.com/The9Cat), with the missing packages named by [@GuiOli91](https://github.com/GuiOli91)).** Since 0.3.9 the snap aborted at startup on X11 with `libXcursor.so.1: cannot open shared object file`; Wayland sessions were unaffected. 0.3.9 removed GTK from the snap as unused, but GTK had been bringing along X11 libraries that the windowing library loads at runtime. They are now bundled explicitly, and the snap build fails if any of them is missing.
 - **Text in `.svg` images renders when the system's default font is not installed (#274, contributed by [@peterwilli](https://github.com/peterwilli)).** SVG text set in `sans-serif` or `serif` vanished when fontconfig named an uninstalled family for it (FreeSans and FreeSerif on some Arch setups): images loaded from `.svg` files went through a loader that took that name as is. They now go through md-viewer's own SVG loader, which substitutes an installed family for both generic names.
 - **The code-block copy button sits in the block's corner again in Full Width.** Since the document leaves a gap for the scrollbar (0.3.10), the button kept its own room for the scrollbar as well and stood 10 px further from the corner than intended. Inside md-viewer's document it now sits one button padding from the edge; other uses of the renderer, which own their scroll area, keep the inset.
+
+### Internal
+- **The vendored renderer moves to 0.31.1**, carrying #274 and #275.
 
 ## [0.3.10] - 2026-11-22
 
