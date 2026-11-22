@@ -2693,6 +2693,21 @@ impl CommonMarkCache {
         self.scroll.remove(&egui::Id::unique(source_id)).is_some()
     }
 
+    /// How far a progressively measured scrollable viewer has measured its
+    /// document: the source byte offset where the measured part ends, or
+    /// `None` once the whole document is measured (or the viewer has not
+    /// been shown). Headings before this offset have a recorded position
+    /// (see [`get_header_position`](Self::get_header_position)).
+    pub fn measured_source_end(
+        &self,
+        source_id: impl std::hash::Hash + std::fmt::Debug,
+    ) -> Option<usize> {
+        self.scroll
+            .get(&egui::Id::unique(source_id))
+            .and_then(|sc| sc.measure_frontier)
+            .map(|frontier| frontier.src_end)
+    }
+
     /// If the user clicks on a link in the markdown render that has `name` as a link. The hook
     /// specified with this method will be set to true. It's status can be acquired
     /// with [`get_link_hook`](Self::get_link_hook). Be aware that all hook state is reset once

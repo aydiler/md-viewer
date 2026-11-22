@@ -607,6 +607,51 @@ fn restored_sidebar_width(width: Option<f32>, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
+/// A pending scroll to a heading that has not been measured yet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingHeaderJump {
+    /// The heading's source byte offset, which also keys its recorded
+    /// position (`header_position_key`).
+    source_start: usize,
+    /// For the line-ratio fallback if the heading never records a position.
+    line_number: usize,
+}
+
+impl PendingHeaderJump {
+    fn new(header: &Header) -> Self {
+        Self {
+            source_start: header.source_start,
+            line_number: header.line_number,
+        }
+    }
+}
+
+/// What the post-render step does with a pending heading jump.
+#[derive(Debug, PartialEq)]
+enum HeaderJumpStep {
+    /// The heading's position is recorded: scroll there.
+    ScrollTo(f32),
+    /// The measured part has not reached the heading yet: keep measuring.
+    Wait,
+    /// The document is measured past the heading but no position was
+    /// recorded: fall back to the line-ratio estimate.
+    Estimate,
+}
+
+/// Decide a pending heading jump after a frame. `measured_source_end` is
+/// `None` once the whole document is measured.
+fn resolve_header_jump(
+    position: Option<f32>,
+    measured_source_end: Option<usize>,
+    source_start: usize,
+) -> HeaderJumpStep {
+    match position {
+        Some(y) => HeaderJumpStep::ScrollTo((y - 50.0).max(0.0)),
+        None if measured_source_end.is_some_and(|end| end <= source_start) => HeaderJumpStep::Wait,
+        None => HeaderJumpStep::Estimate,
+    }
+}
+
 /// Represents a markdown header for the outline
 #[derive(Clone)]
 struct Header {
@@ -1124,12 +1169,11 @@ struct Tab {
     collapsed_headers: HashSet<usize>,
     scroll_offset: f32,
     pending_scroll_offset: Option<f32>,
-    /// Composite header-position key (see `header_position_key`) waiting for
-    /// a corrective scroll. Set when the outline-click handler used the
-    /// line-ratio fallback because the cache didn't yet have the precise y
-    /// for this key. Cleared once the post-render corrective step has
-    /// snapped the viewport to the recorded position.
-    pending_header_click_key: Option<String>,
+    /// A heading the outline click or a `#fragment` link wants to scroll to
+    /// whose position is not recorded yet. The renderer keeps measuring
+    /// toward it (`measure_to_source`), and the post-render step jumps once
+    /// the position is there (`resolve_header_jump`, devlog 115).
+    pending_header_jump: Option<PendingHeaderJump>,
     /// One-shot permission for the post-render corrective scroll that snaps
     /// the active search match into view. Set by `scroll_to_active_match`
     /// (jump_match / search-open / tab-switch / query-rebuild) and cleared
@@ -1207,7 +1251,7 @@ impl Tab {
             collapsed_headers: HashSet::new(),
             scroll_offset: 0.0,
             pending_scroll_offset: None,
-            pending_header_click_key: None,
+            pending_header_jump: None,
             correct_active_search_pending: false,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
@@ -1516,15 +1560,10 @@ fn apply_fragment_navigation(tab: &mut Tab, fragment: &str) -> bool {
             let key = header_position_key(header.source_start);
             if let Some(y_pos) = tab.cache.get_header_position(&key) {
                 tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
-            } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
-                let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
-                    * tab.last_content_height;
-                tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
-                // The estimate only gets us near the target; one full paint
-                // records the exact position for the corrective pass.
-                tab.pending_header_click_key = Some(key);
             } else {
-                tab.pending_header_click_key = Some(key);
+                // Not measured yet: the renderer measures toward it and the
+                // post-render step jumps once it is recorded (devlog 115).
+                tab.pending_header_jump = Some(PendingHeaderJump::new(header));
             }
             true
         }
@@ -4120,20 +4159,17 @@ impl MarkdownApp {
                 // The renderer records the same source-stable key, so formatting
                 // and duplicate display titles cannot redirect the click.
                 let key = header_position_key(header.source_start);
-                // Try to get actual rendered position from cache first.
-                // With virtualization, the cache may hold a stale value from a
-                // partial render — record the key for the post-render
-                // corrective step which re-checks after the bootstrap full paint.
+                // A recorded position scrolls at once. A heading the
+                // progressive measurement has not reached yet is measured
+                // toward over the next frames, and the post-render step jumps
+                // when its position is recorded (devlog 115). Jumping to a
+                // line-ratio estimate first would ask for an offset past the
+                // measured part, which lays out the whole document in one
+                // frame.
                 if let Some(y_pos) = tab.cache.get_header_position(&key) {
                     tab.pending_scroll_offset = Some((y_pos - 50.0).max(0.0));
-                } else if tab.last_content_height > 0.0 && tab.content_lines > 0 {
-                    // Fallback: estimate position based on line number ratio
-                    let estimated_y = (header.line_number as f32 / tab.content_lines as f32)
-                        * tab.last_content_height;
-                    tab.pending_scroll_offset = Some((estimated_y - 50.0).max(0.0));
-                    // The estimate only gets us near the target. Request one
-                    // complete paint so the corrective pass can measure it.
-                    tab.pending_header_click_key = Some(key);
+                } else {
+                    tab.pending_header_jump = Some(PendingHeaderJump::new(header));
                 }
             }
         }
@@ -4398,8 +4434,9 @@ impl MarkdownApp {
                         ui.ctx().request_repaint();
                     }
                 } else {
-                    let force_full_render =
-                        tab.pending_header_click_key.is_some() || correct_search_this_frame;
+                    // A heading jump no longer forces a full layout: the
+                    // renderer measures toward it instead (devlog 115).
+                    let force_full_render = correct_search_this_frame;
                     let pending = tab.pending_scroll_offset.take();
                     let default_width = content_default_width(self.full_width_content);
                     let content_width =
@@ -4441,6 +4478,9 @@ impl MarkdownApp {
                             .content_version(tab.content_version)
                             .pending_scroll_offset(pending)
                             .force_full_render(force_full_render)
+                            .measure_to_source(
+                                tab.pending_header_jump.map(|jump| jump.source_start),
+                            )
                             .scroll_source(egui::scroll_area::ScrollSource {
                                 scroll_bar: true,
                                 drag: egui::scroll_area::DragScroll::Never,
@@ -4490,21 +4530,41 @@ impl MarkdownApp {
                     }
                 }
 
-                // Corrective scroll for outline-click. The bootstrap full paint
-                // triggered above by `pending_scroll_offset` recorded every
-                // heading's precise y under its composite cache key. If the
-                // line-ratio first-frame estimate left the target outside the
-                // viewport (common in image-heavy docs and the failure mode for
-                // duplicate-titled headers before this), snap the next frame to
-                // the recorded y. Mirrors the search-match corrective above.
-                if let Some(key) = tab.pending_header_click_key.take() {
-                    if let Some(actual_y) = tab.cache.get_header_position(&key) {
-                        // View-mode only: scroll_output is None while editing.
-                        if let Some(so) = scroll_output.as_ref() {
-                            let current_scroll = so.state.unclamped_offset().y;
-                            let want_scroll = (actual_y - 50.0).max(0.0);
-                            if (want_scroll - current_scroll).abs() > 2.0 {
-                                tab.pending_scroll_offset = Some(want_scroll);
+                // Pending heading jump (outline click, `#fragment`): scroll once
+                // the heading's position is recorded, keep measuring toward it
+                // until then, and fall back to the line-ratio estimate if the
+                // document is measured past it without a position (devlog 115).
+                if let Some(jump) = tab.pending_header_jump {
+                    match scroll_output.as_ref() {
+                        // Edit mode renders no document; drop the jump.
+                        None => tab.pending_header_jump = None,
+                        Some(so) => {
+                            let position = tab
+                                .cache
+                                .get_header_position(&header_position_key(jump.source_start));
+                            match resolve_header_jump(
+                                position,
+                                tab.cache.measured_source_end(tab.id),
+                                jump.source_start,
+                            ) {
+                                HeaderJumpStep::ScrollTo(want_scroll) => {
+                                    tab.pending_header_jump = None;
+                                    let current_scroll = so.state.unclamped_offset().y;
+                                    if (want_scroll - current_scroll).abs() > 2.0 {
+                                        tab.pending_scroll_offset = Some(want_scroll);
+                                    }
+                                }
+                                HeaderJumpStep::Wait => ui.ctx().request_repaint(),
+                                HeaderJumpStep::Estimate => {
+                                    tab.pending_header_jump = None;
+                                    if tab.last_content_height > 0.0 && tab.content_lines > 0 {
+                                        let estimated_y = (jump.line_number as f32
+                                            / tab.content_lines as f32)
+                                            * tab.last_content_height;
+                                        tab.pending_scroll_offset =
+                                            Some((estimated_y - 50.0).max(0.0));
+                                    }
+                                }
                             }
                         }
                     }
@@ -7446,17 +7506,83 @@ mod tests {
         );
         assert!(tab.history_back.is_empty(), "no history entry for a scroll");
         assert!(
-            tab.pending_header_click_key.is_some() || tab.pending_scroll_offset.is_some(),
+            tab.pending_header_jump.is_some() || tab.pending_scroll_offset.is_some(),
             "the click must schedule the scroll"
         );
 
         // An unmatched fragment does nothing at all — no navigation, and the
         // scroll scheduled by the earlier match is left alone.
-        let key_before = tab.pending_header_click_key.clone();
+        let key_before = tab.pending_header_jump;
         assert!(!tab.navigate_to_link("#no-such-anchor").unwrap());
-        assert_eq!(tab.pending_header_click_key, key_before);
+        assert_eq!(tab.pending_header_jump, key_before);
         assert_eq!(tab.path, original_path);
 
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_pending_heading_jump_waits_scrolls_or_falls_back() {
+        // Recorded: scroll 50 pt above it, never above the top.
+        assert_eq!(
+            resolve_header_jump(Some(1200.0), Some(100), 900),
+            HeaderJumpStep::ScrollTo(1150.0)
+        );
+        assert_eq!(
+            resolve_header_jump(Some(20.0), None, 0),
+            HeaderJumpStep::ScrollTo(0.0)
+        );
+        // Not recorded and not measured that far: keep measuring.
+        assert_eq!(
+            resolve_header_jump(None, Some(500), 900),
+            HeaderJumpStep::Wait
+        );
+        assert_eq!(
+            resolve_header_jump(None, Some(900), 900),
+            HeaderJumpStep::Wait
+        );
+        // Measured past it, or completely, without a position: estimate, so
+        // a heading that never records cannot leave the jump pending.
+        assert_eq!(
+            resolve_header_jump(None, Some(901), 900),
+            HeaderJumpStep::Estimate
+        );
+        assert_eq!(
+            resolve_header_jump(None, None, 900),
+            HeaderJumpStep::Estimate
+        );
+    }
+
+    #[test]
+    fn a_jump_to_an_unmeasured_heading_measures_toward_it_instead_of_guessing() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-115-jump-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("long.md");
+        fs::write(&document, "# Title\n\ntext\n\n## Far Away\n\ntext\n").unwrap();
+        let mut tab = Tab::new(document).unwrap();
+        // As after a first frame: a measured height exists, but this
+        // heading has no recorded position yet.
+        tab.last_content_height = 50_000.0;
+        let heading = tab
+            .outline_headers
+            .iter()
+            .find(|header| header.title == "Far Away")
+            .expect("outline lists the heading")
+            .source_start;
+
+        assert!(apply_fragment_navigation(&mut tab, "far-away"));
+        assert_eq!(
+            tab.pending_scroll_offset, None,
+            "jumping to a line-ratio estimate first asks for an offset past the \
+             measured part, which lays out the whole document in one frame"
+        );
+        assert_eq!(
+            tab.pending_header_jump.map(|jump| jump.source_start),
+            Some(heading)
+        );
         fs::remove_dir_all(&root).ok();
     }
 
@@ -7477,7 +7603,7 @@ mod tests {
         assert!(tab.navigate_to_link("guide.md#setup").unwrap());
         assert_eq!(tab.path, guide.canonicalize().unwrap());
         assert!(
-            tab.pending_header_click_key.is_some(),
+            tab.pending_header_jump.is_some(),
             "a fresh document has no cached heading positions, so the \
              corrective pass must be armed to land on the heading"
         );

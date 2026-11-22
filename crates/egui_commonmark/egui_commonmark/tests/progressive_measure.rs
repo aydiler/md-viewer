@@ -24,18 +24,21 @@ struct Mode {
     progressive: bool,
     blocks: Option<usize>,
     force_full_render: bool,
+    target: Option<usize>,
 }
 
 const ONE_SHOT: Mode = Mode {
     progressive: false,
     blocks: None,
     force_full_render: false,
+    target: None,
 };
 
 const PROGRESSIVE: Mode = Mode {
     progressive: true,
     blocks: Some(2),
     force_full_render: false,
+    target: None,
 };
 
 fn render(ctx: &Context, cache: &mut CommonMarkCache, md: &str, width: f32, mode: Mode) -> Frame {
@@ -57,6 +60,7 @@ fn render(ctx: &Context, cache: &mut CommonMarkCache, md: &str, width: f32, mode
                     .progressive_measure(mode.progressive)
                     .progressive_measure_blocks(mode.blocks)
                     .force_full_render(mode.force_full_render)
+                    .measure_to_source(mode.target)
                     .show_scrollable("doc", ui, cache, md),
             );
         });
@@ -457,5 +461,87 @@ fn a_tall_block_at_the_frontier_does_not_lay_out_the_rest_of_the_document() {
     assert!(
         past.is_empty(),
         "headings at {past:?} were laid out past the frontier ({frontier:?})"
+    );
+}
+
+/// Outline click on a heading the measurement has not reached (devlog 115):
+/// a target ahead of the frontier gets a larger per-frame budget, but no
+/// single frame lays out the rest of the document the way
+/// `force_full_render` does.
+#[test]
+fn a_target_ahead_of_the_frontier_measures_further_per_frame_without_a_full_layout() {
+    let md = document();
+    let last_heading = *heading_starts(&md).last().unwrap();
+    let measured_after_two_frames = |target: Option<usize>| {
+        let ctx = Context::default();
+        let mut cache = CommonMarkCache::default();
+        render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
+        render(
+            &ctx,
+            &mut cache,
+            &md,
+            600.0,
+            Mode {
+                target,
+                ..PROGRESSIVE
+            },
+        );
+        frontier(&mut cache)
+    };
+    let plain = measured_after_two_frames(None).expect("still measuring");
+    let targeted = measured_after_two_frames(Some(last_heading))
+        .expect("a target must not measure the whole document in one frame");
+    assert!(
+        targeted.src_end > plain.src_end,
+        "a target ahead did not raise the budget: measured to {} with it, {} without",
+        targeted.src_end,
+        plain.src_end
+    );
+    assert!(targeted.src_end < last_heading);
+}
+
+#[test]
+fn measuring_toward_a_target_records_it_at_the_one_shot_position() {
+    let md = document();
+    let starts = heading_starts(&md);
+    let target = *starts.last().unwrap();
+    let reference = one_shot_geometry(&md, 600.0);
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    let key = header_position_key(target);
+    let mut frames = 0;
+    while cache.get_header_position(&key).is_none() {
+        frames += 1;
+        assert!(frames < 2000, "the target never got a position");
+        render(
+            &ctx,
+            &mut cache,
+            &md,
+            600.0,
+            Mode {
+                target: Some(target),
+                ..PROGRESSIVE
+            },
+        );
+    }
+    let plain_frames = run_to_completion(
+        &Context::default(),
+        &mut CommonMarkCache::default(),
+        &md,
+        600.0,
+    );
+    assert!(
+        frames < plain_frames,
+        "reaching the target took {frames} frames, plain measurement {plain_frames}"
+    );
+    let got = cache.get_header_position(&key).unwrap();
+    let want = reference
+        .headers
+        .last()
+        .unwrap()
+        .expect("one-shot heading position");
+    assert!(
+        (got - want).abs() <= 1.0,
+        "target heading at {got:.1}, one-shot {want:.1}"
     );
 }

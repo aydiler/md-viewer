@@ -1600,6 +1600,34 @@ impl MeasureBudget {
 const FIRST_FRAME_MEASURE_MS: u64 = 8;
 /// Time budget per later frame while measurement continues.
 const CONTINUE_MEASURE_MS: u64 = 4;
+/// Time budget per frame while the measured part has not reached a source
+/// offset the caller asked for (`measure_to_source`, a navigation target).
+/// Large enough to reach a target in a 5 MB document within a few seconds,
+/// small enough that the window keeps repainting meanwhile.
+const TARGET_MEASURE_MS: u64 = 32;
+
+/// Whether a requested navigation target lies past the measured part.
+fn target_ahead(frontier_src_end: usize, target: Option<usize>) -> bool {
+    target.is_some_and(|target| frontier_src_end < target)
+}
+
+/// Budget for one later frame of progressive measurement: larger while a
+/// requested target lies past the measured part. The block-count test hook
+/// scales by the same ratio as the time budget, so tests can observe it.
+fn continue_budget(
+    options: &CommonMarkOptions,
+    frontier_src_end: usize,
+    target: Option<usize>,
+) -> MeasureBudget {
+    let ahead = target_ahead(frontier_src_end, target);
+    match options.progressive_measure_blocks {
+        Some(blocks) if ahead => MeasureBudget::Blocks(
+            blocks.max(1) * (TARGET_MEASURE_MS / CONTINUE_MEASURE_MS) as usize,
+        ),
+        _ if ahead => progressive_budget(options, TARGET_MEASURE_MS),
+        _ => progressive_budget(options, CONTINUE_MEASURE_MS),
+    }
+}
 
 fn progressive_budget(options: &CommonMarkOptions, ms: u64) -> MeasureBudget {
     match options.progressive_measure_blocks {
@@ -2900,6 +2928,7 @@ impl CommonMarkViewerInternal {
         content_version: Option<u64>,
         pending_scroll_offset: Option<f32>,
         force_full_render: bool,
+        measure_to_source: Option<usize>,
         scroll_source: Option<egui::scroll_area::ScrollSource>,
     ) -> egui::scroll_area::ScrollAreaOutput<()> {
         self.source_id = Some(source_id);
@@ -3285,8 +3314,10 @@ impl CommonMarkViewerInternal {
             );
 
             // Progressive measurement: spend this frame's budget measuring on
-            // from the frontier, then come back for more.
-            if scroll_cache(cache, &source_id).measure_frontier.is_some() {
+            // from the frontier, then come back for more. A navigation target
+            // past the frontier gets a larger budget (`measure_to_source`).
+            if let Some(frontier) = scroll_cache(cache, &source_id).measure_frontier {
+                let budget = continue_budget(options, frontier.src_end, measure_to_source);
                 self.measure_from_frontier(
                     ui,
                     cache,
@@ -3296,7 +3327,7 @@ impl CommonMarkViewerInternal {
                     ui.max_rect().top(),
                     max_width,
                     text.len(),
-                    MeasureStop::new(0.0, progressive_budget(options, CONTINUE_MEASURE_MS)),
+                    MeasureStop::new(0.0, budget),
                 );
                 ui.ctx().request_repaint();
             }
@@ -5034,6 +5065,30 @@ impl CommonMarkViewerInternal {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_navigation_target_raises_the_budget_only_while_it_lies_ahead() {
+        assert!(target_ahead(100, Some(500)));
+        assert!(!target_ahead(500, Some(500)), "reached");
+        assert!(!target_ahead(900, Some(500)), "passed");
+        assert!(!target_ahead(100, None), "no target");
+        let options = CommonMarkOptions {
+            progressive_measure_blocks: Some(2),
+            ..Default::default()
+        };
+        assert!(matches!(
+            continue_budget(&options, 100, Some(500)),
+            MeasureBudget::Blocks(16)
+        ));
+        assert!(matches!(
+            continue_budget(&options, 600, Some(500)),
+            MeasureBudget::Blocks(2)
+        ));
+        assert!(matches!(
+            continue_budget(&options, 100, None),
+            MeasureBudget::Blocks(2)
+        ));
+    }
     /// egui 0.37 test shims: `end_pass` output must have its texture deltas
     /// cleared before drop, and `CentralPanel::show` takes a `Ui`.
     trait FrameExt {
@@ -6473,6 +6528,7 @@ mod tests {
                     None,
                     false,
                     None,
+                    None,
                 );
             };
 
@@ -6536,6 +6592,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
             );
             let sc = scroll_cache(&mut cache, &source_id);
             assert!(sc.page_size.is_some_and(|size| size.y > 0.0));
@@ -6569,6 +6626,7 @@ mod tests {
                 Some(1),
                 None,
                 false,
+                None,
                 None,
             );
         });
