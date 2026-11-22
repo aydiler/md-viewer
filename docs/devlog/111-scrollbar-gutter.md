@@ -98,4 +98,4 @@ Suites:
 
 - The copy button's own `bar_reach` inset (#264) is now redundant inside
   `show_scrollable`. Dropping it there would move the button a few points
-  closer to the block edge.
+  closer to the block edge. Done in devlog 112.
