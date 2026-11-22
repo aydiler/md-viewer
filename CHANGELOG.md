@@ -4,13 +4,20 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-11-22
+
+Full Width content stays clear of the scrollbar, the title bar maximizes on a double-click on GNOME, and large documents open sooner.
+
 ### Performance
 - **Large documents open sooner and use less memory.** Opening a document parsed its full text four times: twice in the renderer, which also kept two copies of the result, and once each for the outline and for the clickable file links. It is now parsed once for the renderer and once for the outline and links together, and the link scan no longer classifies every word of plain text. Time to first content on the 6 MB GitLab changelog went from 624 to 421 ms (median of 9, interleaved), and from 276 to 210 ms on 5 MB of prose; peak memory on the changelog fell by 34 MB.
 - **Less work at startup.** md-viewer used to scan every installed font family at each launch to fill the font picker, about a quarter of the CPU time of a launch. The scan now runs the first time View → Fonts is opened; the dialog shows "Scanning installed fonts…" for a moment, as it already did when opened early. Startup CPU went from 1.13 s to 0.82 s (median of 15 launches with a README on Xvfb).
 
 ### Fixed
-- **Full Width content no longer runs under the scrollbar.** The scrollbar is drawn on top of the document, and in Full Width mode code-block backgrounds, tables and the ends of long lines extended to the pane's edge, beneath it. The document now leaves a gap on the right as wide as the scrollbar. The reading-column layout is unchanged.
+- **Full Width content no longer runs under the scrollbar (#271).** The scrollbar is drawn on top of the document, and in Full Width mode code-block backgrounds, tables and the ends of long lines extended to the pane's edge, beneath it. The document now leaves a gap on the right as wide as the scrollbar. The reading-column layout is unchanged.
 - **Double-clicking the title bar maximizes and restores the window on GNOME (#266).** On Wayland compositors that leave window decorations to the app (GNOME, weston), md-viewer drew a minimal fallback title bar that only moved the window; a double-click did nothing. It now draws the Adwaita-style title bar that eframe apps get by default, which shows the window title and maximizes or restores on a double-click. KDE, Hyprland, Sway and X11 sessions, where the compositor or window manager draws the title bar, are unchanged.
+
+### Internal
+- **The vendored renderer moves to 0.31.0**, carrying the scrollbar gutter (#271) and the single shared parse (#270), which changes the type of `ScrollableCache::events`.
 
 ## [0.3.9] - 2026-11-21
 
