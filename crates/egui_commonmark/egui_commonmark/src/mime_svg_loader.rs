@@ -1,8 +1,4 @@
-//! SVG loader fallback for resources whose URL does not end in `.svg`.
-//!
-//! egui_extras 0.33 documents MIME-based SVG detection, but its built-in
-//! loader currently accepts only URIs ending in `.svg`. Dynamic image URLs
-//! commonly omit that suffix while returning `image/svg+xml` correctly.
+//! SVG image loader with shared font options for SVG paths and MIME types.
 
 use std::{
     collections::HashMap,
@@ -11,14 +7,16 @@ use std::{
 };
 
 use egui::{
-    load::{BytesPoll, ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint},
-    mutex::Mutex,
     ColorImage,
+    load::{
+        BytesPoll, ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint, has_extension,
+    },
+    mutex::Mutex,
 };
 #[cfg(feature = "svg_text")]
 use resvg::usvg::fontdb::{Database, Family};
 
-struct MimeSvgLoader {
+struct SvgImageLoader {
     cache: Mutex<SvgCache>,
     options: OnceLock<resvg::usvg::Options<'static>>,
 }
@@ -78,11 +76,11 @@ fn trim_svg_cache(cache: &mut SvgCache, max_bytes: usize) {
     }
 }
 
-impl MimeSvgLoader {
-    const ID: &'static str = egui::generate_loader_id!(MimeSvgLoader);
+impl SvgImageLoader {
+    const ID: &'static str = egui::generate_loader_id!(SvgImageLoader);
 }
 
-impl Default for MimeSvgLoader {
+impl Default for SvgImageLoader {
     fn default() -> Self {
         Self {
             cache: Mutex::default(),
@@ -97,26 +95,36 @@ fn svg_options() -> resvg::usvg::Options<'static> {
     let options = {
         let mut options = options;
         options.fontdb_mut().load_system_fonts();
-        repair_sans_serif_family(options.fontdb_mut());
+        let database = options.fontdb_mut();
+        if let Some(family) = resolve_generic_family(database, Family::SansSerif, "sans-serif") {
+            database.set_sans_serif_family(family);
+        }
+        if let Some(family) = resolve_generic_family(database, Family::Serif, "serif") {
+            database.set_serif_family(family);
+        }
         options
     };
     options
 }
 
-/// fontdb may map the generic sans-serif family to a font that is not installed.
-/// Preserve valid mappings and otherwise ask Fontconfig for the concrete system
-/// sans-serif family used by SVG badges.
+/// usvg tries the generic serif face when the requested family list has no match.
 #[cfg(feature = "svg_text")]
-fn repair_sans_serif_family(database: &mut Database) {
-    if family_is_loaded(database, database.family_name(&Family::SansSerif)) {
-        return;
+fn resolve_generic_family(
+    database: &Database,
+    family: Family<'_>,
+    pattern: &str,
+) -> Option<String> {
+    if family_is_loaded(database, database.family_name(&family)) {
+        return None;
     }
 
-    if let Some(family) =
-        fontconfig_sans_serif_family().filter(|family| family_is_loaded(database, family))
-    {
-        database.set_sans_serif_family(family);
-    }
+    fontconfig_family(pattern)
+        .filter(|name| family_is_loaded(database, name))
+        .or_else(|| {
+            database
+                .faces()
+                .find_map(|face| face.families.first().map(|(name, _)| name.clone()))
+        })
 }
 
 #[cfg(feature = "svg_text")]
@@ -132,14 +140,14 @@ fn family_is_loaded(database: &Database, requested: &str) -> bool {
 }
 
 #[cfg(feature = "svg_text")]
-fn fontconfig_sans_serif_family() -> Option<String> {
+fn fontconfig_family(_pattern: &str) -> Option<String> {
     #[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android"))))]
     {
         use std::process::{Command, Stdio};
 
         let output = Command::new("fc-match")
             .arg("--format=%{family[0]}\\n")
-            .arg("sans-serif")
+            .arg(_pattern)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
@@ -163,17 +171,13 @@ fn parse_fontconfig_family(stdout: &[u8]) -> Option<String> {
     (!family.is_empty()).then(|| family.to_owned())
 }
 
-impl ImageLoader for MimeSvgLoader {
+impl ImageLoader for SvgImageLoader {
     fn id(&self) -> &str {
         Self::ID
     }
 
     fn load(&self, ctx: &egui::Context, uri: &str, size_hint: SizeHint) -> ImageLoadResult {
-        // Let egui_extras' built-in loader handle ordinary `.svg` URIs. This
-        // fallback is deliberately limited to the MIME-detection gap.
-        if uri.ends_with(".svg") {
-            return Err(LoadError::NotSupported);
-        }
+        let svg_path = has_extension(uri, "svg");
 
         let key = (uri.to_owned(), size_hint);
         let cached = {
@@ -193,7 +197,9 @@ impl ImageLoader for MimeSvgLoader {
 
         match ctx.try_load_bytes(uri)? {
             BytesPoll::Pending { size } => Ok(ImagePoll::Pending { size }),
-            BytesPoll::Ready { bytes, mime, .. } if mime.as_deref().is_some_and(is_svg_mime) => {
+            BytesPoll::Ready { bytes, mime, .. }
+                if svg_path || mime.as_deref().is_some_and(is_svg_mime) =>
+            {
                 let options = self.options.get_or_init(svg_options);
                 let result =
                     egui_extras::image::load_svg_bytes_with_size(&bytes, size_hint, options)
@@ -247,20 +253,47 @@ fn is_svg_mime(mime: &str) -> bool {
 }
 
 pub(crate) fn install(ctx: &egui::Context) {
-    if !ctx.is_loader_installed(MimeSvgLoader::ID) {
+    if !ctx.is_loader_installed(SvgImageLoader::ID) {
         // Image loaders are tried newest-first, so install this after the
         // standard egui_extras loaders initialized by prepare_show().
-        ctx.add_image_loader(Arc::new(MimeSvgLoader::default()));
+        ctx.add_image_loader(Arc::new(SvgImageLoader::default()));
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "svg_text")]
+    #[test]
+    fn renders_labels_in_svg_path_with_browser_font_stack() {
+        let ctx = egui::Context::default();
+        // Keep this SVG free of other shapes so a nontransparent pixel proves
+        // the label survived font selection and rasterization.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="32">
+            <g font-family="system-ui,sans-serif">
+                <text x="4" y="24" font-size="20" font-weight="700">Label</text>
+            </g>
+        </svg>"#;
+        let uri = "bytes://labels.svg";
+        ctx.include_bytes(uri, svg.as_bytes());
+        let loader = SvgImageLoader::default();
+        // The host supplies installed fonts in production and in this test.
+        let options = loader.options.get_or_init(super::svg_options);
+        if options.fontdb.faces().next().is_none() {
+            return;
+        }
+        let egui::load::ImagePoll::Ready { image } =
+            loader.load(&ctx, uri, SizeHint::default()).unwrap()
+        else {
+            panic!("embedded SVG bytes should be immediately available");
+        };
+        assert!(image.pixels.iter().any(|pixel| pixel.a() > 0));
+    }
+
     use std::sync::Arc;
 
     use egui::{
-        load::{ImageLoader, SizeHint},
         Color32, ColorImage,
+        load::{ImageLoader, SizeHint},
     };
 
     #[cfg(all(
@@ -269,7 +302,7 @@ mod tests {
         not(any(target_vendor = "apple", target_os = "android"))
     ))]
     use super::parse_fontconfig_family;
-    use super::{is_svg_mime, trim_svg_cache, MimeSvgLoader, SvgCacheEntry};
+    use super::{SvgCacheEntry, SvgImageLoader, is_svg_mime, trim_svg_cache};
 
     #[test]
     fn recognizes_svg_mime_with_optional_parameters() {
@@ -296,7 +329,7 @@ mod tests {
 
     #[test]
     fn forget_removes_every_cached_size_for_uri() {
-        let loader = MimeSvgLoader {
+        let loader = SvgImageLoader {
             cache: Default::default(),
             options: resvg::usvg::Options::default().into(),
         };
@@ -328,22 +361,24 @@ mod tests {
 
         let cache = loader.cache.lock();
         assert_eq!(cache.entries.len(), 1);
-        assert!(cache
-            .entries
-            .keys()
-            .all(|(uri, _)| uri == "https://example.com/other"));
+        assert!(
+            cache
+                .entries
+                .keys()
+                .all(|(uri, _)| uri == "https://example.com/other")
+        );
     }
 
     #[test]
     fn svg_options_are_initialized_lazily() {
-        let loader = MimeSvgLoader::default();
+        let loader = SvgImageLoader::default();
 
         assert!(loader.options.get().is_none());
     }
 
     #[test]
     fn cache_limit_evicts_least_recently_used_entries() {
-        let loader = MimeSvgLoader::default();
+        let loader = SvgImageLoader::default();
         let image = Arc::new(ColorImage::filled([2, 1], Color32::WHITE));
         let mut cache = loader.cache.lock();
         for (uri, last_used) in [("old", 1), ("recent", 3), ("middle", 2)] {
@@ -359,14 +394,16 @@ mod tests {
         trim_svg_cache(&mut cache, 16);
 
         assert_eq!(cache.entries.len(), 2);
-        assert!(!cache
-            .entries
-            .contains_key(&("old".to_owned(), SizeHint::Width(10))));
+        assert!(
+            !cache
+                .entries
+                .contains_key(&("old".to_owned(), SizeHint::Width(10)))
+        );
     }
 
     #[test]
     fn cache_limit_evicts_multiple_entries_in_lru_order() {
-        let loader = MimeSvgLoader::default();
+        let loader = SvgImageLoader::default();
         let image = Arc::new(ColorImage::filled([2, 1], Color32::WHITE));
         let mut cache = loader.cache.lock();
         for (uri, last_used) in [("oldest", 1), ("old", 2), ("recent", 3), ("newest", 4)] {
@@ -382,11 +419,15 @@ mod tests {
         trim_svg_cache(&mut cache, 16);
 
         assert_eq!(cache.entries.len(), 2);
-        assert!(cache
-            .entries
-            .contains_key(&("recent".to_owned(), SizeHint::Width(10))));
-        assert!(cache
-            .entries
-            .contains_key(&("newest".to_owned(), SizeHint::Width(10))));
+        assert!(
+            cache
+                .entries
+                .contains_key(&("recent".to_owned(), SizeHint::Width(10)))
+        );
+        assert!(
+            cache
+                .entries
+                .contains_key(&("newest".to_owned(), SizeHint::Width(10)))
+        );
     }
 }
