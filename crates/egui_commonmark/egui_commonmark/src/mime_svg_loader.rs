@@ -7,11 +7,11 @@ use std::{
 };
 
 use egui::{
-    ColorImage,
     load::{
-        BytesPoll, ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint, has_extension,
+        has_extension, BytesPoll, ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint,
     },
     mutex::Mutex,
+    ColorImage,
 };
 #[cfg(feature = "svg_text")]
 use resvg::usvg::fontdb::{Database, Family};
@@ -292,8 +292,8 @@ mod tests {
     use std::sync::Arc;
 
     use egui::{
-        Color32, ColorImage,
         load::{ImageLoader, SizeHint},
+        Color32, ColorImage,
     };
 
     #[cfg(all(
@@ -302,7 +302,7 @@ mod tests {
         not(any(target_vendor = "apple", target_os = "android"))
     ))]
     use super::parse_fontconfig_family;
-    use super::{SvgCacheEntry, SvgImageLoader, is_svg_mime, trim_svg_cache};
+    use super::{is_svg_mime, trim_svg_cache, SvgCacheEntry, SvgImageLoader};
 
     #[test]
     fn recognizes_svg_mime_with_optional_parameters() {
@@ -361,12 +361,10 @@ mod tests {
 
         let cache = loader.cache.lock();
         assert_eq!(cache.entries.len(), 1);
-        assert!(
-            cache
-                .entries
-                .keys()
-                .all(|(uri, _)| uri == "https://example.com/other")
-        );
+        assert!(cache
+            .entries
+            .keys()
+            .all(|(uri, _)| uri == "https://example.com/other"));
     }
 
     #[test]
@@ -394,11 +392,9 @@ mod tests {
         trim_svg_cache(&mut cache, 16);
 
         assert_eq!(cache.entries.len(), 2);
-        assert!(
-            !cache
-                .entries
-                .contains_key(&("old".to_owned(), SizeHint::Width(10)))
-        );
+        assert!(!cache
+            .entries
+            .contains_key(&("old".to_owned(), SizeHint::Width(10))));
     }
 
     #[test]
@@ -419,15 +415,11 @@ mod tests {
         trim_svg_cache(&mut cache, 16);
 
         assert_eq!(cache.entries.len(), 2);
-        assert!(
-            cache
-                .entries
-                .contains_key(&("recent".to_owned(), SizeHint::Width(10)))
-        );
-        assert!(
-            cache
-                .entries
-                .contains_key(&("newest".to_owned(), SizeHint::Width(10)))
-        );
+        assert!(cache
+            .entries
+            .contains_key(&("recent".to_owned(), SizeHint::Width(10))));
+        assert!(cache
+            .entries
+            .contains_key(&("newest".to_owned(), SizeHint::Width(10))));
     }
 }

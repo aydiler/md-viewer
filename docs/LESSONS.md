@@ -77,6 +77,13 @@ egui_commonmark_extended = { features = ["svg", "svg_text", ...] }
 **Requires:** System fonts like Verdana, Arial (install `ttf-ms-fonts` on Arch)
 **Files:** `Cargo.toml`, `crates/egui_commonmark/egui_commonmark/Cargo.toml`
 
+### fontdb takes the generic SVG families from fontconfig without checking they exist
+**Context:** #274. SVG text in `sans-serif` disappeared on a machine with Arial installed.
+**Root cause:** `fontdb::Database::load_system_fonts` reads fontconfig's preferences and sets the generic families from them. Here they named FreeSans and FreeSerif, neither installed, so `sans-serif` and `serif` resolved to nothing. egui_extras' built-in SVG loader (which handled every `.svg` URI) loads the system fonts but never checks the mapping.
+**Fix:** md-viewer's `SvgImageLoader` (`mime_svg_loader.rs`) handles `.svg` paths too and replaces an unloaded generic family with `fc-match`'s answer, or the first installed face.
+**Testing:** fontdb honours `FONTCONFIG_FILE`, so a fonts.conf with one font directory reproduces font-dependent SVG behaviour without touching the system. A config whose aliases point at installed fonts is a control, not a reproduction: it has nothing to repair.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/mime_svg_loader.rs`, PR #274
+
 ### SVG badges with embedded logos don't render
 **Context:** GitHub stars badge shows broken icon, but License MIT badge works
 **Problem:** resvg doesn't fully support `<image>` elements with embedded SVG data URIs (nested SVGs)
