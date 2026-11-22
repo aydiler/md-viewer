@@ -5,6 +5,7 @@ All notable changes to markdown-viewer will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Text in `.svg` images renders when the system's default font is not installed (#274, contributed by [@peterwilli](https://github.com/peterwilli)).** SVG text set in `sans-serif` or `serif` vanished when fontconfig named an uninstalled family for it (FreeSans and FreeSerif on some Arch setups): images loaded from `.svg` files went through a loader that took that name as is. They now go through md-viewer's own SVG loader, which substitutes an installed family for both generic names.
 - **The code-block copy button sits in the block's corner again in Full Width.** Since the document leaves a gap for the scrollbar (0.3.10), the button kept its own room for the scrollbar as well and stood 10 px further from the corner than intended. Inside md-viewer's document it now sits one button padding from the edge; other uses of the renderer, which own their scroll area, keep the inset.
 
 ## [0.3.10] - 2026-11-22
