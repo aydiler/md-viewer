@@ -392,6 +392,25 @@ jobs:
           path: ${{ steps.build.outputs.snap }}
           retention-days: 3
 
+      # Start the built snap in its core22 base, with the runner's fonts and
+      # with none, before anything is uploaded (devlog 117). The two snap
+      # regressions that reached users built cleanly and failed only when
+      # started: X11 libraries winit dlopens (#272) and a fontconfig with no
+      # fonts (#279). A failure here stops the upload and nothing else.
+      - name: Start the snap in its base
+        if: steps.check.outputs.proceed == 'true'
+        run: bash scripts/snap-smoke.sh "${{ steps.build.outputs.snap }}"
+        env:
+          SNAP_SMOKE_OUT: ${{ runner.temp }}/snap-smoke
+
+      - name: Keep the start test's logs and screenshots
+        if: failure() && steps.check.outputs.proceed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-smoke
+          path: ${{ runner.temp }}/snap-smoke
+          retention-days: 7
+
       - name: Upload to Snap Store (stable) and sync listing metadata
         if: steps.check.outputs.proceed == 'true' && github.event_name == 'push'
         run: bash scripts/snap-ci.sh publish "${{ steps.build.outputs.snap }}"

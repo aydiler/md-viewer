@@ -153,6 +153,8 @@ snapcraft register md-viewer
 snapcraft upload --release=stable md-viewer_0.1.0_amd64.snap
 ```
 
+Releases go through CI, not these steps: the `publish-snap` job in `release.yml` (and `snap-publish.yml` for a re-publish) builds the snap in LXD, checks its file list (`scripts/snap-ci.sh`, `check_contents`) and then starts it (`scripts/snap-smoke.sh`): the snap's binary runs under bubblewrap with the core22 base as `/` and the environment from its own `meta/snap.yaml`, on a private Xvfb, once with the runner's fonts and once with none. A snap that exits, panics or leaves the screen blank is not uploaded; the run keeps its logs and screenshots as the `snap-smoke` artifact. To check a snap locally, run `bash scripts/snap-smoke.sh <file.snap>` (it downloads core22 unless `SNAP_SMOKE_BASE` points at one). Devlog 117.
+
 ## Flatpak / Flathub
 
 A Flatpak manifest lives at `flatpak/io.github.aydiler.md-viewer.yaml`. Submitting to Flathub is **manual** (one-time PR to the Flathub org).

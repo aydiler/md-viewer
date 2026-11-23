@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Internal
+- **The release workflow starts the snap before uploading it.** It runs the built snap in its core22 base on a virtual display, with fonts and without, and stops the upload if md-viewer exits, panics or draws nothing. The two snap regressions that reached users so far (#272, #279) built cleanly and failed only when started.
+
 ## [0.3.12] - 2026-11-24
 
 md-viewer starts on systems without fonts, jumping to a heading far down a large document no longer freezes the window, the snap shows up in the app launcher, and the AUR `md-viewer-bin` package upgrades cleanly.
