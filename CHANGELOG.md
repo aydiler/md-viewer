@@ -4,7 +4,7 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
-## [0.3.12] - 2026-11-23
+## [0.3.12] - 2026-11-24
 
 md-viewer starts on systems without fonts, jumping to a heading far down a large document no longer freezes the window, the snap shows up in the app launcher, and the AUR `md-viewer-bin` package upgrades cleanly.
 
