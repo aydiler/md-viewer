@@ -86,13 +86,30 @@ Mutants, each red:
 ## Found on the way, not fixed here
 
 **A jump to the last heading of a very large document does not show it.** On
-prose 5 MB and on the changelog, after the jump the offset eases upward by about
-400–800 px and settles with the scrollbar at the bottom, but the last section is
-below the pane: the view stops at the paragraphs just above the heading. Main
-does the same (and settles further up, after its 4.8 s freeze), so it predates
-this change. The recorded heading position, the extent and the painted tail
-disagree near the end of a document of about 2 million px. The extent floor and
-the post-render overshoot clamp (`show_scrollable`) are where I would look first.
+prose 5 MB, after the jump the offset eases upward and settles with the
+scrollbar at the bottom, but the last heading stays below the pane. Main does
+the same (after its 4.8 s freeze), so it predates this change.
+
+Diagnosed afterwards (no code changed):
+
+- **The end is reachable.** Once measurement completes, End and the scrollbar
+  show the last line, and the last heading's recorded y (2 162 965) equals where
+  it is painted.
+- **Only a heading jump is off, and only far down:** not measurably at 0.43 M px,
+  about 15 px at 1.08 M, about 458 px at 2.16 M.
+- **Cause: f32 rounding in absolute coordinates.** egui lays text out in f32
+  screen coordinates, whose spacing is 0.125 px between 1 M and 2 M and 0.25 px
+  above 2^21. Row heights accumulate that rounding. Passes that chunk the
+  document differently (4 ms and 32 ms measuring chunks, a bootstrap at an
+  offset) therefore record different positions, and the jump reads one that
+  disagrees with the final layout.
+- **The extreme case shows the mechanism:** a pending offset of 1e9 made the
+  full bootstrap measure the 2.16 M px document as 1.63 M px (64 px spacing out
+  there). The app never requests such offsets.
+- **Proposed fix:** lay each measuring chunk out near y = 0 in a local frame and
+  add the frontier's offset once, so no layout runs at million-pixel magnitudes.
+  It touches `measure_from_frontier` and the bootstrap, so the resume
+  invariants from devlog 103 need re-checking.
 
 ## Future improvements
 
