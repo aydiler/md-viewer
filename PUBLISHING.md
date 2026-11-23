@@ -106,12 +106,14 @@ The two packages `conflict` with each other; pacman won't allow both.
 Maintained by the `publish-aur-bin` job in `release.yml`, mirroring `publish-aur` with three differences:
 
 1. Pushes to `ssh://aur@aur.archlinux.org/md-viewer-bin.git`.
-2. Rewrites both `pkgver=` *and* the four-element `sha256sums=( ... )` array (Python inline, since multi-line `sed` is fragile). The tarball checksum comes from the release's `<asset>.sha256`; the three aux-file checksums (`.desktop`, icon, LICENSE) are fetched fresh from raw GitHub.
+2. Rewrites both `pkgver=` *and* the five-element `sha256sums=( ... )` array (Python inline, since multi-line `sed` is fragile). The tarball checksum comes from the build job's `<asset>.sha256` artifact; the four aux-file checksums (`.desktop`, icon, `LICENSE`, `THIRD_PARTY_NOTICES`) are computed from raw GitHub at the tag.
 3. First push to the brand-new AUR repo uses `git push -u origin HEAD:refs/heads/master`.
 
 Same `AUR_SSH_PRIVATE_KEY` secret powers both jobs; no separate setup. The job is independently gated, so a `-git`-only or `-bin`-only failure doesn't block the other.
 
-The PKGBUILD pulls the `.desktop`, icon, and `LICENSE` from raw GitHub URLs pinned to `v${pkgver}` because the release tarball is binary-only. If a future release ever bundles those files into the tarball, drop the three raw-GitHub `source=()` entries and read them out of `${srcdir}/` instead.
+The PKGBUILD pulls the `.desktop`, icon, `LICENSE` and `THIRD_PARTY_NOTICES` from raw GitHub URLs pinned to `v${pkgver}`. The release tarball has contained `LICENSE` and `THIRD_PARTY_NOTICES` since 0.1.14, so those two entries could be dropped and the files read from `${srcdir}/`; the `.desktop` file and icon are not in the tarball.
+
+**Every source's local name carries `${pkgver}`** (`md-viewer-${pkgver}.desktop::…`, `THIRD_PARTY_NOTICES-${pkgver}::…`). makepkg does not download a source whose file already exists in the build directory, and AUR helpers keep that directory between upgrades. With a fixed name, the first release that changes the file fails its checksum for everyone whose build directory still holds an older copy (#282, devlog 116).
 
 #### Manual fallback (`-bin`)
 
@@ -119,7 +121,7 @@ The PKGBUILD pulls the `.desktop`, icon, and `LICENSE` from raw GitHub URLs pinn
 git clone ssh://aur@aur.archlinux.org/md-viewer-bin.git
 cd md-viewer-bin
 cp /path/to/repo/aur-bin/PKGBUILD .
-# Edit PKGBUILD: bump pkgver=, then refresh all four sha256sums via
+# Edit PKGBUILD: bump pkgver= (or pkgrel= for a packaging-only fix), then refresh all five sha256sums via
 # `updpkgsums` (from pacman-contrib) — it downloads each source and rewrites
 # the array in place.
 makepkg --printsrcinfo > .SRCINFO

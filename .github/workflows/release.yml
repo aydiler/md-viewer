@@ -560,6 +560,8 @@ jobs:
           # Tarball sha256 comes from the downloaded artifact (see comment above).
           # The four aux files (.desktop, icon, LICENSE, notice) come from raw.github
           # at the tagged commit — those URLs are valid as soon as the tag exists.
+          # The template gives each source a ${pkgver}-qualified local name, so an
+          # AUR helper's cached copy from an older release is never reused (#282).
           mkdir -p sums
           cp "dist/md-viewer-${VERSION}-linux-x86_64.tar.gz.sha256" sums/tarball.sha256
           curl -fsSL "https://raw.githubusercontent.com/aydiler/md-viewer/v${VERSION}/data/md-viewer.desktop" \
