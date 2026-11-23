@@ -4,11 +4,18 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-11-24
+
+md-viewer starts on systems without fonts, jumping to a heading far down a large document no longer freezes the window, the snap shows up in the app launcher, and the AUR `md-viewer-bin` package upgrades cleanly.
+
 ### Fixed
-- **md-viewer starts on a system where fontconfig finds no fonts.** It used to abort before the first frame with a panic inside the font discovery library (fontique 0.11.1 unwrapped fontconfig's "no match" answer). fontique moves to 0.13.0, which treats that answer as "no fonts", and md-viewer falls back to the fonts it bundles.
-- **Clicking an outline heading far down a large document no longer freezes the window.** When the heading had not been laid out yet, md-viewer laid out the whole document in one frame: 1.2 s for 1 MB of prose, 3.6 s for 5 MB. It now lays out toward the heading over the next frames while the window keeps responding, and jumps once the heading is reached, after 0.3 s and 1.9 s respectively. `#heading` links take the same path.
+- **md-viewer starts on a system where fontconfig finds no fonts (#279).** It used to abort before the first frame with a panic inside the font discovery library (fontique 0.11.1 unwrapped fontconfig's "no match" answer). fontique moves to 0.13.0, which treats that answer as "no fonts", and md-viewer falls back to the fonts it bundles.
+- **Clicking an outline heading far down a large document no longer freezes the window (#280).** When the heading had not been laid out yet, md-viewer laid out the whole document in one frame: 1.2 s for 1 MB of prose, 3.6 s for 5 MB. It now lays out toward the heading over the next frames while the window keeps responding, and jumps once the heading is reached, after 0.3 s and 1.9 s respectively. `#heading` links take the same path.
 - **The AUR `md-viewer-bin` package builds again when upgrading (#282, reported by [@nyakze](https://github.com/nyakze)).** Upgrading through an AUR helper failed with `THIRD_PARTY_NOTICES ... FAILED`. The package saved its downloaded files without a version in their names, so makepkg reused a copy from an older release still in the helper's build directory instead of fetching the new one; the license notice changed in 0.3.9, so its checksum no longer matched. Every downloaded file now carries the version in its name. Released to the AUR as 0.3.11-2.
 - **The snap shows up in the desktop's app launcher (#281, contributed by [@graycatrl](https://github.com/graycatrl)).** The snap had never registered a launcher: it installed from the Snap Store or Ubuntu App Center but did not appear in GNOME's app grid or other menus, so it could only be started from a terminal. It now ships md-viewer's desktop entry and icon, and the snap build fails if the entry is missing.
+
+### Internal
+- **The vendored renderer moves to 0.31.2**, carrying #280 (`CommonMarkViewer::measure_to_source` and `CommonMarkCache::measured_source_end`).
 
 ## [0.3.11] - 2026-11-22
 
