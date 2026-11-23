@@ -1029,6 +1029,13 @@ broken repository.
 **Fix:** `options=('!lto')` in `aur/PKGBUILD` (+ pkgrel bump). `!lto` only neutralizes makepkg's injected flags; cargo's own `lto = true` still fat-LTOs all Rust code, so binary size/performance are unchanged. This is the standard pattern in Arch Rust PKGBUILDs. `md-viewer-bin` is unaffected (prebuilt binary, no build step). Any future PKGBUILD for a Rust crate that compiles C through the `cc` crate needs the same line.
 **Files:** `aur/PKGBUILD`
 
+### A PKGBUILD source with a fixed local name fails the first release that changes the file
+**Context:** #282. `md-viewer-bin` 0.3.11-1 failed with `THIRD_PARTY_NOTICES ... FAILED` for a user, while the same PKGBUILD built cleanly here.
+**Root cause:** the checksum was right. The source was `"THIRD_PARTY_NOTICES::https://…/v${pkgver}/THIRD_PARTY_NOTICES"`: the URL carries the version, the local name does not. makepkg does not download a source whose file already exists in the build directory, and AUR helpers (yay, paru) keep that directory between upgrades. The file changed in 0.3.9 (#255), so anyone with a copy from 0.3.8 or earlier still cached had the old file checked against the new sum. Reproduced by putting the v0.3.8 file into a clean clone of the AUR repo: the log shows no `Downloading THIRD_PARTY_NOTICES` line, then `FAILED`.
+**Fix:** every source's local name carries `${pkgver}` (`THIRD_PARTY_NOTICES-${pkgver}::…`, `md-viewer-${pkgver}.desktop::…`); `package()` installs them under the usual names. The `.desktop` file, icon and `LICENSE` had the same fixed names and only passed because they had not changed since.
+**Why it hid:** a fresh build always downloads, so CI, a clean local build and anyone installing for the first time all pass. Only an upgrade with a populated cache fails. To test a PKGBUILD change, build it once in a directory that already holds the previous version's sources.
+**Files:** `aur-bin/PKGBUILD`, `PUBLISHING.md`, `docs/devlog/116-aur-bin-versioned-sources.md`
+
 ---
 
 ## Virtualization
