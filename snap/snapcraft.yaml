@@ -62,6 +62,7 @@ architectures:
 apps:
   md-viewer:
     command: bin/md-viewer
+    desktop: usr/share/applications/md-viewer.desktop
     plugs:
       - home
       - removable-media
@@ -121,5 +122,8 @@ parts:
       sed -i '/egui-mcp-bridge/d' Cargo.toml
       sed -i 's/mcp = \["dep:egui-mcp-bridge"\]/mcp = []/' Cargo.toml
       craftctl default
+      install -Dm644 data/md-viewer.desktop "$CRAFT_PART_INSTALL/usr/share/applications/md-viewer.desktop"
+      install -Dm644 data/io.github.aydiler.md-viewer.png "$CRAFT_PART_INSTALL/usr/share/pixmaps/md-viewer.png"
+      sed -i 's|^Icon=.*|Icon=/usr/share/pixmaps/md-viewer.png|' "$CRAFT_PART_INSTALL/usr/share/applications/md-viewer.desktop"
       install -Dm644 LICENSE "$CRAFT_PART_INSTALL/usr/share/doc/md-viewer/LICENSE"
       install -Dm644 THIRD_PARTY_NOTICES "$CRAFT_PART_INSTALL/usr/share/doc/md-viewer/THIRD_PARTY_NOTICES"
