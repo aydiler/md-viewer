@@ -85,6 +85,10 @@ check_contents() {
         sudo apt-get install -y -q squashfs-tools
     fi
     listing=$(unsquashfs -l "$snap")
+    if ! grep -Fxq 'squashfs-root/meta/gui/md-viewer.desktop' <<<"$listing"; then
+        echo "::error::snap is missing meta/gui/md-viewer.desktop, which registers the app in desktop launchers"
+        missing=1
+    fi
     for lib in libxkbcommon-x11.so.0 libX11.so.6 libfontconfig.so.1 \
         libX11-xcb.so.1 libXcursor.so.1 libXrender.so.1 libXfixes.so.3 \
         libXi.so.6 libXext.so.6; do
