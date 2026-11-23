@@ -155,8 +155,9 @@ from the frontier rather than kept untested.
   could start from the same recorded state.
 - A single huge table, list or blockquote has no safe split inside it and is
   still measured in one piece.
-- Clicking an outline heading that is not measured yet still measures the
-  whole document (`force_full_render`); it could measure up to the heading.
+- ~~Clicking an outline heading that is not measured yet still measures the
+  whole document (`force_full_render`); it could measure up to the heading.~~
+  Done in devlog 115 (`measure_to_source`).
 - The changelog still takes about 0.5 s: the first frame parses the 6 MB
   source twice (`ScrollableCache::events` and `CommonMarkCache`'s own copy)
   and hashes it. One shared parse would remove that.

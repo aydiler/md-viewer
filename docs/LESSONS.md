@@ -1623,6 +1623,13 @@ like, and have seen it at least once.
 **Test lesson:** a check on *painted* shapes cannot show how far a pass laid out: labels outside the clip are laid out but not painted (`is_rect_visible`). The frontier-cap test passed with the cap removed until it observed recorded heading positions instead, which are set on layout.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`run_events`, `measure_from_frontier`), `crates/egui_commonmark/egui_commonmark/tests/progressive_measure.rs`, `docs/devlog/103-progressive-measure.md`
 
+### A deterministic test hook that replaces a time budget must scale like the budget
+**Context:** Devlog 115 gave progressive measurement a larger per-frame budget (32 ms instead of 4 ms) while a navigation target lies past the frontier. The tests run with `progressive_measure_blocks`, a fixed block count per frame that replaces the time budget.
+**Trap:** with the hook returning the same block count either way, the feature cannot change anything a test observes. Every test passes with the target ignored outright.
+**Fix:** the hook scales by the same ratio as the time budget (`continue_budget`: 2 blocks become 16 while a target lies ahead). The test then compares the frontier after the same frames with and without a target, and the "target ignored" mutant goes red.
+**General rule:** when a test hook stands in for a quantity the change modifies, the hook must carry the modification, or the test measures the hook.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`continue_budget`), `crates/egui_commonmark/egui_commonmark/tests/progressive_measure.rs`, `docs/devlog/115-jump-measure.md`
+
 ### A test runner that stops at the first failing target reports nothing about the targets it never ran
 
 **Context:** Reviewing PR #182 (Phase 2 dense-table overflow). The contributor had

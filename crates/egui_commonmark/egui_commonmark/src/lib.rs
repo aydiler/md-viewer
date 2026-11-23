@@ -137,6 +137,9 @@ pub struct CommonMarkViewer<'f> {
     /// Whether this frame must paint the complete document instead of a
     /// viewport slice. Navigation to an already measured Y does not need it.
     force_full_render: bool,
+    /// Source byte offset the caller needs measured (a navigation target);
+    /// see [`measure_to_source`](Self::measure_to_source).
+    measure_to_source: Option<usize>,
     /// Scroll source config for the renderer-owned ScrollArea. Useful when
     /// the caller needs to disable drag-scroll (e.g. to keep text selection
     /// working) while preserving wheel-scroll.
@@ -513,6 +516,19 @@ impl<'f> CommonMarkViewer<'f> {
         self
     }
 
+    /// With [`progressive_measure`](Self::progressive_measure): the caller
+    /// needs the document measured up to this source byte offset, typically
+    /// a heading it wants to scroll to. Measurement continues with a larger
+    /// per-frame time budget until the measured part reaches the offset, so
+    /// the target's position is recorded within a few frames without laying
+    /// out the whole document in one frame the way
+    /// [`force_full_render`](Self::force_full_render) does. The current view
+    /// keeps painting meanwhile. Pass `None` when there is no target.
+    pub fn measure_to_source(mut self, offset: Option<usize>) -> Self {
+        self.measure_to_source = offset;
+        self
+    }
+
     /// Configure which scroll inputs the renderer-owned ScrollArea reacts to.
     ///
     /// Default is whatever `egui::ScrollArea::vertical()` provides. Callers
@@ -612,6 +628,7 @@ impl<'f> CommonMarkViewer<'f> {
             self.content_version,
             self.pending_scroll_offset,
             self.force_full_render,
+            self.measure_to_source,
             self.scroll_source,
         )
     }
