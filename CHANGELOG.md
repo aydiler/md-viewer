@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **md-viewer starts on a system where fontconfig finds no fonts.** It used to abort before the first frame with a panic inside the font discovery library (fontique 0.11.1 unwrapped fontconfig's "no match" answer). fontique moves to 0.13.0, which treats that answer as "no fonts", and md-viewer falls back to the fonts it bundles.
+
 ## [0.3.11] - 2026-11-22
 
 The snap starts again in X11 sessions, text in SVG images renders when the system's default font is missing, and the code-block copy button sits back in its corner.
