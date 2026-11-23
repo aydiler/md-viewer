@@ -86,6 +86,17 @@
   </provides>
 
   <releases>
+    <release version="0.3.12" date="2026-11-23">
+      <description>
+        <p>Fixes for starting without fonts, jumping in large documents, and two install channels.</p>
+        <ul>
+          <li>md-viewer starts on a system where no fonts are installed instead of aborting</li>
+          <li>Jumping to a heading far down a large document no longer freezes the window</li>
+          <li>The snap appears in the desktop's app launcher</li>
+          <li>The AUR md-viewer-bin package builds when upgrading from an older version</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.11" date="2026-11-22">
       <description>
         <p>The snap starts again in X11 sessions, and two rendering fixes.</p>
