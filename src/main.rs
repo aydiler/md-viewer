@@ -584,6 +584,8 @@ struct PersistedState {
     /// today's behavior; `Some(true)` trades a touch of sharpness for glyphs
     /// that no longer look unevenly spaced at fractional zoom levels.
     smooth_text_rendering: Option<bool>,
+    /// Remote image policy (#289); `None` (older state) loads them.
+    remote_images: Option<RemoteImages>,
     /// Which markdown viewer's font choices lead the font chains.
     font_preset: Option<FontPreset>,
     /// Shared text-size class; `None` keeps the Normal default.
@@ -712,6 +714,41 @@ struct ExplorerAction {
     file_to_close: Option<PathBuf>,
     /// Directory to toggle expansion (deferred to avoid clone)
     dir_to_toggle: Option<PathBuf>,
+}
+
+/// What md-viewer does with images that would be fetched over the network
+/// (#289). Local and `data:` images always load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+enum RemoteImages {
+    /// Load them as the document is shown, as before #289.
+    #[default]
+    Load,
+    /// Show placeholders, and a bar per document offering to load them.
+    Ask,
+    /// Show placeholders only.
+    Block,
+}
+
+impl RemoteImages {
+    const ALL: [RemoteImages; 3] = [Self::Load, Self::Ask, Self::Block];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Load => "Load automatically",
+            Self::Ask => "Ask per document",
+            Self::Block => "Block",
+        }
+    }
+
+    /// Whether the renderer may fetch remote images for a tab whose
+    /// "Load images" was clicked (`allowed_for_tab`).
+    fn allows(self, allowed_for_tab: bool) -> bool {
+        match self {
+            Self::Load => true,
+            Self::Ask => allowed_for_tab,
+            Self::Block => false,
+        }
+    }
 }
 
 /// Sort order for file explorer
@@ -1294,6 +1331,9 @@ struct Tab {
     /// toward it (`measure_to_source`), and the post-render step jumps once
     /// the position is there (`resolve_header_jump`, devlog 115).
     pending_header_jump: Option<PendingHeaderJump>,
+    /// "Load images" was clicked for this tab while remote images are set to
+    /// Ask (#289). Session only.
+    remote_images_allowed: bool,
     /// One-shot permission for the post-render corrective scroll that snaps
     /// the active search match into view. Set by `scroll_to_active_match`
     /// (jump_match / search-open / tab-switch / query-rebuild) and cleared
@@ -1372,6 +1412,7 @@ impl Tab {
             scroll_offset: 0.0,
             pending_scroll_offset: None,
             pending_header_jump: None,
+            remote_images_allowed: false,
             correct_active_search_pending: false,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
@@ -2628,6 +2669,8 @@ struct MarkdownApp {
     // every frame (see ctx.set_zoom_factor below) since it's a single write
     // into egui's own memory, not worth a last-applied change-gate.
     smooth_text_rendering: bool,
+    // Whether images with an http(s) URI are fetched (#289).
+    remote_images: RemoteImages,
     // Which markdown viewer's font choices lead the font chains.
     font_preset: FontPreset,
     // Shared text-size class across all presets.
@@ -2802,6 +2845,7 @@ impl MarkdownApp {
             .link_color
             .map(|[r, g, b, a]| egui::Color32::from_rgba_premultiplied(r, g, b, a));
         let smooth_text_rendering = persisted.smooth_text_rendering.unwrap_or(false);
+        let remote_images = persisted.remote_images.unwrap_or_default();
         let show_explorer = persisted.show_explorer.unwrap_or(true);
         let explorer_width =
             restored_sidebar_width(persisted.explorer_width, EXPLORER_DEFAULT_WIDTH);
@@ -2923,6 +2967,7 @@ impl MarkdownApp {
             show_font_dialog: false,
             font_filter: String::new(),
             smooth_text_rendering,
+            remote_images,
             font_preset,
             text_size_class,
             watch_enabled: watch,
@@ -4432,6 +4477,8 @@ impl MarkdownApp {
 
         // Snapshot search state before taking a mutable borrow on the active tab
         let search_is_open = self.search.is_open;
+        let remote_images = self.remote_images;
+        let mut always_load_remote = false;
         let active_idx = self.search.active_match_index;
 
         // No document open → render the welcome / idle page instead.
@@ -4463,6 +4510,44 @@ impl MarkdownApp {
         // matches disable viewport clipping forever.
         let correct_search_this_frame =
             take_search_correction_request(&mut tab.correct_active_search_pending);
+
+        // Ask mode: offer to load the remote images this document skipped
+        // (#289). The count grows as more of the document is laid out.
+        let blocked_remote = tab.cache.blocked_remote_image_count();
+        if remote_images == RemoteImages::Ask && !tab.remote_images_allowed && blocked_remote > 0 {
+            ui.horizontal(|ui| {
+                let plural = if blocked_remote == 1 { "" } else { "s" };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{blocked_remote} remote image{plural} not loaded."
+                    ))
+                    .weak(),
+                );
+                let load = ui
+                    .small_button("Load images")
+                    .on_hover_text("Load the remote images in this document");
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge
+                    .register_widget("Remote Images: Load", "button", &load, None);
+                if load.clicked() {
+                    tab.remote_images_allowed = true;
+                }
+                let always = ui
+                    .small_button("Always load")
+                    .on_hover_text("View → Remote Images → Load automatically");
+                #[cfg(feature = "mcp")]
+                self.mcp_bridge.register_widget(
+                    "Remote Images: Always Load",
+                    "button",
+                    &always,
+                    None,
+                );
+                if always.clicked() {
+                    always_load_remote = true;
+                }
+            });
+        }
+        let load_remote_images = remote_images.allows(tab.remote_images_allowed);
 
         // Content area (no inner CentralPanel needed - we're already in one)
         // Left margin for breathing room, right margin prevents scrollbar/resize-handle overlap jitter
@@ -4580,6 +4665,7 @@ impl MarkdownApp {
                             // paragraph of raw `key: value` lines (#117).
                             .render_frontmatter(true)
                             .math_scale(self.math_scale)
+                            .load_remote_images(load_remote_images)
                             .show_alt_text_on_hover(true)
                             .syntax_theme_dark("base16-ocean.dark")
                             .syntax_theme_light("base16-ocean.light")
@@ -4689,6 +4775,13 @@ impl MarkdownApp {
                 }
             });
 
+        // A click on a remote-image placeholder loads this document's remote
+        // images in Ask mode; Block keeps them blocked.
+        if tab.cache.take_remote_images_request() && remote_images == RemoteImages::Ask {
+            tab.remote_images_allowed = true;
+            ui.ctx().request_repaint();
+        }
+
         // Check for clicked links
         if let Some(clicked_link) = tab.check_link_hooks() {
             (open_in_new_tab, navigation_error) =
@@ -4697,6 +4790,9 @@ impl MarkdownApp {
 
         if let Some(error) = navigation_error {
             self.error_message = Some(error);
+        }
+        if always_load_remote {
+            self.remote_images = RemoteImages::Load;
         }
 
         open_in_new_tab
@@ -5699,6 +5795,7 @@ impl eframe::App for MarkdownApp {
             link_color: self.link_color.map(|c| [c.r(), c.g(), c.b(), c.a()]),
             selected_font_family: self.selected_font_family.clone(),
             smooth_text_rendering: Some(self.smooth_text_rendering),
+            remote_images: Some(self.remote_images),
             font_preset: Some(self.font_preset),
             text_size_class: Some(self.text_size_class),
             open_tabs: Some(self.get_open_tab_paths()),
@@ -6536,6 +6633,30 @@ impl eframe::App for MarkdownApp {
                             }
                         }
                     });
+                    // Images with an http(s) URI are the only thing a
+                    // document can make md-viewer fetch (#289).
+                    ui.menu_button("Remote Images", |ui| {
+                        for policy in RemoteImages::ALL {
+                            let selected = self.remote_images == policy;
+                            let text = if selected {
+                                format!("✓ {}", policy.label())
+                            } else {
+                                format!("   {}", policy.label())
+                            };
+                            let btn = ui.add(egui::Button::new(text));
+                            #[cfg(feature = "mcp")]
+                            self.mcp_bridge.register_widget(
+                                &format!("Menu: View → Remote Images → {}", policy.label()),
+                                "button",
+                                &btn,
+                                Some(if selected { "selected" } else { "unselected" }),
+                            );
+                            if btn.clicked() {
+                                self.remote_images = policy;
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 #[cfg(feature = "mcp")]
                 self.mcp_bridge
@@ -6856,6 +6977,38 @@ mod tests {
             self.0.remove(key);
         }
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn remote_image_policy_survives_a_persistence_roundtrip() {
+        let mut storage = MemoryStorage(HashMap::new());
+        let app_state = PersistedState {
+            remote_images: Some(RemoteImages::Ask),
+            ..PersistedState::default()
+        };
+        eframe::set_value(&mut storage, APP_KEY, &app_state);
+        let restored: PersistedState = eframe::get_value(&storage, APP_KEY).expect("state decodes");
+        assert_eq!(restored.remote_images, Some(RemoteImages::Ask));
+
+        // State written before #289 has no field and keeps loading images.
+        let legacy: PersistedState = eframe::get_value(
+            &MemoryStorage(HashMap::from([(
+                APP_KEY.to_owned(),
+                "(dark_mode: Some(true))".to_owned(),
+            )])),
+            APP_KEY,
+        )
+        .expect("legacy state decodes");
+        assert_eq!(legacy.remote_images.unwrap_or_default(), RemoteImages::Load);
+    }
+
+    #[test]
+    fn remote_image_policy_decides_per_tab() {
+        assert!(RemoteImages::Load.allows(false));
+        assert!(!RemoteImages::Ask.allows(false));
+        assert!(RemoteImages::Ask.allows(true));
+        // Block ignores a tab's earlier "Load images".
+        assert!(!RemoteImages::Block.allows(true));
     }
 
     #[test]

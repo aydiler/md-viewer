@@ -1,9 +1,7 @@
 use crate::alerts::AlertBundle;
 use crate::typography::TypographyConfig;
 use egui::{text::LayoutJob, RichText, TextStyle, Ui};
-use std::collections::HashMap;
-#[cfg(feature = "math")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(any(
     feature = "better_syntax_highlighting",
     feature = "mermaid",
@@ -91,6 +89,11 @@ pub struct CommonMarkOptions<'f> {
     /// zoom is not a substitute: it scales the whole UI, leaving the formula
     /// and its surrounding text in the same ratio.
     pub math_scale: f32,
+    /// Fetch images with an `http://` or `https://` URI. On by default. When
+    /// off, such an image draws a placeholder instead and nothing is
+    /// requested, so opening a document does not tell an image host who read
+    /// it or when (#289). Local and `data:` images are unaffected.
+    pub load_remote_images: bool,
 }
 
 impl std::fmt::Debug for CommonMarkOptions<'_> {
@@ -123,6 +126,7 @@ impl std::fmt::Debug for CommonMarkOptions<'_> {
             )
             .field("render_frontmatter", &self.render_frontmatter)
             .field("math_scale", &self.math_scale)
+            .field("load_remote_images", &self.load_remote_images)
             .finish()
     }
 }
@@ -151,6 +155,7 @@ impl Default for CommonMarkOptions<'_> {
             progressive_measure_blocks: None,
             render_frontmatter: false,
             math_scale: 1.0,
+            load_remote_images: true,
         }
     }
 }
@@ -784,6 +789,26 @@ pub fn follow_link(ui: &Ui, cache: &mut CommonMarkCache, destination: &str) {
     }
 }
 
+/// Whether loading `uri` would go over the network: egui's HTTP loader
+/// handles `http://` and `https://`. Matched case-insensitively, so a
+/// blocked image cannot slip through as `HTTPS://`.
+pub fn is_remote_image_uri(uri: &str) -> bool {
+    let lower = uri.get(..8).unwrap_or(uri).to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Text for a remote image that was not loaded: its alt text, or else the
+/// host it would have been fetched from.
+fn blocked_image_label(alt_text: &[RichText], uri: &str) -> String {
+    let alt: String = alt_text.iter().map(|text| text.text()).collect();
+    let alt = alt.trim();
+    if !alt.is_empty() {
+        return alt.to_owned();
+    }
+    let rest = uri.split_once("://").map_or(uri, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest).to_owned()
+}
+
 pub struct Image {
     pub uri: String,
     pub alt_text: Vec<RichText>,
@@ -810,6 +835,21 @@ impl Image {
     }
 
     pub fn end(self, ui: &mut Ui, cache: &mut CommonMarkCache, options: &CommonMarkOptions) {
+        if !options.load_remote_images && is_remote_image_uri(&self.uri) {
+            // No `egui::Image`: creating one is what starts the fetch.
+            let label = blocked_image_label(&self.alt_text, &self.uri);
+            let response = ui
+                .add(egui::Button::new(RichText::new(format!("Remote image: {label}")).weak()).small())
+                .on_hover_text(format!("Remote image not loaded: {}", self.uri));
+            // Tables reserve the size an image last painted at; give them
+            // the placeholder's, and let a later real image re-measure.
+            cache.observe_image_size(&self.uri, response.rect.size());
+            cache.note_blocked_remote_image(&self.uri);
+            if response.clicked() {
+                cache.request_remote_images();
+            }
+            return;
+        }
         let response = ui.add(
             egui::Image::from_uri(&self.uri)
                 .fit_to_original_size(1.0)
@@ -2521,6 +2561,11 @@ pub struct CommonMarkCache {
     /// replace a placeholder with a differently sized image.
     image_sizes: HashMap<String, egui::Vec2>,
 
+    /// Remote images drawn as placeholders because remote loading is off.
+    blocked_remote_images: HashSet<String>,
+    /// Set when a remote-image placeholder is clicked; taken by the caller.
+    remote_images_requested: bool,
+
     /// Hash of the diagram that currently has an active background thread.
     /// Only one diagram renders at a time so they appear top-to-bottom.
     #[cfg(feature = "mermaid")]
@@ -2607,6 +2652,8 @@ impl Default for CommonMarkCache {
             clicked_mermaid: None,
             clicked_image: None,
             image_sizes: HashMap::new(),
+            blocked_remote_images: HashSet::new(),
+            remote_images_requested: false,
             #[cfg(feature = "mermaid")]
             mermaid_rendering: None,
             #[cfg(feature = "math")]
@@ -2911,6 +2958,27 @@ impl CommonMarkCache {
     #[doc(hidden)]
     pub fn observe_image_size_for_test(&mut self, uri: &str, size: egui::Vec2) {
         self.observe_image_size(uri, size);
+    }
+
+    fn note_blocked_remote_image(&mut self, uri: &str) {
+        if !self.blocked_remote_images.contains(uri) {
+            self.blocked_remote_images.insert(uri.to_owned());
+        }
+    }
+
+    fn request_remote_images(&mut self) {
+        self.remote_images_requested = true;
+    }
+
+    /// How many distinct remote images were drawn as placeholders because
+    /// remote loading is off. Grows as more of the document is laid out.
+    pub fn blocked_remote_image_count(&self) -> usize {
+        self.blocked_remote_images.len()
+    }
+
+    /// Whether a remote-image placeholder was clicked since the last call.
+    pub fn take_remote_images_request(&mut self) -> bool {
+        std::mem::take(&mut self.remote_images_requested)
     }
 
     /// Size of an image as last painted, if it has been painted at least once.

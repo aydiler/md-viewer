@@ -20,7 +20,7 @@ A fast, lightweight markdown viewer for Linux, with Windows and macOS builds too
 - **Tables that fill the pane** - Columns stretch proportionally to the available width and re-fit whenever the window, the Full Width setting or a sidebar changes size; cell text wraps instead of clipping, and you can drag the dividers to override
 - **HTML Tables** - Rendered as formatted grids with proper cell padding
 - **YAML Frontmatter** - A leading `---` block renders as a key/value table instead of raw text
-- **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs)
+- **Images & SVG** - Embedded and remote image support (PNG, JPEG, GIF, SVG, HTTP URLs); remote images can be set to ask first or be blocked (View → Remote Images)
 - **Right-to-Left Text** - Paragraphs, headings, list items and table cells in Arabic, Hebrew and other right-to-left scripts are right-aligned, and lines that mix directions read in the correct order (not in `cargo install` builds; see [Cargo](#cargo-cratesio--slower-builds-from-source))
 - **Unicode Support** - Installed system fonts are picked per script for CJK and other non-Latin text; a monochrome emoji font is bundled and a color one is used when installed
 - **Viewport Rendering** - Only the visible part of a long document is painted each frame
