@@ -178,6 +178,17 @@ fn paint_sidebar_resize_affordance(
     );
 }
 
+/// Height of one Explorer row: the tallest thing a row holds (a folder
+/// name in the Body style, a button in the Button style, or egui's minimum
+/// interact height). Every row is drawn exactly this tall, which is what
+/// lets `show_rows` place rows by index (devlog 120).
+fn explorer_row_height(ui: &egui::Ui) -> f32 {
+    let spacing = &ui.style().spacing;
+    let body = ui.text_style_height(&egui::TextStyle::Body);
+    let button = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * spacing.button_padding.y;
+    spacing.interact_size.y.max(body).max(button)
+}
+
 /// Draw a small vector "document" icon (page with folded corner) for file
 /// rows in the explorer. Pure painter drawing — no font or emoji involved.
 fn paint_file_icon(ui: &mut egui::Ui, size: f32) {
@@ -1122,6 +1133,32 @@ impl FileExplorer {
         }
     }
 
+    /// The rows the Explorer lists, in display order, with their depth:
+    /// every node, descending into expanded directories whose children are
+    /// loaded. Expanded directories whose children are not loaded yet go to
+    /// `unloaded`, so they can be loaded once the frame is drawn.
+    fn visible_rows<'a>(
+        nodes: &'a [FileTreeNode],
+        expanded: &HashSet<PathBuf>,
+        depth: usize,
+        rows: &mut Vec<(usize, &'a FileTreeNode)>,
+        unloaded: &mut Vec<PathBuf>,
+    ) {
+        for node in nodes {
+            rows.push((depth, node));
+            if let FileTreeNode::Directory { path, children, .. } = node {
+                if expanded.contains(path) {
+                    match children {
+                        Some(children) => {
+                            Self::visible_rows(children, expanded, depth + 1, rows, unloaded)
+                        }
+                        None => unloaded.push(path.clone()),
+                    }
+                }
+            }
+        }
+    }
+
     /// Check if a directory is expanded
     fn is_expanded(&self, path: &PathBuf) -> bool {
         self.expanded_dirs.contains(path)
@@ -1149,12 +1186,16 @@ impl FileExplorer {
         }
     }
 
-    /// Get children for a directory by path (looks up in original tree, not clone)
+    /// Get children for a directory by path (looks up in original tree, not clone).
+    /// Only tests look folders up by path; the panel walks the tree once per
+    /// frame (`visible_rows`).
+    #[cfg(test)]
     fn get_children(&self, target_path: &PathBuf) -> Option<&Vec<FileTreeNode>> {
         Self::find_children_in_tree(&self.tree, target_path)
     }
 
     /// Recursively find children for a directory in the tree
+    #[cfg(test)]
     fn find_children_in_tree<'a>(
         nodes: &'a [FileTreeNode],
         target_path: &PathBuf,
@@ -1180,9 +1221,10 @@ impl FileExplorer {
     const MAX_EXPAND_DEPTH: usize = 10;
     const BULK_EXPANSION_LIMIT: usize = 256;
     /// Expand All also stops before the Explorer would list more rows than
-    /// this. The Explorer lays out every row each frame: in an optimized
-    /// build, 6,400 rows took 72 % of a core while the pointer moved over
-    /// it, against 22 % for the 1,024 rows of the unexpanded tree.
+    /// this. When the Explorer laid out every row each frame, 6,400 rows took
+    /// 72 % of a core in an optimized build while the pointer moved over it,
+    /// against 22 % for the 1,024 rows of the unexpanded tree. It now draws
+    /// only the visible rows (devlog 120), so this limit could be raised.
     const BULK_ROW_LIMIT: usize = 2048;
 
     /// Restore a saved expansion set, returning whether it was truncated.
@@ -4907,45 +4949,55 @@ impl MarkdownApp {
 
                 ui.separator();
 
-                // Pre-load children for all expanded dirs to avoid mutation during render
-                for dir in self
-                    .file_explorer
-                    .expanded_dirs
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    if self.file_explorer.get_children(&dir).is_none() {
-                        self.file_explorer.load_children(&dir);
-                    }
-                }
-
-                // Take tree to iterate without cloning, then put it back
+                // Take the tree so its rows can be borrowed while `self`
+                // renders them, then put it back.
                 let tree = std::mem::take(&mut self.file_explorer.tree);
                 // Clone the small set of open tab paths (avoids borrow conflict with &mut self)
                 let open_paths = self.open_tab_paths.clone();
+                let mut rows = Vec::new();
+                let mut unloaded = Vec::new();
+                FileExplorer::visible_rows(
+                    &tree,
+                    &self.file_explorer.expanded_dirs,
+                    0,
+                    &mut rows,
+                    &mut unloaded,
+                );
+                let row_height = explorer_row_height(ui);
 
-                // File tree inside ScrollArea
+                // Lay out only the rows in view: an expanded tree can list
+                // thousands, and laying them all out every frame cost most
+                // of a core while the pointer moved (devlog 120).
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .id_salt("file_explorer")
-                    .show(ui, |ui| {
-                        for node in &tree {
-                            let node_action = self.render_tree_node(ui, node, 0, &open_paths);
-                            if node_action.file_to_open.is_some() {
-                                action.file_to_open = node_action.file_to_open;
+                    .show_rows(ui, row_height, rows.len(), |ui, row_range| {
+                        for &(depth, node) in &rows[row_range] {
+                            let row_action =
+                                self.render_tree_row(ui, node, depth, &open_paths, row_height);
+                            if row_action.file_to_open.is_some() {
+                                action.file_to_open = row_action.file_to_open;
                             }
-                            if node_action.file_to_close.is_some() {
-                                action.file_to_close = node_action.file_to_close;
+                            if row_action.file_to_close.is_some() {
+                                action.file_to_close = row_action.file_to_close;
                             }
-                            if node_action.dir_to_toggle.is_some() {
-                                action.dir_to_toggle = node_action.dir_to_toggle;
+                            if row_action.dir_to_toggle.is_some() {
+                                action.dir_to_toggle = row_action.dir_to_toggle;
                             }
                         }
                     });
+                drop(rows);
 
                 // Put tree back and apply deferred toggle
                 self.file_explorer.tree = tree;
+                // Expanded folders whose children are not loaded yet (a
+                // restored or refreshed tree) load now and list next frame.
+                if !unloaded.is_empty() {
+                    for dir in &unloaded {
+                        self.file_explorer.load_children(dir);
+                    }
+                    ui.ctx().request_repaint();
+                }
                 if let Some(ref dir_path) = action.dir_to_toggle {
                     self.file_explorer.toggle_expanded(dir_path);
                     // Keep the non-recursive explorer watches in sync with the
@@ -4984,13 +5036,15 @@ impl MarkdownApp {
         }
     }
 
-    /// Render a single node in the file tree (recursive)
-    fn render_tree_node(
+    /// Render one Explorer row, exactly `row_height` tall so `show_rows` can
+    /// place rows by index. Children are separate rows (`visible_rows`).
+    fn render_tree_row(
         &mut self,
         ui: &mut egui::Ui,
         node: &FileTreeNode,
         depth: usize,
         open_paths: &HashSet<PathBuf>,
+        row_height: f32,
     ) -> ExplorerAction {
         let mut action = ExplorerAction::default();
         let indent = depth * 16;
@@ -5003,6 +5057,7 @@ impl MarkdownApp {
 
                 // Render file row and get its rect
                 let row_response = ui.horizontal(|ui| {
+                    ui.set_min_height(row_height);
                     ui.add_space(indent as f32);
 
                     // File icon (vector-drawn — no emoji in app chrome)
@@ -5084,6 +5139,7 @@ impl MarkdownApp {
 
                 // Render directory row
                 let row_response = ui.horizontal(|ui| {
+                    ui.set_min_height(row_height);
                     ui.add_space(indent as f32);
 
                     // Expand/collapse indicator
@@ -5140,29 +5196,6 @@ impl MarkdownApp {
                     let rect = row_response.response.rect;
                     // Use debug_painter which draws on top of everything
                     ui.ctx().debug_painter().rect_filled(rect, 4.0, flash_color);
-                }
-
-                // Render children if expanded (read from node directly, no clone needed)
-                if self.file_explorer.is_expanded(path) {
-                    if let FileTreeNode::Directory {
-                        children: Some(ref child_nodes),
-                        ..
-                    } = node
-                    {
-                        for child in child_nodes {
-                            let child_action =
-                                self.render_tree_node(ui, child, depth + 1, open_paths);
-                            if child_action.file_to_open.is_some() {
-                                action.file_to_open = child_action.file_to_open;
-                            }
-                            if child_action.file_to_close.is_some() {
-                                action.file_to_close = child_action.file_to_close;
-                            }
-                            if child_action.dir_to_toggle.is_some() {
-                                action.dir_to_toggle = child_action.dir_to_toggle;
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -8386,6 +8419,61 @@ mod tests {
         assert!(cut);
         assert_eq!(missing, 0);
         assert_eq!(watches.len(), limit + 1, "root plus a full budget");
+    }
+
+    #[test]
+    fn visible_rows_follow_the_expanded_tree_in_display_order() {
+        let dir = |path: &str, children: Option<Vec<FileTreeNode>>| FileTreeNode::Directory {
+            path: PathBuf::from(path),
+            name: path.rsplit('/').next().unwrap().to_owned(),
+            modified: None,
+            children,
+        };
+        let file = |path: &str| FileTreeNode::File {
+            path: PathBuf::from(path),
+            name: path.rsplit('/').next().unwrap().to_owned(),
+            modified: None,
+        };
+        let tree = vec![
+            dir(
+                "r/a",
+                Some(vec![
+                    dir("r/a/deep", Some(vec![file("r/a/deep/x.md")])),
+                    file("r/a/y.md"),
+                ]),
+            ),
+            // Collapsed: its loaded children are not listed.
+            dir("r/b", Some(vec![file("r/b/hidden.md")])),
+            // Expanded but not loaded yet: listed, children to load.
+            dir("r/c", None),
+            file("r/top.md"),
+        ];
+        let expanded: HashSet<PathBuf> = ["r/a", "r/a/deep", "r/c"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+
+        let mut rows = Vec::new();
+        let mut unloaded = Vec::new();
+        FileExplorer::visible_rows(&tree, &expanded, 0, &mut rows, &mut unloaded);
+        let listed: Vec<(usize, &str)> = rows
+            .iter()
+            .map(|(depth, node)| (*depth, node.name()))
+            .collect();
+
+        assert_eq!(
+            listed,
+            [
+                (0, "a"),
+                (1, "deep"),
+                (2, "x.md"),
+                (1, "y.md"),
+                (0, "b"),
+                (0, "c"),
+                (0, "top.md")
+            ]
+        );
+        assert_eq!(unloaded, [PathBuf::from("r/c")]);
     }
 
     #[test]

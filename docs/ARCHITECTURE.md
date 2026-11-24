@@ -104,7 +104,7 @@ update() → check_file_changes() → reload affected tabs
          → TopBottomPanel (error bar, if any)
          → TopBottomPanel (tab bar) → render_tab_bar()
          → SidePanel::left (file explorer) → render_file_explorer()
-           → render_tree_node() (recursive)
+           → visible_rows() → show_rows → render_tree_row() (rows in view only, devlog 120)
          → CentralPanel → render_tab_content()
            → SidePanel::right (outline, if show_outline && headers exist)
            → ScrollArea::show_viewport → CommonMarkViewer
