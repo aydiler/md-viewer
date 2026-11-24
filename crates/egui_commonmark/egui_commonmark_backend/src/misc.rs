@@ -806,7 +806,10 @@ fn blocked_image_label(alt_text: &[RichText], uri: &str) -> String {
         return alt.to_owned();
     }
     let rest = uri.split_once("://").map_or(uri, |(_, rest)| rest);
-    rest.split(['/', '?', '#']).next().unwrap_or(rest).to_owned()
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .to_owned()
 }
 
 pub struct Image {
@@ -839,7 +842,10 @@ impl Image {
             // No `egui::Image`: creating one is what starts the fetch.
             let label = blocked_image_label(&self.alt_text, &self.uri);
             let response = ui
-                .add(egui::Button::new(RichText::new(format!("Remote image: {label}")).weak()).small())
+                .add(
+                    egui::Button::new(RichText::new(format!("Remote image: {label}")).weak())
+                        .small(),
+                )
                 .on_hover_text(format!("Remote image not loaded: {}", self.uri));
             // Tables reserve the size an image last painted at; give them
             // the placeholder's, and let a later real image re-measure.

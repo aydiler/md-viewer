@@ -1646,6 +1646,25 @@ like, and have seen it at least once.
 **Test lesson:** a check on *painted* shapes cannot show how far a pass laid out: labels outside the clip are laid out but not painted (`is_rect_visible`). The frontier-cap test passed with the cap removed until it observed recorded heading positions instead, which are set on layout.
 **Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`run_events`, `measure_from_frontier`), `crates/egui_commonmark/egui_commonmark/tests/progressive_measure.rs`, `docs/devlog/103-progressive-measure.md`
 
+### An offset past egui's scroll bounds leaves a velocity that outlives the clamp
+**Context:** Devlog 122. After a jump to the last heading of a 5 MB document the view slid about 580 pt back up and the heading stayed below the pane. Devlog 115 had put this down to f32 rounding.
+**Root cause:** the jump asked `ScrollArea::vertical_scroll_offset` for an offset past the deepest position. egui 0.37 treats that as overscroll and gives the area a spring-back velocity (−868 pt/s here). The renderer clamped the offset on the next frame, but the builder does not touch the velocity, so friction carried the view upward from the bottom.
+**Fix:** clamp a requested offset to the deepest position before egui sees it; on a frame where the extent is not known yet, apply the request on the next frame. Do not clamp offsets the scroll area itself produced (stored state, the overshoot clamp) the same way: pinning them to the measured bottom made the extent floor learn the trailing padding.
+**How it was found:** `ScrollAreaOutput::state.velocity()` printed per frame. Two other plausible causes, label text selection scrolling to its cursor and the pointer resting near the pane edge, were each ruled out by a run that removed them and still drifted.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`show_scrollable`, `deepest_offset`), `crates/egui_commonmark/egui_commonmark/tests/pending_offset.rs`, `docs/devlog/122-far-heading-jump.md`
+
+### A measuring `Ui` must sit near the origin, off screen, and leave the painted ui's ids alone
+**Context:** Devlog 122 moved all measurement into invisible children so no layout runs at million-point screen coordinates (f32 holds egui's 1/32 pt grid exactly only near 0; a heading 2.5 M pt down was 176 pt off at 125 % scaling).
+**Traps, each caught by a test:**
+- *egui hit-tests invisible widgets.* `hit_test` ignores `WidgetRect::visible`, so a measuring copy of a link under the pointer took the press meant for the painted one. Put measuring children below the window, where the interact rect is clipped to nothing.
+- *`Ui::new_child` advances the parent's automatic id counter,* even with an explicit id. A child created before the painted slice on some frames but not others changed the slice's widget ids between frames, and a press on a link was lost (`tests/rtl_links.rs`). Give the painted ui an explicit `scope_id`.
+- *Keep the pixel phase.* A child shifted by half a pixel lays the same block out differently (3 pt here), so a resumed chunk sits at its content y modulo the chunk size.
+- *Small and positive.* An origin at −2^18 put headings 150 pt off again; +2^15 with 32 K chunks passes.
+- *Anchor in f64.* Each chunk adds its extent to the frontier's y; as f32 that drifted 1.5 pt over 77 chunks.
+- *Leave no state for the painted ui.* Tables persist their last widths and bound in egui memory. A measuring pass that stored them in the same frame made the painted table cap its columns on its first paint, and the visual guard's note column wrapped. `scripts/visual-regression.sh` still said PASS: only comparing its content pixels against main's showed it.
+**Test lesson:** the first fixture used whole-pixel heights at 100 % scaling, which f32 holds exactly at any depth, and passed on the broken build. Fractional scaling made it fail by 176 pt.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (`measure_document`, `measure_from_frontier`, `MEASURE_ORIGIN_Y`, `measure_origin_for`), `crates/egui_commonmark/egui_commonmark_backend/src/pulldown.rs` (`MeasureFrontier`), `crates/egui_commonmark/egui_commonmark/tests/far_positions.rs`
+
 ### A deterministic test hook that replaces a time budget must scale like the budget
 **Context:** Devlog 115 gave progressive measurement a larger per-frame budget (32 ms instead of 4 ms) while a navigation target lies past the frontier. The tests run with `progressive_measure_blocks`, a fixed block count per frame that replaces the time budget.
 **Trap:** with the hook returning the same block count either way, the feature cannot change anything a test observes. Every test passes with the target ignored outright.
