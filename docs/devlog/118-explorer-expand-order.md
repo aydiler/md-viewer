@@ -29,6 +29,10 @@ Both are fixed here; #288 itself was merged first, as is.
       with `scan_directory_shallow`, then `graft_children` attaches the scanned
       lists to the tree. The depth limit (10) and the budget (256) are the same
       as #288's; only the order changed.
+- [x] Expand All also stops before the Explorer would list more than
+      `BULK_ROW_LIMIT` (2,048) rows. Breadth first made the per-frame cost
+      visible (see below); the notice now reports the number of folders that
+      were actually expanded, since either budget can end the walk.
 - [x] `restore_expansion(paths, root)` sorts folders under `root` first when it
       has to cut, then parents before descendants, then by path. Under the
       budget nothing is dropped, so going back to an earlier root still finds
@@ -51,6 +55,28 @@ Fixture: 1,024 top-level folders × 20 subfolders each, Watch Files on.
 | restart with 1,024 saved folders: idle CPU | 99 % | 0 %, notice once, 256 kept |
 
 ## Key Discoveries
+
+### A folder budget does not bound the per-frame cost; rows do
+
+Breadth first on the wide fixture opened 256 top-level folders with 21
+entries each: about 6,400 listed rows instead of the ~1,300 #288's depth-first
+walk left (most of its 256 were empty leaf folders). The Explorer lays out
+every row each frame (`ScrollArea::show`, no row virtualization), so the cost
+moved from idle to interaction. Main-thread CPU while the pointer moved over
+the Explorer for 5 s (~42 moves/s), optimized build without LTO, two runs each:
+
+| | CPU |
+|---|---|
+| no expansion (1,024 rows) | 22–23 % |
+| #288, depth first | 30 % |
+| breadth first, folder budget only | 72–73 % |
+| breadth first + 2,048-row budget | 34–35 % |
+
+The debug build saturated in both of the first two cases (82 % and 95 %), so
+it could not tell them apart; the optimized build and the unexpanded control
+were needed to see the difference at all. The proper fix is to virtualize the
+Explorer's rows (#287's option 4); the row budget keeps Expand All inside what
+the current renderer handles.
 
 ### Breadth first needs the paths, not the nodes
 
@@ -79,6 +105,10 @@ pass.
   and drops the expansion; ↻ could be disabled like ⊞ while it runs.
 - `watch_directories` logs its warning on every reconcile once manual
   expansion passes 256, and truncates before the `is_dir` filter.
-- The explorer render pre-loads children by walking the tree once per expanded
-  folder per frame (issue #287, option 4). At 256 folders it measures 0 % idle;
-  raising the budget would need that fixed first.
+- A restore is bounded by folders only: 256 restored folders with 20 entries
+  each still list about 6,400 rows (the saved state an old Expand All left).
+  Virtualizing the rows fixes that too.
+- Virtualize the Explorer: render only the visible rows from a flattened list
+  cached on change (`show_rows`), and drop the per-frame pre-load walk that
+  looks up every expanded folder in the tree (issue #287, option 4). Then the
+  row budget, and probably the folder budget, can grow.

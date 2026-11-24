@@ -1133,6 +1133,11 @@ impl FileExplorer {
     // shallow tree can otherwise generate thousands of reads and watches.
     const MAX_EXPAND_DEPTH: usize = 10;
     const BULK_EXPANSION_LIMIT: usize = 256;
+    /// Expand All also stops before the Explorer would list more rows than
+    /// this. The Explorer lays out every row each frame: in an optimized
+    /// build, 6,400 rows took 72 % of a core while the pointer moved over
+    /// it, against 22 % for the 1,024 rows of the unexpanded tree.
+    const BULK_ROW_LIMIT: usize = 2048;
 
     /// Restore a saved expansion set, returning whether it was truncated.
     ///
@@ -1171,9 +1176,9 @@ impl FileExplorer {
         }
     }
 
-    /// Expand directories level by level until the budget is spent, so a
-    /// deep first subdirectory cannot take every slot from its siblings.
-    /// Returns whether the budget cut the expansion short.
+    /// Expand directories level by level until the folder or row budget is
+    /// spent, so a deep first subdirectory cannot take every slot from its
+    /// siblings. Returns whether a budget cut the expansion short.
     fn expand_children(
         nodes: &mut [FileTreeNode],
         sort_order: SortOrder,
@@ -1190,12 +1195,19 @@ impl FileExplorer {
             .collect();
         let mut scanned: HashMap<PathBuf, Vec<FileTreeNode>> = HashMap::new();
         let mut truncated = false;
+        // The top level is listed whether or not anything is expanded.
+        let mut rows = nodes.len();
         while let Some((path, depth)) = queue.pop_front() {
             if expanded.len() == Self::BULK_EXPANSION_LIMIT {
                 truncated = true;
                 break;
             }
             let children = Self::scan_directory_shallow(&path, sort_order);
+            if rows + children.len() > Self::BULK_ROW_LIMIT {
+                truncated = true;
+                break;
+            }
+            rows += children.len();
             if depth + 1 < Self::MAX_EXPAND_DEPTH {
                 queue.extend(children.iter().filter_map(|node| match node {
                     FileTreeNode::Directory { path, .. } => Some((path.clone(), depth + 1)),
@@ -5700,9 +5712,10 @@ impl eframe::App for MarkdownApp {
             if let Some(truncated) = self.file_explorer.poll_pending_scan() {
                 log::info!("Explorer directory scan completed");
                 if truncated {
+                    // The folder or the row budget can be the one that ran out.
                     self.error_message = Some(format!(
                         "Expand All stopped after {} directories. You can expand more individually.",
-                        FileExplorer::BULK_EXPANSION_LIMIT
+                        self.file_explorer.expanded_dirs.len()
                     ));
                 }
                 self.reconcile_explorer_watches();
@@ -8188,6 +8201,53 @@ mod tests {
         let kept = vec![old_root.join("o0000"), current.join("d0000")];
         assert!(!explorer.restore_expansion(kept.clone(), Some(&current)));
         assert_eq!(explorer.expanded_dirs, HashSet::from_iter(kept));
+    }
+
+    #[test]
+    fn expand_all_stops_before_the_explorer_lists_too_many_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-rows-explorer-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        // Few enough folders for the directory budget, but each lists 30
+        // entries, so expanding them all would list far more rows.
+        let (folders, entries) = (100, 30);
+        for i in 0..folders {
+            for j in 0..entries {
+                fs::create_dir_all(root.join(format!("d{i:03}")).join(format!("e{j:02}"))).unwrap();
+            }
+        }
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+
+        assert!(explorer.expand_all());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let truncated = loop {
+            if let Some(truncated) = explorer.poll_pending_scan() {
+                break truncated;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background expansion did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let expanded = explorer.expanded_dirs.clone();
+        fs::remove_dir_all(&root).unwrap();
+
+        // The top level is always listed; each expanded folder adds its entries.
+        let fit = (FileExplorer::BULK_ROW_LIMIT - folders) / entries;
+        assert!(truncated);
+        assert_eq!(expanded.len(), fit);
+        let rows = folders + expanded.len() * entries;
+        assert!(rows <= FileExplorer::BULK_ROW_LIMIT, "{rows} rows listed");
+        // Still level by level and in order: the first `fit` folders.
+        for i in 0..fit {
+            assert!(expanded.contains(&root.join(format!("d{i:03}"))));
+        }
     }
 
     #[test]
