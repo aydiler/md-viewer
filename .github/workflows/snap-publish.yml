@@ -38,7 +38,7 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          cp scripts/snap-ci.sh "$RUNNER_TEMP/snap-ci.sh"
+          cp scripts/snap-ci.sh scripts/snap-smoke.sh "$RUNNER_TEMP/"
           git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null \
             || { echo "::error::tag $TAG does not exist"; exit 1; }
           git checkout --quiet "$TAG"
@@ -55,6 +55,20 @@ jobs:
       - name: Build snap
         id: build
         run: bash "$RUNNER_TEMP/snap-ci.sh" build
+
+      # Same start test as release.yml's snap job (devlog 117).
+      - name: Start the snap in its base
+        run: bash "$RUNNER_TEMP/snap-smoke.sh" "${{ steps.build.outputs.snap }}"
+        env:
+          SNAP_SMOKE_OUT: ${{ runner.temp }}/snap-smoke
+
+      - name: Keep the start test's logs and screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-smoke
+          path: ${{ runner.temp }}/snap-smoke
+          retention-days: 7
 
       - name: Upload to Snap Store (stable) and sync listing metadata
         if: inputs.upload
