@@ -776,6 +776,13 @@ struct ExplorerScanResult {
     root: PathBuf,
     sort_order: SortOrder,
     tree: Vec<FileTreeNode>,
+    bulk_expansion: Option<(HashSet<PathBuf>, bool)>,
+}
+
+struct PendingExplorerScan {
+    receiver: Receiver<ExplorerScanResult>,
+    expands_all: bool,
+    discarded: bool,
 }
 
 /// File explorer state
@@ -786,7 +793,7 @@ struct FileExplorer {
     expanded_dirs: HashSet<PathBuf>,
     sort_order: SortOrder,
     /// Receiver for asynchronous root-directory scan results.
-    pending_scan: Option<Receiver<ExplorerScanResult>>,
+    pending_scan: Option<PendingExplorerScan>,
 }
 
 impl FileExplorer {
@@ -885,64 +892,79 @@ impl FileExplorer {
             path
         };
         self.root = Some(path.clone());
-        if !self.start_root_scan(path.clone(), "explorer-scan") {
+        if !self.start_root_scan(path.clone(), false) {
             self.tree = Self::scan_directory_shallow(&path, self.sort_order);
             Self::restore_expanded_children(&mut self.tree, &self.expanded_dirs, self.sort_order);
         }
     }
 
-    fn start_root_scan(&mut self, path: PathBuf, thread_name: &str) -> bool {
+    fn start_root_scan(&mut self, path: PathBuf, expands_all: bool) -> bool {
         let sort_order = self.sort_order;
-        let expanded_dirs = self.expanded_dirs.clone();
+        let expanded_dirs = (!expands_all).then(|| self.expanded_dirs.clone());
         let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
-            .name(thread_name.to_owned())
+            .name("explorer-scan".to_owned())
             .spawn(move || {
                 let mut tree = Self::scan_directory_shallow(&path, sort_order);
-                Self::restore_expanded_children(&mut tree, &expanded_dirs, sort_order);
+                let bulk_expansion = if let Some(expanded_dirs) = expanded_dirs {
+                    Self::restore_expanded_children(&mut tree, &expanded_dirs, sort_order);
+                    None
+                } else {
+                    let mut expanded = HashSet::new();
+                    let truncated = Self::expand_children(&mut tree, sort_order, 0, &mut expanded);
+                    Some((expanded, truncated))
+                };
                 let _ = tx.send(ExplorerScanResult {
                     root: path,
                     sort_order,
                     tree,
+                    bulk_expansion,
                 });
             });
-        if spawned.is_ok() {
-            self.pending_scan = Some(rx);
-            true
-        } else {
-            false
-        }
+        self.pending_scan = spawned.is_ok().then_some(PendingExplorerScan {
+            receiver: rx,
+            expands_all,
+            discarded: false,
+        });
+        self.pending_scan.is_some()
     }
 
-    /// Check if a background scan completed and apply results
-    fn poll_pending_scan(&mut self) -> bool {
-        let received = self.pending_scan.as_ref().map(Receiver::try_recv);
+    /// Apply a completed scan. Return whether the expansion budget was hit.
+    fn poll_pending_scan(&mut self) -> Option<bool> {
+        let pending = self.pending_scan.as_ref()?;
+        let discarded = pending.discarded;
+        let received = pending.receiver.try_recv();
         let mut result = match received {
-            Some(Ok(result)) => result,
-            Some(Err(TryRecvError::Empty)) | None => return false,
-            Some(Err(TryRecvError::Disconnected)) => {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
                 self.pending_scan = None;
-                return false;
+                return None;
             }
         };
         self.pending_scan = None;
-        if self.root.as_deref() != Some(result.root.as_path()) {
-            return false;
+        if discarded || self.root.as_deref() != Some(result.root.as_path()) {
+            return None;
         }
         if result.sort_order != self.sort_order {
             Self::resort_tree_recursive(&mut result.tree, self.sort_order);
         }
-        // Expansion can change while the worker is running. Reuse its snapshot
-        // and load any directories expanded after it started.
-        Self::restore_expanded_children(&mut result.tree, &self.expanded_dirs, self.sort_order);
+        let truncated = if let Some((expanded, truncated)) = result.bulk_expansion {
+            self.expanded_dirs = expanded;
+            truncated
+        } else {
+            // Reuse the snapshot and load any directories expanded since it started.
+            Self::restore_expanded_children(&mut result.tree, &self.expanded_dirs, self.sort_order);
+            false
+        };
         self.tree = result.tree;
-        true
+        Some(truncated)
     }
 
     /// Refresh the file tree in the background.
     fn refresh(&mut self) {
         if let Some(root) = &self.root.clone() {
-            if self.start_root_scan(root.clone(), "explorer-refresh") {
+            if self.start_root_scan(root.clone(), false) {
                 return;
             }
             self.tree = Self::scan_directory_shallow(root, self.sort_order);
@@ -1044,6 +1066,7 @@ impl FileExplorer {
 
     /// Toggle directory expansion (loads children if not yet loaded)
     fn toggle_expanded(&mut self, path: &PathBuf) {
+        self.discard_pending_expansion();
         if self.expanded_dirs.contains(path) {
             self.expanded_dirs.remove(path);
         } else {
@@ -1106,54 +1129,97 @@ impl FileExplorer {
         None
     }
 
-    /// Maximum depth for expand_all to prevent excessive recursion
+    // Limit bulk operations by both depth and directory count. Even a
+    // shallow tree can otherwise generate thousands of reads and watches.
     const MAX_EXPAND_DEPTH: usize = 10;
+    const BULK_EXPANSION_LIMIT: usize = 256;
 
-    /// Expand all directories in the tree (loads all children recursively up to MAX_EXPAND_DEPTH)
-    fn expand_all(&mut self) {
-        // First, recursively load all directories (with depth limit)
-        Self::load_all_children(&mut self.tree, self.sort_order, 0);
-        // Then collect all directory paths
-        self.expanded_dirs = Self::collect_all_dirs(&self.tree);
+    /// Restore a saved expansion set, returning whether it was truncated.
+    fn restore_expansion(&mut self, mut paths: Vec<PathBuf>) -> bool {
+        if paths.len() > Self::BULK_EXPANSION_LIMIT {
+            // Keep parents before descendants and break ties by path so the
+            // result is independent of the saved HashSet iteration order.
+            paths.sort_unstable_by(|a, b| {
+                a.components()
+                    .count()
+                    .cmp(&b.components().count())
+                    .then_with(|| a.cmp(b))
+            });
+            paths.dedup();
+        }
+        let truncated = paths.len() > Self::BULK_EXPANSION_LIMIT;
+        paths.truncate(Self::BULK_EXPANSION_LIMIT);
+        self.expanded_dirs = paths.into_iter().collect();
+        truncated
     }
 
-    /// Recursively load all unloaded directories (up to MAX_EXPAND_DEPTH)
-    fn load_all_children(nodes: &mut [FileTreeNode], sort_order: SortOrder, depth: usize) {
-        if depth >= Self::MAX_EXPAND_DEPTH {
-            return;
+    /// Start a bounded expansion on the existing background scan path.
+    fn expand_all(&mut self) -> bool {
+        self.root
+            .clone()
+            .is_some_and(|root| self.start_root_scan(root, true))
+    }
+
+    fn discard_pending_expansion(&mut self) {
+        if let Some(scan) = &mut self.pending_scan {
+            scan.discarded = scan.expands_all;
         }
-        for node in nodes.iter_mut() {
+    }
+
+    fn expand_children(
+        nodes: &mut [FileTreeNode],
+        sort_order: SortOrder,
+        depth: usize,
+        expanded: &mut HashSet<PathBuf>,
+    ) -> bool {
+        if depth >= Self::MAX_EXPAND_DEPTH {
+            return false;
+        }
+        for node in nodes {
             if let FileTreeNode::Directory { path, children, .. } = node {
-                // Load children if not yet loaded
-                if children.is_none() {
-                    *children = Some(Self::scan_directory_shallow(path, sort_order));
+                if expanded.len() == Self::BULK_EXPANSION_LIMIT {
+                    return true;
                 }
-                // Recurse into children
-                if let Some(ref mut child_nodes) = children {
-                    Self::load_all_children(child_nodes, sort_order, depth + 1);
+                expanded.insert(path.clone());
+                let children =
+                    children.get_or_insert_with(|| Self::scan_directory_shallow(path, sort_order));
+                if Self::expand_children(children, sort_order, depth + 1, expanded) {
+                    return true;
                 }
             }
         }
+        false
     }
 
     /// Collapse all directories in the tree
     fn collapse_all(&mut self) {
+        self.discard_pending_expansion();
         self.expanded_dirs.clear();
     }
 
-    /// Collect all directory paths from a tree recursively (only loaded directories)
-    fn collect_all_dirs(nodes: &[FileTreeNode]) -> HashSet<PathBuf> {
-        let mut dirs = HashSet::new();
-        for node in nodes {
-            if let FileTreeNode::Directory { path, children, .. } = node {
-                dirs.insert(path.clone());
-                // Only recurse into loaded children
-                if let Some(child_nodes) = children {
-                    dirs.extend(Self::collect_all_dirs(child_nodes));
-                }
-            }
+    /// Keep the root and a bounded set of its expanded local subdirectories.
+    /// Open tabs are watched separately.
+    fn watch_directories(&self) -> Vec<PathBuf> {
+        let Some(root) = self.root.as_ref().filter(|root| !is_gvfs_path(root)) else {
+            return Vec::new();
+        };
+        let mut expanded: Vec<_> = self
+            .expanded_dirs
+            .iter()
+            .filter(|path| *path != root && path.starts_with(root) && !is_gvfs_path(path))
+            .collect();
+        if expanded.len() > Self::BULK_EXPANSION_LIMIT {
+            log::warn!(
+                "Explorer will auto-refresh only {} expanded directories. Use Refresh for the whole tree.",
+                Self::BULK_EXPANSION_LIMIT
+            );
+            expanded.sort_unstable();
+            expanded.truncate(Self::BULK_EXPANSION_LIMIT);
         }
-        dirs
+        std::iter::once(root)
+            .chain(expanded.into_iter().filter(|path| path.is_dir()))
+            .cloned()
+            .collect()
     }
 }
 
@@ -2743,13 +2809,19 @@ impl MarkdownApp {
             })
             .or_else(|| std::env::current_dir().ok());
 
-        if let Some(ref root) = explorer_root {
-            file_explorer.set_root(root.clone());
-        }
-
-        // Restore expanded directories (children will lazy-load on first render)
+        // Bound the expansion set before the background scan or watcher sees it.
         if let Some(expanded) = persisted.expanded_dirs {
-            file_explorer.expanded_dirs = expanded.into_iter().collect();
+            if file_explorer.restore_expansion(expanded) {
+                let message = format!(
+                    "Explorer restored only the first {} saved expanded directories.",
+                    FileExplorer::BULK_EXPANSION_LIMIT
+                );
+                log::warn!("{message}");
+                startup_error.get_or_insert(message);
+            }
+        }
+        if let Some(root) = explorer_root {
+            file_explorer.set_root(root);
         }
 
         #[cfg(feature = "mcp")]
@@ -3151,30 +3223,9 @@ impl MarkdownApp {
         // Partition tab paths into local (inotify) and GVFS (poll)
         let (gvfs_paths, local_paths): (Vec<_>, Vec<_>) =
             tab_paths.iter().partition(|p| is_gvfs_path(p));
-        let explorer_is_gvfs = explorer_root.as_ref().is_some_and(|r| is_gvfs_path(r));
-        // Explorer root only watched via inotify (local) — GVFS explorer roots are
-        // skipped to avoid costly recursive polling over SFTP
-        let has_local = !local_paths.is_empty() || (explorer_root.is_some() && !explorer_is_gvfs);
+        let explorer_dirs = self.file_explorer.watch_directories();
+        let has_local = !local_paths.is_empty() || !explorer_dirs.is_empty();
         let has_gvfs = !gvfs_paths.is_empty();
-
-        // Non-recursive: mirror the lazy explorer tree. Watching the whole root
-        // subtree recursively walks every directory on the main thread at startup
-        // (~6s hang on /home/ahmet, ~455k dirs). We only need change events for
-        // the directories the user can actually see: the root plus each expanded
-        // directory. GVFS explorer roots stay unwatched (costly over SFTP).
-        let mut explorer_dirs: Vec<PathBuf> = Vec::new();
-        if let Some(ref root) = explorer_root {
-            if !explorer_is_gvfs {
-                explorer_dirs.push(root.clone());
-                explorer_dirs.extend(
-                    self.file_explorer
-                        .expanded_dirs
-                        .iter()
-                        .filter(|d| !is_gvfs_path(d) && d.is_dir())
-                        .cloned(),
-                );
-            }
-        }
 
         // Both debouncers send to the same channel
         let (tx, debouncer_rx) = mpsc::channel();
@@ -3366,28 +3417,17 @@ impl MarkdownApp {
             return;
         }
 
-        // Desired set: root + each expanded dir (local, still existing).
-        let mut desired: HashSet<PathBuf> = HashSet::new();
-        if let Some(root) = &self.file_explorer.root {
-            if !is_gvfs_path(root) {
-                desired.insert(root.clone());
-            }
-        }
-        for d in &self.file_explorer.expanded_dirs {
-            if !is_gvfs_path(d) && d.is_dir() {
-                desired.insert(d.clone());
-            }
-        }
+        let desired: HashSet<_> = self.file_explorer.watch_directories().into_iter().collect();
 
         if let Some(fw) = &mut self.watcher {
             if let Some(w) = fw.inotify_watcher() {
+                for path in self.watched_explorer_dirs.difference(&desired) {
+                    let _ = w.unwatch(path);
+                }
                 for path in desired.difference(&self.watched_explorer_dirs) {
                     if let Err(e) = w.watch(path, notify::RecursiveMode::NonRecursive) {
                         log::error!("Failed to watch explorer dir {:?}: {}", path, e);
                     }
-                }
-                for path in self.watched_explorer_dirs.difference(&desired) {
-                    let _ = w.unwatch(path);
                 }
             }
         }
@@ -4627,7 +4667,13 @@ impl MarkdownApp {
 
                 // Expand/collapse/refresh buttons - OUTSIDE ScrollArea
                 ui.horizontal(|ui| {
-                    let expand_btn = ui.small_button("⊞").on_hover_text("Expand all directories");
+                    let expand_btn = ui
+                        .add_enabled(
+                            self.file_explorer.root.is_some()
+                                && self.file_explorer.pending_scan.is_none(),
+                            egui::Button::new("⊞").small(),
+                        )
+                        .on_hover_text("Expand all directories");
                     #[cfg(feature = "mcp")]
                     self.mcp_bridge.register_widget(
                         "Explorer: Expand All",
@@ -4635,9 +4681,8 @@ impl MarkdownApp {
                         &expand_btn,
                         None,
                     );
-                    if expand_btn.clicked() {
-                        self.file_explorer.expand_all();
-                        self.reconcile_explorer_watches();
+                    if expand_btn.clicked() && !self.file_explorer.expand_all() {
+                        self.error_message = Some("Unable to start expanding directories.".into());
                     }
 
                     let collapse_btn = ui
@@ -5619,8 +5664,15 @@ impl eframe::App for MarkdownApp {
 
         // Poll for asynchronous Explorer root scan completion.
         if self.file_explorer.pending_scan.is_some() {
-            if self.file_explorer.poll_pending_scan() {
+            if let Some(truncated) = self.file_explorer.poll_pending_scan() {
                 log::info!("Explorer directory scan completed");
+                if truncated {
+                    self.error_message = Some(format!(
+                        "Expand All stopped after {} directories. You can expand more individually.",
+                        FileExplorer::BULK_EXPANSION_LIMIT
+                    ));
+                }
+                self.reconcile_explorer_watches();
             }
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -7997,6 +8049,112 @@ mod tests {
         assert_eq!(next_watcher_retry(3), None);
         assert_eq!(next_watcher_retry(u32::MAX), None);
     }
+
+    #[test]
+    fn expand_all_leaves_directories_beyond_the_budget_unloaded() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-wide-explorer-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let limit = FileExplorer::BULK_EXPANSION_LIMIT;
+        for i in 0..=limit {
+            fs::create_dir_all(root.join(format!("dir-{i:04}"))).unwrap();
+        }
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+
+        assert!(explorer.expand_all());
+        assert!(explorer.expanded_dirs.is_empty());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let truncated = loop {
+            if let Some(truncated) = explorer.poll_pending_scan() {
+                break truncated;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background expansion did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let last_path = root.join(format!("dir-{limit:04}"));
+        let beyond_budget = explorer.get_children(&last_path).is_none();
+        let bulk_count = explorer.expanded_dirs.len();
+        explorer.toggle_expanded(&last_path);
+        explorer
+            .expanded_dirs
+            .insert(root.with_extension("old-root"));
+        let watches = explorer.watch_directories();
+        fs::remove_dir_all(root).unwrap();
+
+        assert!(truncated);
+        assert_eq!(bulk_count, limit);
+        assert!(beyond_budget);
+        assert!(explorer.is_expanded(&last_path));
+        assert!(explorer.get_children(&last_path).is_some());
+        assert_eq!(watches.len(), limit + 1);
+        assert!(!watches.contains(&last_path));
+    }
+
+    #[test]
+    fn saved_expansion_is_bounded_and_order_independent() {
+        let limit = FileExplorer::BULK_EXPANSION_LIMIT;
+        let parent = PathBuf::from("root").join("z-parent");
+        let child = parent.join("child");
+        let mut paths = (0..limit)
+            .map(|i| {
+                PathBuf::from("root")
+                    .join("a-parent")
+                    .join(format!("dir-{i:04}"))
+            })
+            .collect::<Vec<_>>();
+        paths.extend([parent.clone(), child.clone()]);
+        let mut explorer = FileExplorer::default();
+
+        assert!(explorer.restore_expansion(paths.clone()));
+        assert_eq!(explorer.expanded_dirs.len(), limit);
+        assert!(explorer.is_expanded(&parent));
+        let first = explorer.expanded_dirs.clone();
+        paths.reverse();
+        assert!(explorer.restore_expansion(paths));
+        assert_eq!(explorer.expanded_dirs, first);
+
+        assert!(!explorer.restore_expansion(vec![child.clone(), parent.clone()]));
+        assert_eq!(explorer.expanded_dirs, HashSet::from([parent, child]));
+    }
+
+    #[test]
+    fn collapse_all_discards_a_pending_bulk_expansion() {
+        let root = PathBuf::from("root");
+        let expanded = HashSet::from([root.join("docs")]);
+        let (tx, rx) = mpsc::channel();
+        tx.send(ExplorerScanResult {
+            root: root.clone(),
+            sort_order: SortOrder::NameAsc,
+            tree: Vec::new(),
+            bulk_expansion: Some((expanded.clone(), false)),
+        })
+        .unwrap();
+        let mut explorer = FileExplorer {
+            root: Some(root),
+            expanded_dirs: expanded,
+            pending_scan: Some(PendingExplorerScan {
+                receiver: rx,
+                expands_all: true,
+                discarded: false,
+            }),
+            ..Default::default()
+        };
+
+        explorer.collapse_all();
+
+        assert_eq!(explorer.poll_pending_scan(), None);
+        assert!(explorer.pending_scan.is_none());
+        assert!(explorer.expanded_dirs.is_empty());
+    }
+
     #[test]
     fn asynchronous_explorer_result_restores_expanded_children() {
         let root = std::env::temp_dir().join(format!(
@@ -8013,16 +8171,21 @@ mod tests {
             root: root.clone(),
             sort_order: SortOrder::NameAsc,
             tree: FileExplorer::scan_directory_shallow(&root, SortOrder::NameAsc),
+            bulk_expansion: None,
         })
         .unwrap();
         let mut explorer = FileExplorer {
             root: Some(root.clone()),
             expanded_dirs: HashSet::from([expanded.clone()]),
-            pending_scan: Some(rx),
+            pending_scan: Some(PendingExplorerScan {
+                receiver: rx,
+                expands_all: false,
+                discarded: false,
+            }),
             ..Default::default()
         };
 
-        assert!(explorer.poll_pending_scan());
+        assert_eq!(explorer.poll_pending_scan(), Some(false));
         assert!(explorer
             .get_children(&expanded)
             .is_some_and(|children| children.iter().any(|node| node.name() == "guide.md")));
