@@ -4,18 +4,23 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-11-25
+
+Remote images can be loaded automatically, asked for per document or blocked, Expand All no longer freezes the window on large folder trees, the Explorer stays light on large trees, and jumping to a heading near the end of a large document shows it.
+
 ### Added
-- **View → Remote Images controls whether images are fetched from the network (#289, requested by [@zHd4](https://github.com/zHd4)).** Opening a document loads every `http://` and `https://` image in it, which tells the image servers your IP address and when you opened the document. *Load automatically* keeps that behavior and stays the default, so README badges keep showing. *Ask per document* shows a placeholder for each remote image and a bar to load them for that document (or always); *Block* shows placeholders only. Local and embedded images always load.
+- **View → Remote Images controls whether images are fetched from the network (#289, requested by [@zHd4](https://github.com/zHd4), #292).** Opening a document loads every `http://` and `https://` image in it, which tells the image servers your IP address and when you opened the document. *Load automatically* keeps that behavior and stays the default, so README badges keep showing. *Ask per document* shows a placeholder for each remote image and a bar to load them for that document (or always); *Block* shows placeholders only. Local and embedded images always load.
 
 ### Fixed
-- **Jumping to a heading near the end of a large document shows the heading.** After an outline click or a `#heading` link, the view landed at the heading and then slid a few hundred pixels back up, leaving the heading below the window: the jump asked for a position past the end of the scroll range, and the scroll area kept moving after it was pulled back. Jumps now stop at the end of the document.
-- **Heading positions stay exact far down very large documents.** md-viewer measured a document by laying it out where it sits on the page, millions of pixels down, where the numbers lose precision; with fractional display scaling a heading 2.5 million pixels down could be recorded about 175 pixels off. Measuring now happens near the top of the screen, in pieces, so positions stay exact at any depth.
+- **Jumping to a heading near the end of a large document shows the heading (#294).** After an outline click or a `#heading` link, the view landed at the heading and then slid a few hundred pixels back up, leaving the heading below the window: the jump asked for a position past the end of the scroll range, and the scroll area kept moving after it was pulled back. Jumps now stop at the end of the document.
+- **Heading positions stay exact far down very large documents (#294).** md-viewer measured a document by laying it out where it sits on the page, millions of pixels down, where the numbers lose precision; with fractional display scaling a heading 2.5 million pixels down could be recorded about 175 pixels off. Measuring now happens near the top of the screen, in pieces, so positions stay exact at any depth.
 - **Expand All on a large folder tree no longer freezes the window (#287, reported and fixed by [@RichardCao](https://github.com/RichardCao) in #288).** Expand All read and watched every folder below the root on the UI thread, and the expanded folders were saved and restored at every start: on a tree of 21,500 folders the window stopped responding for nearly two minutes and then used a full CPU core while idle, again after each restart. Expand All now runs in the background and stops at 256 folders, or before the Explorer would list more than 2,048 rows, with a notice; a restart restores at most 256 saved folders, and only those are watched. Expand All opens folders level by level, so the top folders open first, and when a saved list is cut, folders under the current root are kept before those of roots opened earlier.
 
 ### Performance
-- **The Explorer draws only the rows in view.** It used to lay out every listed file and folder on every frame, so moving the pointer over a large tree cost CPU for the whole tree: about a quarter of a core for 1,024 folders, three quarters for a restored tree of 6,400 rows. It now costs 13–18 % in both cases.
+- **The Explorer draws only the rows in view (#293).** It used to lay out every listed file and folder on every frame, so moving the pointer over a large tree cost CPU for the whole tree: about a quarter of a core for 1,024 folders, three quarters for a restored tree of 6,400 rows. It now costs 13–18 % in both cases.
 
 ### Internal
+- **The vendored renderer moves to 0.32.0**, a minor bump because `MeasureFrontier::row_top` and `min_rect_bottom` are now `f64` (#294). It also carries `CommonMarkViewer::load_remote_images`, `CommonMarkCache::blocked_remote_image_count` and `take_remote_images_request` (#292).
 - **The release workflow starts the snap before uploading it.** It runs the built snap in its core22 base on a virtual display, with fonts and without, and stops the upload if md-viewer exits, panics or draws nothing. The two snap regressions that reached users so far (#272, #279) built cleanly and failed only when started.
 
 ## [0.3.12] - 2026-11-24
