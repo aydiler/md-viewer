@@ -39,9 +39,10 @@ pub struct ScrollableCache {
     /// measured `page_size` — the document extent came out wrong and blocks
     /// such as tables rendered narrower and horizontally offset.
     pub content_geometry: Option<ContentGeometry>,
-    /// Scroll-overshoot clamp found after last frame's paint, applied on the
-    /// next frame through the ScrollArea's offset builder (egui 0.37 keeps
-    /// `scroll_area::State::offset` private).
+    /// Offset to apply on the next frame through the ScrollArea's offset
+    /// builder (egui 0.37 keeps `scroll_area::State::offset` private): the
+    /// scroll-overshoot clamp found after last frame's paint, or an offset
+    /// requested on a bootstrap frame, which waits for the measured extent.
     pub pending_clamp: Option<f32>,
     /// Extent floor in content coordinates: the deepest painted bottom (plus
     /// trailing breathing room) observed from a bottom-reaching slice that was
@@ -71,11 +72,15 @@ pub struct MeasureFrontier {
     /// Content y of the top of egui's cursor row at the frontier. A resumed
     /// run starts on this row: the next block's leading newline lands on it,
     /// as it does in a full bootstrap.
-    pub row_top: f32,
+    ///
+    /// `f64`, like `min_rect_bottom`: every resumed run adds its own extent
+    /// to this anchor, and an `f32` holds only quarter points two million
+    /// points down, so the rounding added up chunk after chunk (devlog 122).
+    pub row_top: f64,
     /// Content y of the bottom of the laid-out content (`Ui::min_rect`) at
     /// the frontier. egui starts a wrapped row below it, so the resumed run's
     /// child must reach as far down as the bootstrap's ui did.
-    pub min_rect_bottom: f32,
+    pub min_rect_bottom: f64,
 }
 
 /// Layout geometry of the content column, captured at bootstrap.
