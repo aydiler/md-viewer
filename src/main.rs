@@ -963,6 +963,15 @@ impl FileExplorer {
 
     /// Refresh the file tree in the background.
     fn refresh(&mut self) {
+        // A pending Expand All rescans the same root and replaces the tree
+        // when it lands; a plain scan started now would drop it.
+        if self
+            .pending_scan
+            .as_ref()
+            .is_some_and(|scan| scan.expands_all && !scan.discarded)
+        {
+            return;
+        }
         if let Some(root) = &self.root.clone() {
             if self.start_root_scan(root.clone(), false) {
                 return;
@@ -1242,29 +1251,29 @@ impl FileExplorer {
         self.expanded_dirs.clear();
     }
 
-    /// Keep the root and a bounded set of its expanded local subdirectories.
-    /// Open tabs are watched separately.
-    fn watch_directories(&self) -> Vec<PathBuf> {
+    /// Keep the root and a bounded set of its expanded local subdirectories,
+    /// and say whether the budget cut the set. Open tabs are watched
+    /// separately.
+    fn watch_directories(&self) -> (Vec<PathBuf>, bool) {
         let Some(root) = self.root.as_ref().filter(|root| !is_gvfs_path(root)) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
+        // Drop folders that no longer exist before cutting, so they cannot
+        // take slots from ones that do.
         let mut expanded: Vec<_> = self
             .expanded_dirs
             .iter()
-            .filter(|path| *path != root && path.starts_with(root) && !is_gvfs_path(path))
+            .filter(|path| {
+                *path != root && path.starts_with(root) && !is_gvfs_path(path) && path.is_dir()
+            })
             .collect();
-        if expanded.len() > Self::BULK_EXPANSION_LIMIT {
-            log::warn!(
-                "Explorer will auto-refresh only {} expanded directories. Use Refresh for the whole tree.",
-                Self::BULK_EXPANSION_LIMIT
-            );
+        let cut = expanded.len() > Self::BULK_EXPANSION_LIMIT;
+        if cut {
             expanded.sort_unstable();
             expanded.truncate(Self::BULK_EXPANSION_LIMIT);
         }
-        std::iter::once(root)
-            .chain(expanded.into_iter().filter(|path| path.is_dir()))
-            .cloned()
-            .collect()
+        let dirs = std::iter::once(root).chain(expanded).cloned().collect();
+        (dirs, cut)
     }
 }
 
@@ -2642,6 +2651,9 @@ struct MarkdownApp {
     // doesn't recursively walk the whole root subtree (issue: ~6s hang on a
     // huge home directory).
     watched_explorer_dirs: HashSet<PathBuf>,
+    /// Whether the last explorer watch set was cut to the budget, so the
+    /// warning is logged once when it starts rather than on every reconcile.
+    explorer_watches_cut: bool,
     // Tab being hovered for close button
     hovered_tab: Option<usize>,
     // File explorer state
@@ -2922,6 +2934,7 @@ impl MarkdownApp {
             watcher_retry_count: 0,
             watched_paths: HashSet::new(),
             watched_explorer_dirs: HashSet::new(),
+            explorer_watches_cut: false,
             hovered_tab: None,
             file_explorer,
             show_explorer,
@@ -3268,7 +3281,8 @@ impl MarkdownApp {
         // Partition tab paths into local (inotify) and GVFS (poll)
         let (gvfs_paths, local_paths): (Vec<_>, Vec<_>) =
             tab_paths.iter().partition(|p| is_gvfs_path(p));
-        let explorer_dirs = self.file_explorer.watch_directories();
+        let (explorer_dirs, watch_cut) = self.file_explorer.watch_directories();
+        self.note_explorer_watch_cut(watch_cut);
         let has_local = !local_paths.is_empty() || !explorer_dirs.is_empty();
         let has_gvfs = !gvfs_paths.is_empty();
 
@@ -3453,6 +3467,18 @@ impl MarkdownApp {
         self.watched_paths = current_paths;
     }
 
+    /// Log once when the explorer's watch set starts being cut to the budget,
+    /// not on every reconcile while it stays cut.
+    fn note_explorer_watch_cut(&mut self, cut: bool) {
+        if cut && !self.explorer_watches_cut {
+            log::warn!(
+                "Explorer will auto-refresh only {} expanded directories. Use Refresh for the whole tree.",
+                FileExplorer::BULK_EXPANSION_LIMIT
+            );
+        }
+        self.explorer_watches_cut = cut;
+    }
+
     /// Reconcile the non-recursive explorer-directory watches (root + expanded
     /// dirs) against the live watcher after the expanded set changes. Mirrors
     /// `update_watched_paths`'s incremental diff so expand/collapse doesn't tear
@@ -3462,7 +3488,9 @@ impl MarkdownApp {
             return;
         }
 
-        let desired: HashSet<_> = self.file_explorer.watch_directories().into_iter().collect();
+        let (dirs, watch_cut) = self.file_explorer.watch_directories();
+        self.note_explorer_watch_cut(watch_cut);
+        let desired: HashSet<_> = dirs.into_iter().collect();
 
         if let Some(fw) = &mut self.watcher {
             if let Some(w) = fw.inotify_watcher() {
@@ -8132,7 +8160,7 @@ mod tests {
         explorer
             .expanded_dirs
             .insert(root.with_extension("old-root"));
-        let watches = explorer.watch_directories();
+        let (watches, _) = explorer.watch_directories();
         fs::remove_dir_all(root).unwrap();
 
         assert!(truncated);
@@ -8142,6 +8170,69 @@ mod tests {
         assert!(explorer.get_children(&last_path).is_some());
         assert_eq!(watches.len(), limit + 1);
         assert!(!watches.contains(&last_path));
+    }
+
+    #[test]
+    fn refresh_keeps_a_pending_expand_all() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-refresh-expand-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        for i in 0..20 {
+            fs::create_dir_all(root.join(format!("dir-{i:02}"))).unwrap();
+        }
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+
+        assert!(explorer.expand_all());
+        // Refresh while the Expand All scan may still be running.
+        explorer.refresh();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while explorer.pending_scan.is_some() {
+            explorer.poll_pending_scan();
+            assert!(Instant::now() < deadline, "scan did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let expanded = explorer.expanded_dirs.len();
+        fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(expanded, 20, "Refresh dropped the pending Expand All");
+    }
+
+    #[test]
+    fn watch_budget_skips_missing_folders_before_cutting() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-watch-missing-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let limit = FileExplorer::BULK_EXPANSION_LIMIT;
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        for i in 0..limit + 4 {
+            let dir = root.join(format!("z-dir-{i:04}"));
+            fs::create_dir_all(&dir).unwrap();
+            explorer.expanded_dirs.insert(dir);
+        }
+        // Deleted folders that sort before the existing ones.
+        for i in 0..limit {
+            explorer
+                .expanded_dirs
+                .insert(root.join(format!("a-gone-{i:04}")));
+        }
+
+        let (watches, cut) = explorer.watch_directories();
+        let missing = watches.iter().filter(|path| !path.is_dir()).count();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert!(cut);
+        assert_eq!(missing, 0);
+        assert_eq!(watches.len(), limit + 1, "root plus a full budget");
     }
 
     #[test]
