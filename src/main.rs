@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -911,7 +911,7 @@ impl FileExplorer {
                     None
                 } else {
                     let mut expanded = HashSet::new();
-                    let truncated = Self::expand_children(&mut tree, sort_order, 0, &mut expanded);
+                    let truncated = Self::expand_children(&mut tree, sort_order, &mut expanded);
                     Some((expanded, truncated))
                 };
                 let _ = tx.send(ExplorerScanResult {
@@ -1133,16 +1133,26 @@ impl FileExplorer {
     // shallow tree can otherwise generate thousands of reads and watches.
     const MAX_EXPAND_DEPTH: usize = 10;
     const BULK_EXPANSION_LIMIT: usize = 256;
+    /// Expand All also stops before the Explorer would list more rows than
+    /// this. The Explorer lays out every row each frame: in an optimized
+    /// build, 6,400 rows took 72 % of a core while the pointer moved over
+    /// it, against 22 % for the 1,024 rows of the unexpanded tree.
+    const BULK_ROW_LIMIT: usize = 2048;
 
     /// Restore a saved expansion set, returning whether it was truncated.
-    fn restore_expansion(&mut self, mut paths: Vec<PathBuf>) -> bool {
+    ///
+    /// The saved set can hold folders from roots opened earlier (`set_root`
+    /// keeps them). When it has to be cut, folders under `root` go first, so
+    /// earlier roots cannot crowd out the one being shown.
+    fn restore_expansion(&mut self, mut paths: Vec<PathBuf>, root: Option<&Path>) -> bool {
         if paths.len() > Self::BULK_EXPANSION_LIMIT {
-            // Keep parents before descendants and break ties by path so the
-            // result is independent of the saved HashSet iteration order.
+            let outside = |path: &PathBuf| root.is_some_and(|root| !path.starts_with(root));
+            // Then parents before descendants, with ties broken by path, so
+            // the result is independent of the saved HashSet iteration order.
             paths.sort_unstable_by(|a, b| {
-                a.components()
-                    .count()
-                    .cmp(&b.components().count())
+                outside(a)
+                    .cmp(&outside(b))
+                    .then_with(|| a.components().count().cmp(&b.components().count()))
                     .then_with(|| a.cmp(b))
             });
             paths.dedup();
@@ -1166,29 +1176,64 @@ impl FileExplorer {
         }
     }
 
+    /// Expand directories level by level until the folder or row budget is
+    /// spent, so a deep first subdirectory cannot take every slot from its
+    /// siblings. Returns whether a budget cut the expansion short.
     fn expand_children(
         nodes: &mut [FileTreeNode],
         sort_order: SortOrder,
-        depth: usize,
         expanded: &mut HashSet<PathBuf>,
     ) -> bool {
-        if depth >= Self::MAX_EXPAND_DEPTH {
-            return false;
+        // Breadth-first over paths, then graft the scanned levels into the
+        // tree; a queue of `&mut` nodes would need the whole tree borrowed.
+        let mut queue: VecDeque<(PathBuf, usize)> = nodes
+            .iter()
+            .filter_map(|node| match node {
+                FileTreeNode::Directory { path, .. } => Some((path.clone(), 0)),
+                FileTreeNode::File { .. } => None,
+            })
+            .collect();
+        let mut scanned: HashMap<PathBuf, Vec<FileTreeNode>> = HashMap::new();
+        let mut truncated = false;
+        // The top level is listed whether or not anything is expanded.
+        let mut rows = nodes.len();
+        while let Some((path, depth)) = queue.pop_front() {
+            if expanded.len() == Self::BULK_EXPANSION_LIMIT {
+                truncated = true;
+                break;
+            }
+            let children = Self::scan_directory_shallow(&path, sort_order);
+            if rows + children.len() > Self::BULK_ROW_LIMIT {
+                truncated = true;
+                break;
+            }
+            rows += children.len();
+            if depth + 1 < Self::MAX_EXPAND_DEPTH {
+                queue.extend(children.iter().filter_map(|node| match node {
+                    FileTreeNode::Directory { path, .. } => Some((path.clone(), depth + 1)),
+                    FileTreeNode::File { .. } => None,
+                }));
+            }
+            expanded.insert(path.clone());
+            scanned.insert(path, children);
         }
+        Self::graft_children(nodes, &mut scanned);
+        truncated
+    }
+
+    /// Attach scanned child lists to their directories, depth first.
+    fn graft_children(
+        nodes: &mut [FileTreeNode],
+        scanned: &mut HashMap<PathBuf, Vec<FileTreeNode>>,
+    ) {
         for node in nodes {
             if let FileTreeNode::Directory { path, children, .. } = node {
-                if expanded.len() == Self::BULK_EXPANSION_LIMIT {
-                    return true;
-                }
-                expanded.insert(path.clone());
-                let children =
-                    children.get_or_insert_with(|| Self::scan_directory_shallow(path, sort_order));
-                if Self::expand_children(children, sort_order, depth + 1, expanded) {
-                    return true;
+                if let Some(loaded) = scanned.remove(path) {
+                    let children = children.get_or_insert(loaded);
+                    Self::graft_children(children, scanned);
                 }
             }
         }
-        false
     }
 
     /// Collapse all directories in the tree
@@ -2811,7 +2856,7 @@ impl MarkdownApp {
 
         // Bound the expansion set before the background scan or watcher sees it.
         if let Some(expanded) = persisted.expanded_dirs {
-            if file_explorer.restore_expansion(expanded) {
+            if file_explorer.restore_expansion(expanded, explorer_root.as_deref()) {
                 let message = format!(
                     "Explorer restored only the first {} saved expanded directories.",
                     FileExplorer::BULK_EXPANSION_LIMIT
@@ -5667,9 +5712,10 @@ impl eframe::App for MarkdownApp {
             if let Some(truncated) = self.file_explorer.poll_pending_scan() {
                 log::info!("Explorer directory scan completed");
                 if truncated {
+                    // The folder or the row budget can be the one that ran out.
                     self.error_message = Some(format!(
                         "Expand All stopped after {} directories. You can expand more individually.",
-                        FileExplorer::BULK_EXPANSION_LIMIT
+                        self.file_explorer.expanded_dirs.len()
                     ));
                 }
                 self.reconcile_explorer_watches();
@@ -8113,16 +8159,152 @@ mod tests {
         paths.extend([parent.clone(), child.clone()]);
         let mut explorer = FileExplorer::default();
 
-        assert!(explorer.restore_expansion(paths.clone()));
+        assert!(explorer.restore_expansion(paths.clone(), None));
         assert_eq!(explorer.expanded_dirs.len(), limit);
         assert!(explorer.is_expanded(&parent));
         let first = explorer.expanded_dirs.clone();
         paths.reverse();
-        assert!(explorer.restore_expansion(paths));
+        assert!(explorer.restore_expansion(paths, None));
         assert_eq!(explorer.expanded_dirs, first);
 
-        assert!(!explorer.restore_expansion(vec![child.clone(), parent.clone()]));
+        assert!(!explorer.restore_expansion(vec![child.clone(), parent.clone()], None));
         assert_eq!(explorer.expanded_dirs, HashSet::from([parent, child]));
+    }
+
+    #[test]
+    fn saved_expansion_keeps_the_current_root_when_it_is_cut() {
+        let limit = FileExplorer::BULK_EXPANSION_LIMIT;
+        // A root opened earlier, at the same depth and sorting first: without
+        // a preference its paths take every slot.
+        let old_root = PathBuf::from("a-old-root");
+        let current = PathBuf::from("b-current-root");
+        let mut paths: Vec<_> = (0..limit)
+            .map(|i| old_root.join(format!("o{i:04}")))
+            .collect();
+        paths.extend((0..limit).map(|i| current.join(format!("d{i:04}"))));
+        let mut explorer = FileExplorer::default();
+
+        assert!(explorer.restore_expansion(paths, Some(&current)));
+        assert_eq!(explorer.expanded_dirs.len(), limit);
+        let outside: Vec<_> = explorer
+            .expanded_dirs
+            .iter()
+            .filter(|path| !path.starts_with(&current))
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "kept paths outside the root: {outside:?}"
+        );
+
+        // Under the budget nothing is dropped, so returning to the earlier
+        // root still finds its folders open.
+        let kept = vec![old_root.join("o0000"), current.join("d0000")];
+        assert!(!explorer.restore_expansion(kept.clone(), Some(&current)));
+        assert_eq!(explorer.expanded_dirs, HashSet::from_iter(kept));
+    }
+
+    #[test]
+    fn expand_all_stops_before_the_explorer_lists_too_many_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-rows-explorer-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        // Few enough folders for the directory budget, but each lists 30
+        // entries, so expanding them all would list far more rows.
+        let (folders, entries) = (100, 30);
+        for i in 0..folders {
+            for j in 0..entries {
+                fs::create_dir_all(root.join(format!("d{i:03}")).join(format!("e{j:02}"))).unwrap();
+            }
+        }
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+
+        assert!(explorer.expand_all());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let truncated = loop {
+            if let Some(truncated) = explorer.poll_pending_scan() {
+                break truncated;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background expansion did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let expanded = explorer.expanded_dirs.clone();
+        fs::remove_dir_all(&root).unwrap();
+
+        // The top level is always listed; each expanded folder adds its entries.
+        let fit = (FileExplorer::BULK_ROW_LIMIT - folders) / entries;
+        assert!(truncated);
+        assert_eq!(expanded.len(), fit);
+        let rows = folders + expanded.len() * entries;
+        assert!(rows <= FileExplorer::BULK_ROW_LIMIT, "{rows} rows listed");
+        // Still level by level and in order: the first `fit` folders.
+        for i in 0..fit {
+            assert!(expanded.contains(&root.join(format!("d{i:03}"))));
+        }
+    }
+
+    #[test]
+    fn expand_all_opens_shallow_directories_before_deep_ones() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-deep-explorer-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        // The first directory in name order holds more directories than the
+        // budget; its siblings each hold one.
+        for i in 0..30 {
+            for j in 0..10 {
+                fs::create_dir_all(
+                    root.join("a")
+                        .join(format!("x{i:02}"))
+                        .join(format!("y{j:02}")),
+                )
+                .unwrap();
+            }
+        }
+        let siblings: Vec<PathBuf> = ('b'..='z').map(|c| root.join(c.to_string())).collect();
+        for sibling in &siblings {
+            fs::create_dir_all(sibling.join("sub")).unwrap();
+        }
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+
+        assert!(explorer.expand_all());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let truncated = loop {
+            if let Some(truncated) = explorer.poll_pending_scan() {
+                break truncated;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background expansion did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let expanded = explorer.expanded_dirs.clone();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert!(truncated);
+        assert_eq!(expanded.len(), FileExplorer::BULK_EXPANSION_LIMIT);
+        let collapsed: Vec<_> = siblings
+            .iter()
+            .flat_map(|sibling| [sibling.clone(), sibling.join("sub")])
+            .chain((0..30).map(|i| root.join("a").join(format!("x{i:02}"))))
+            .filter(|path| !expanded.contains(path))
+            .collect();
+        assert!(
+            collapsed.is_empty(),
+            "shallow directories left collapsed: {collapsed:?}"
+        );
     }
 
     #[test]

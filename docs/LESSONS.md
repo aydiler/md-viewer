@@ -394,6 +394,8 @@ if watcher_error && recovery_count < 3 {
 **General lesson:** `notify`'s `RecursiveMode::Recursive` is O(directories) synchronous work at `watch()` time — never call it on an arbitrarily large/user-chosen root on a UI-blocking path. Watch only what's visible, or watch off-thread *and* bound the set.
 **Files:** `src/main.rs` (`start_watching`, `reconcile_explorer_watches`, `watched_explorer_dirs`), `docs/devlog/041-explorer-watch-nonrecursive.md`
 
+**The same mistake came back through Expand All (#287).** It read and watched every folder under the root on the UI thread, and the expanded set was saved, so each start rebuilt it: 21,506 watches, a 115 s freeze, then a full core while idle. #288 bounds Expand All and the restore to 256 folders and scans in the background. **A budget needs an order:** spent depth first, one deep subfolder took all 256 and left its siblings closed, and a saved list cut by depth and name alone kept folders of a root opened earlier instead of the current one. Spend it level by level, current root first (devlog 118). **And count what costs:** folders bound reads and watches, but the Explorer lays out every listed row each frame. Level by level, 256 folders listed 6,400 rows on a wide tree and took 72 % of a core during pointer motion (22 % unexpanded), so Expand All also stops at 2,048 rows. That difference only showed in an optimized build against an unexpanded control; the debug build saturated either way.
+
 ---
 
 ## Path Resolution
@@ -468,6 +470,12 @@ let target_path = target_path.canonicalize()?;  // Resolves ../
     └── feature-x/   # Feature branches
 ```
 **Benefit:** Each worktree is fully isolated with own working directory
+
+### Sharing one `CARGO_TARGET_DIR` between worktrees can skip the rebuild
+**Context:** Reviewing #288, the PR worktree was built into `worktrees/main/target` to reuse the dependencies. Its "build" finished in 0.6 s with no `Compiling md-viewer` line, and the binary copied out as the PR build was main's.
+**Root cause:** cargo records dep-info paths relative to the package, so after building main it checked the PR worktree's `src/main.rs` against the same fingerprint by mtime. The worktree had been checked out before main's build, so its sources looked older and nothing was rebuilt. Its test run passed too, with main's test list.
+**Fix:** `touch src/main.rs` in the worktree before every build into the shared directory, and check the binary for a string only that branch has (`strings mdv-pr | grep -c '<new message>'`). A separate target directory avoids it at the cost of a full dependency build.
+**Files:** N/A (build discipline), `docs/devlog/118-explorer-expand-order.md`
 
 ---
 
@@ -551,6 +559,12 @@ ctx.request_repaint_after(Duration::from_millis(50)); // NOT request_repaint()
 **Explanation:** This is normal behavior during startup - not an actual error
 **Note:** The error can be ignored; it's just polling to detect when the app is ready
 **Files:** `~/egui-mcp/crates/egui-mcp-bridge/src/server.rs`
+
+### A modifier shortcut sent by `xdotool` is lost when the whole chord lands in one frame
+**Context:** Measuring #287's freeze with a responsiveness probe: click Expand All, press Ctrl+D, time until the theme flips.
+**Problem:** the probe never fired, on the fixed build as well. md-viewer's shortcuts check `i.modifiers.ctrl && i.key_pressed(Key::D)`, and `i.modifiers` is the state *after* all of the frame's events. `xdotool key ctrl+d` presses and releases within a few milliseconds, so on an idle window (one frame per 100 ms) Ctrl is often already up when the frame reads it. On a frozen window every queued event lands in the same frame, so the chord can never register: the probe fails on exactly the build it is there to measure.
+**Fix:** hold the modifier: `xdotool keydown ctrl; xdotool key --delay 100 d`, wait for the response, then `xdotool keyup ctrl`. Ctrl+Q worked with the fast form by luck of timing, which is what made the failure look like a broken shortcut.
+**Files:** N/A (test harness), `docs/devlog/118-explorer-expand-order.md`
 
 ---
 
