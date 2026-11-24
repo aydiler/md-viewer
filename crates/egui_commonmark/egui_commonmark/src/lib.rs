@@ -315,6 +315,18 @@ impl<'f> CommonMarkViewer<'f> {
         self
     }
 
+    /// Fetch images whose URI is `http://` or `https://`. On by default.
+    ///
+    /// When off, such an image is drawn as a small placeholder with its alt
+    /// text (or host) and nothing is requested from the network.
+    /// [`CommonMarkCache::blocked_remote_image_count`] counts the placeholders
+    /// and [`CommonMarkCache::take_remote_images_request`] reports a click on
+    /// one, so the caller can offer to load them.
+    pub fn load_remote_images(mut self, enabled: bool) -> Self {
+        self.options.load_remote_images = enabled;
+        self
+    }
+
     /// Parse a leading `---` block as YAML frontmatter and render it as a
     /// key/value table instead of as document content.
     ///

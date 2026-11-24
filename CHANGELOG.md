@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **View → Remote Images controls whether images are fetched from the network (#289, requested by [@zHd4](https://github.com/zHd4)).** Opening a document loads every `http://` and `https://` image in it, which tells the image servers your IP address and when you opened the document. *Load automatically* keeps that behavior and stays the default, so README badges keep showing. *Ask per document* shows a placeholder for each remote image and a bar to load them for that document (or always); *Block* shows placeholders only. Local and embedded images always load.
+
 ### Fixed
 - **Expand All on a large folder tree no longer freezes the window (#287, reported and fixed by [@RichardCao](https://github.com/RichardCao) in #288).** Expand All read and watched every folder below the root on the UI thread, and the expanded folders were saved and restored at every start: on a tree of 21,500 folders the window stopped responding for nearly two minutes and then used a full CPU core while idle, again after each restart. Expand All now runs in the background and stops at 256 folders, or before the Explorer would list more than 2,048 rows, with a notice; a restart restores at most 256 saved folders, and only those are watched. Expand All opens folders level by level, so the top folders open first, and when a saved list is cut, folders under the current root are kept before those of roots opened earlier.
 
