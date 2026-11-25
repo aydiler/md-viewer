@@ -4422,6 +4422,8 @@ impl MarkdownApp {
         let mut do_open_file = false;
         let mut do_open_folder = false;
         let mut open_path: Option<PathBuf> = None;
+        let mut remove_recent = None;
+        let mut clear_history = false;
         let mut toggle_show_all = false;
         let now = now_epoch_secs();
 
@@ -4480,13 +4482,16 @@ impl MarkdownApp {
                     ui.add_space(32.0);
                     // Center a fixed-width, left-aligned column for the recent list.
                     let avail = ui.available_width();
-                    let col_w = 560.0_f32.min((avail - 16.0).max(200.0));
+                    let col_w = (avail - 16.0).clamp(0.0, 560.0);
                     let margin = ((avail - col_w) / 2.0).max(0.0);
                     ui.horizontal(|ui| {
                         ui.add_space(margin);
                         ui.vertical(|ui| {
-                            ui.set_max_width(col_w);
-                            ui.label(egui::RichText::new("Recent Files").strong());
+                            ui.set_width(col_w);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong("Recent Files");
+                                clear_history = ui.small_button("Clear History").clicked();
+                            });
                             ui.add_space(2.0);
                             ui.separator();
                             for (entry, exists) in &recents {
@@ -4501,21 +4506,54 @@ impl MarkdownApp {
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default();
                                 let when = format_relative_time(entry.last_opened, now);
-                                ui.horizontal(|ui| {
-                                    let label = egui::RichText::new(name.as_str()).size(14.0);
-                                    let label = if *exists { label } else { label.weak() };
-                                    let resp = ui
-                                        .add_enabled(*exists, egui::Button::new(label).frame(false))
-                                        .on_hover_text(entry.path.to_string_lossy());
-                                    if resp.clicked() {
-                                        open_path = Some(entry.path.clone());
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(format!("{dir}   ·   {when}"))
-                                            .weak()
-                                            .small(),
-                                    );
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button("✕")
+                                            .on_hover_text("Remove from history")
+                                            .clicked()
+                                        {
+                                            remove_recent = Some(entry.path.clone());
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                // Keep long names out of the remove button's hit area.
+                                                ui.set_clip_rect(
+                                                    ui.clip_rect().intersect(ui.max_rect()),
+                                                );
+                                                let label =
+                                                    egui::RichText::new(name.as_str()).size(14.0);
+                                                let label =
+                                                    if *exists { label } else { label.weak() };
+                                                let resp = ui
+                                                    .add_enabled(
+                                                        *exists,
+                                                        egui::Button::new(label)
+                                                            .frame(false)
+                                                            .truncate(),
+                                                    )
+                                                    .on_hover_text(entry.path.to_string_lossy());
+                                                if resp.clicked() {
+                                                    open_path = Some(entry.path.clone());
+                                                }
+                                                if ui.available_width() > 0.0 {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(format!(
+                                                                "{dir}   ·   {when}"
+                                                            ))
+                                                            .weak()
+                                                            .small(),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    },
+                                );
                             }
                             if total_recent > RECENT_SHOWN {
                                 ui.add_space(6.0);
@@ -4534,6 +4572,12 @@ impl MarkdownApp {
             });
 
         // Deferred actions (run after the borrow on self.recent_files is released).
+        if clear_history {
+            self.recent_files.clear();
+            self.welcome_show_all = false;
+        } else if let Some(path) = remove_recent {
+            self.recent_files.retain(|entry| entry.path != path);
+        }
         if do_open_file {
             self.open_file_dialog();
         }
@@ -4889,12 +4933,14 @@ impl MarkdownApp {
             self.open_folder_dialog();
             return;
         }
-        if self.recent_folders.is_empty() {
-            return;
-        }
 
         ui.separator();
         ui.strong("Recent Folders");
+        if self.recent_folders.is_empty() {
+            ui.label(egui::RichText::new("No recent folders yet.").weak());
+            return;
+        }
+
         if ui.small_button("Clear History").clicked() {
             self.recent_folders.clear();
             return;
