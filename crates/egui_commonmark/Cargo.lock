@@ -1178,6 +1178,7 @@ dependencies = [
  "egui_extras",
  "merman",
  "mitex",
+ "mitex-spec-gen",
  "pulldown-cmark 0.13.0",
  "resvg",
  "syntect",

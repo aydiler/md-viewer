@@ -80,6 +80,8 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
 
 - **Right-to-left blocks (#108)**: when the cached events are parsed, `rtl_block_starts` records every top-level or blockquote paragraph/heading, list item (judged by its lead text) and table cell whose first strong character is right to left (and that holds no image, math, HTML, footnote reference or task checkbox). The renderer collects such a block's text and links instead of emitting a label per piece, then `render_rtl_block` draws it as one right-aligned, selectable galley and hit-tests clicks against the links' character ranges. An RTL list item reserves no marker slot on the left (`List::start_item(.., rtl)`); `render_rtl_item` puts the marker to the right of the text and indents nested items from the right. Table cells right-align within their column; column order is unchanged (devlogs 091, 092).
 
+- **Math (`$…$`, `$$…$$`)**: `render_math_formula` (renderer backend, `misc.rs`) converts LaTeX to Typst with `mitex::convert_math`, rewrites the few names Typst cannot take (`fix_mitex_names`), compiles `MITEX_PREAMBLE` plus the formula with typst's embedded fonts, and rasterizes it as an alpha mask in the theme's text colour, on a worker pool. The preamble defines the functions MiTeX's `standard.typ` would provide; `every_mitex_command_resolves` renders every command of MiTeX's spec (devlog 124).
+
 - **Global Allocator**: mimalloc for performance
 
 ## Key Libraries

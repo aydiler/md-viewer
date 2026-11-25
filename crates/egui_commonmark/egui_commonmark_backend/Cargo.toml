@@ -33,6 +33,11 @@ typst-render = { version = "0.14", optional = true }
 typst = { version = "0.14", optional = true }
 typst-kit = { version = "0.14", optional = true, default-features = false, features = ["fonts", "embed-fonts"] }
 
+[dev-dependencies]
+# MiTeX's default command spec, so a test can render every command it knows.
+# Already in the tree as mitex's own dependency.
+mitex-spec-gen = "0.2.4"
+
 [features]
 better_syntax_highlighting = ["dep:syntect"]
 embedded_image = ["dep:data-url"]

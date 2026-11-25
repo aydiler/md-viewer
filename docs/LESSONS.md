@@ -127,6 +127,19 @@ CommonMarkViewer::new()
 
 ---
 
+### Every MiTeX handler the preamble lacks breaks the whole formula
+**Context:** #298 and devlog 124. A formula with `\big` (#298), or with any of 124 other commands such as `\pmod` and `\phantom`, showed `unknown variable: <name>` in place of the formula.
+**Root cause:** `mitex::convert_math` emits a call for each command (`pmod(b)`). In the MiTeX Typst package the function lives in its `standard.typ` scope; md-viewer compiles with its own `MITEX_PREAMBLE`, so a function it leaves out is an unknown variable.
+**Fix:** port the handler from `standard.typ` into the preamble. `every_mitex_command_resolves` renders every command of `mitex_spec_gen::DEFAULT_SPEC`, so a mitex upgrade that adds commands fails it.
+**Traps:**
+- *The spec argument does not rename anything.* `convert_math(input, Some(spec))` parses with `spec` but takes command names from its built-in spec (mitex 0.2.4, `convert_inner`). A name no `#let` can define (`set` is a Typst keyword; `brace` is a Typst symbol and compiled to a stray `{`) has to be rewritten in the output: `fix_mitex_names`.
+- *A name can resolve to the wrong thing.* `\brace` passed every "does it compile" check while drawing the wrong formula. Check the rendering of a command whose name is also a Typst builtin.
+- *`stretch` needs an extensible glyph.* New Computer Modern Math stretches `→` but not `⟶`, and a formula-width check cannot tell, because the label sets the width either way. Measure the arrow's own ink.
+- *A zero-width box wraps its content.* `box(width: 0pt, $…$)` lays an inline equation out in no room, so it breaks at every relation (a `\vphantom` 279pt tall for one line of 27pt). Give the content a wide box of its own when it may overflow.
+**Files:** `crates/egui_commonmark/egui_commonmark_backend/src/misc.rs` (`MITEX_PREAMBLE`, `MITEX_NAME_FIXES`, `fix_mitex_names`), `docs/devlog/124-mitex-commands.md`
+
+---
+
 ## egui
 
 ### CommonMarkCache must persist across frames
@@ -481,6 +494,7 @@ let target_path = target_path.canonicalize()?;  // Resolves ../
 **Context:** Reviewing #288, the PR worktree was built into `worktrees/main/target` to reuse the dependencies. Its "build" finished in 0.6 s with no `Compiling md-viewer` line, and the binary copied out as the PR build was main's.
 **Root cause:** cargo records dep-info paths relative to the package, so after building main it checked the PR worktree's `src/main.rs` against the same fingerprint by mtime. The worktree had been checked out before main's build, so its sources looked older and nothing was rebuilt. Its test run passed too, with main's test list.
 **Fix:** `touch src/main.rs` in the worktree before every build into the shared directory, and check the binary for a string only that branch has (`strings mdv-pr | grep -c '<new message>'`). A separate target directory avoids it at the cost of a full dependency build.
+**The renderer crates are skipped the same way.** Reviewing #298 (a renderer-only change), main's control binary already carried the PR's preamble, so main seemed to render `\big`: the renderer backend had been compiled from the PR worktree and was not rebuilt for main. Touch the renderer sources you changed too (`crates/egui_commonmark/egui_commonmark_backend/src/misc.rs`), and check both binaries: the branch string present in one and absent from the control.
 **Files:** N/A (build discipline), `docs/devlog/118-explorer-expand-order.md`
 
 ---
