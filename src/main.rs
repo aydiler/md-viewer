@@ -4486,7 +4486,7 @@ impl MarkdownApp {
                         ui.add_space(margin);
                         ui.vertical(|ui| {
                             ui.set_max_width(col_w);
-                            ui.label(egui::RichText::new("Recent").strong());
+                            ui.label(egui::RichText::new("Recent Files").strong());
                             ui.add_space(2.0);
                             ui.separator();
                             for (entry, exists) in &recents {
@@ -6439,6 +6439,14 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    if ui
+                        .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
+                        .clicked()
+                    {
+                        self.close_active_tab();
+                        ui.close();
+                    }
+
                     if ui.button("Open Folder...").clicked() {
                         self.open_folder_dialog();
                         ui.close();
@@ -6452,14 +6460,6 @@ impl eframe::App for MarkdownApp {
                         .clicked()
                     {
                         self.close_folder();
-                        ui.close();
-                    }
-
-                    if ui
-                        .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
-                        .clicked()
-                    {
-                        self.close_active_tab();
                         ui.close();
                     }
 
