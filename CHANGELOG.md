@@ -5,6 +5,7 @@ All notable changes to markdown-viewer will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Formulas that use less common LaTeX commands render instead of showing an error box (#299).** 124 of the commands that md-viewer's LaTeX converter (MiTeX) knows compiled to names nothing defined, so a formula using any of them showed `unknown variable` in place of the whole formula. The `\big` delimiter sizes had the same cause and were fixed in #298, contributed by [@RichardCao](https://github.com/RichardCao). The rest are fixed now, among them `\pmod`, `\middle`, `\phantom`, `\cfrac`, `\dbinom`, `\underset`, `\substack`, `\bra`/`\ket`, `\set`, `\xcancel`, `\hspace`, `\mathrel`, `\texttt`, `\varGamma`, `\argmax`, the other `\x…arrow` commands and the `array`, `matrix`, `smallmatrix`, `rcases` and `alignedat` environments. `\begin{Vmatrix}` and the dashed arrows failed too, and `\brace` drew a stray brace. Extensible arrows such as `\xrightarrow` now stretch to fit their label. Colour commands keep their content but not the colour, because formulas are drawn in the theme's text colour.
 - **Table columns no longer narrow slightly a moment after a table appears.** Every column of a table that fills the window lost 2 px on the table's third frame, so the table stopped short of the edge and a cell whose text just fit could wrap onto a second line. Whether that happened depended on timing, so the same table could look different from one launch to the next.
 
 ## [0.3.13] - 2026-11-25

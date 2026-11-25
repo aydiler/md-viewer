@@ -505,6 +505,413 @@ mod tests {
         }
     }
 
+    /// One LaTeX invocation for a command or environment of MiTeX's spec,
+    /// with placeholder arguments of the shape the spec asks for.
+    #[cfg(feature = "math")]
+    fn mitex_spec_invocation(name: &str, item: &mitex::CommandSpecItem) -> String {
+        fn args(pattern: &mitex::ArgPattern, term: &str) -> String {
+            match pattern {
+                mitex::ArgPattern::None | mitex::ArgPattern::Greedy => String::new(),
+                mitex::ArgPattern::FixedLenTerm { len } => term.repeat(*len as usize),
+                mitex::ArgPattern::RangeLenTerm { min, .. } => term.repeat(*min as usize),
+                mitex::ArgPattern::Glob { pattern } => {
+                    // `{,b}` groups are optional; the letters outside them are
+                    // required: t a term, b a bracket group, p a paren group.
+                    let mut required = String::new();
+                    let mut depth = 0;
+                    for c in pattern.0.chars() {
+                        match c {
+                            '{' => depth += 1,
+                            '}' => depth -= 1,
+                            't' if depth == 0 => required.push_str(term),
+                            'b' if depth == 0 => required.push_str("[x]"),
+                            'p' if depth == 0 => required.push_str("(x)"),
+                            _ => {}
+                        }
+                    }
+                    required
+                }
+            }
+        }
+        match item {
+            mitex::CommandSpecItem::Cmd(shape) => match &shape.args {
+                mitex::ArgShape::Right { pattern } => match pattern {
+                    mitex::ArgPattern::Greedy => format!(r"\{name} x"),
+                    pattern => format!(r"\{name}{}", args(pattern, "{x}")),
+                },
+                mitex::ArgShape::Left1 => format!(r"x \{name}"),
+                mitex::ArgShape::InfixGreedy => format!(r"x \{name} y"),
+            },
+            mitex::CommandSpecItem::Env(shape) => {
+                format!(
+                    r"\begin{{{name}}}{} x \end{{{name}}}",
+                    args(&shape.args, "{c}")
+                )
+            }
+        }
+    }
+
+    /// The diagnostic messages in a `render_math_formula` error.
+    #[cfg(feature = "math")]
+    fn diagnostic_messages(error: &str) -> String {
+        let messages: Vec<&str> = error
+            .match_indices("message: \"")
+            .filter_map(|(at, prefix)| {
+                let rest = &error[at + prefix.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect();
+        if messages.is_empty() {
+            error.lines().next().unwrap_or_default().to_owned()
+        } else {
+            messages.join("; ")
+        }
+    }
+
+    /// Commands of MiTeX's spec that cannot render inside one formula, each
+    /// with the reason. The test also requires each of them to still fail, so
+    /// the list cannot go stale.
+    #[cfg(feature = "math")]
+    const MITEX_COMMANDS_THAT_CANNOT_RENDER: &[(&str, &str)] = &[
+        ("hspace", "takes a length; the placeholder `x` is none (renders_ported_mitex_commands uses real ones)"),
+        ("vspace", "takes a length; the placeholder `x` is none (renders_ported_mitex_commands uses real ones)"),
+        ("raisebox", "takes a length; the placeholder `x` is none (renders_ported_mitex_commands uses real ones)"),
+        ("includegraphics", "loads an image file; formulas render without a file system"),
+        ("item", "belongs in itemize/enumerate, text-mode environments"),
+        ("tabular", "a text-mode table environment"),
+        ("toprule", "a booktabs table rule; LaTeX rejects it in math mode too"),
+        ("midrule", "a booktabs table rule; LaTeX rejects it in math mode too"),
+        ("bottomrule", "a booktabs table rule; LaTeX rejects it in math mode too"),
+        ("textwidth", "a length register with no meaning inside one formula"),
+    ];
+
+    /// Every command and environment in MiTeX's spec must render. MiTeX emits a
+    /// call such as `pmod(b)` for `\pmod{b}`; in the MiTeX Typst package the
+    /// function lives in its `standard.typ` scope, which we do not load, so
+    /// each one the preamble leaves out fails the whole formula with
+    /// `unknown variable: pmod`. The arguments are placeholders (`{x}`), which
+    /// every command takes except those in `MITEX_COMMANDS_THAT_CANNOT_RENDER`.
+    #[cfg(feature = "math")]
+    #[test]
+    fn every_mitex_command_resolves() {
+        let mut cases: Vec<(String, String)> = mitex_spec_gen::DEFAULT_SPEC
+            .items()
+            .map(|(name, item)| (name.to_owned(), mitex_spec_invocation(name, item)))
+            .collect();
+        cases.sort();
+        assert!(
+            cases.len() > 500,
+            "the spec looks empty: {} items",
+            cases.len()
+        );
+
+        let render = |latex: &str| {
+            render_math_formula(
+                latex,
+                false,
+                egui::Color32::BLACK,
+                egui::Color32::WHITE,
+                16.0,
+            )
+        };
+
+        // Compiling one formula per item is slow in a debug build, so render
+        // batches and split a batch that fails until each failure is alone.
+        let mut failures = std::collections::BTreeMap::new();
+        let mut pending: Vec<&[(String, String)]> = cases.chunks(64).collect();
+        while let Some(batch) = pending.pop() {
+            let latex = batch
+                .iter()
+                .map(|(_, invocation)| format!("{{{invocation}}}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let Err(error) = render(&latex) else {
+                continue;
+            };
+            if batch.len() > 1 {
+                let (left, right) = batch.split_at(batch.len() / 2);
+                pending.push(left);
+                pending.push(right);
+                continue;
+            }
+            let (name, invocation) = &batch[0];
+            failures.insert(
+                name.clone(),
+                format!("{invocation}  ->  {}", diagnostic_messages(&error)),
+            );
+        }
+
+        for (name, reason) in MITEX_COMMANDS_THAT_CANNOT_RENDER {
+            assert!(
+                failures.remove(*name).is_some(),
+                "\\{name} renders now; remove it from MITEX_COMMANDS_THAT_CANNOT_RENDER ({reason})"
+            );
+        }
+        assert!(
+            failures.is_empty(),
+            "{} MiTeX commands fail to render:\n{}",
+            failures.len(),
+            failures.into_values().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// Each name fix still targets what MiTeX emits for its command; once a
+    /// mitex upgrade emits a name Typst takes, the fix can go.
+    #[cfg(feature = "math")]
+    #[test]
+    fn mitex_name_fixes_match_what_mitex_emits() {
+        for (command, from, to) in MITEX_NAME_FIXES {
+            let shape = mitex_spec_gen::DEFAULT_SPEC
+                .get_cmd(command)
+                .unwrap_or_else(|| panic!("\\{command} left MiTeX's spec"));
+            let latex = mitex_spec_invocation(command, &mitex::CommandSpecItem::Cmd(shape.clone()));
+            let emitted = mitex::convert_math(&latex, None).unwrap();
+            assert!(
+                emitted.contains(from),
+                "{latex:?} emits {emitted:?}, not {from:?}"
+            );
+            assert!(fix_mitex_names(&emitted).contains(to), "{emitted:?}");
+        }
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn fix_mitex_names_leaves_text_and_longer_names_alone() {
+        let emitted = r"#textmath[arrow.r.dash ohm.inv set\(x\) \[y\]] a arrow.r.dash  lr(\[  set(x ) \] ) subset(x ) arrow.r.dashed ohm.inv ";
+        assert_eq!(
+            fix_mitex_names(emitted),
+            r"#textmath[arrow.r.dash ohm.inv set\(x\) \[y\]] a arrow.r.dashed  lr(\[  mitexset(x ) \] ) subset(x ) arrow.r.dashed Omega.inv "
+        );
+        assert!(matches!(
+            fix_mitex_names("x + y"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[cfg(feature = "math")]
+    fn render_display(latex: &str) -> MathRendered {
+        render_math_formula(
+            latex,
+            false,
+            egui::Color32::BLACK,
+            egui::Color32::WHITE,
+            16.0,
+        )
+        .unwrap_or_else(|error| panic!("failed to render {latex:?}: {error}"))
+    }
+
+    /// The horizontal ink extent `(first, last)` of each band of consecutive
+    /// rows that hold ink, top to bottom, in an image rendered on white.
+    #[cfg(feature = "math")]
+    fn ink_bands(image: &egui::ColorImage) -> Vec<(usize, usize)> {
+        let [width, _] = image.size;
+        let mut bands: Vec<(usize, usize)> = Vec::new();
+        let mut in_band = false;
+        for row in image.pixels.chunks(width) {
+            let first = row.iter().position(|p| *p != egui::Color32::WHITE);
+            let last = row.iter().rposition(|p| *p != egui::Color32::WHITE);
+            match (first, last, in_band) {
+                (Some(first), Some(last), true) => {
+                    let band = bands.last_mut().unwrap();
+                    *band = (band.0.min(first), band.1.max(last));
+                }
+                (Some(first), Some(last), false) => bands.push((first, last)),
+                _ => {}
+            }
+            in_band = first.is_some();
+        }
+        bands
+    }
+
+    /// The commands ported from MiTeX's `standard.typ`, with real arguments
+    /// (the spec test renders every command, but with placeholders).
+    #[cfg(feature = "math")]
+    #[test]
+    fn renders_ported_mitex_commands() {
+        let formulas = [
+            // Math classes
+            r"a \mathbin{\star} b",
+            r"\mathopen{(} x \mathclose{)}",
+            r"\mathinner{x}",
+            r"\mathop{T}_{i} x",
+            r"\mathord{+} x",
+            r"a \mathpunct{;} b",
+            r"a \mathrel{\#} b",
+            // Phantoms
+            r"\phantom{xy} z",
+            r"\hphantom{xy} z",
+            r"\vphantom{\frac{a}{b}} z",
+            r"\sum_{\mathclap{1 \le i \le n}} x_i",
+            // Fractions and binomials
+            r"\cfrac{1}{1 + \cfrac{1}{x}}",
+            r"\dbinom{n}{k}",
+            r"\tbinom{n}{k}",
+            // Cancel
+            r"\xcancel{x}",
+            r"\bcancel{x}",
+            r"\sout{x}",
+            // Accents
+            r"\mathring{A}",
+            r"\overgroup{AB}",
+            r"\undergroup{AB}",
+            r"\overleftharpoon{v}",
+            r"\overrightharpoon{v}",
+            r"\overleftrightarrow{AB}",
+            r"\overlinesegment{AB}",
+            r"\underbar{x}",
+            // Limits
+            r"\underset{x \to 0}{\lim} f(x)",
+            r"\sum_{\substack{0 < i < m \\ 0 < j < n}} P(i, j)",
+            // Modulo and spacing
+            r"a \equiv b \pmod{n}",
+            r"a \equiv b \pod{n}",
+            r"a \hspace{1em} b",
+            r"a \hspace{0.5cm} b",
+            r"a \vspace{1em} b",
+            r"\raisebox{2pt}{x} y",
+            // Braket notation
+            r"\bra{\psi}",
+            r"\Bra{\frac{a}{b}}",
+            r"\ket{\psi}",
+            r"\Ket{\frac{a}{b}}",
+            r"\braket{\phi|\psi}",
+            r"\Braket{\frac{a}{b}}",
+            r"\set{x}",
+            r"\Set{x \mid x > 0}",
+            // Boxes
+            r"\fbox{x}",
+            r"\hbox{x}",
+            r"\colorbox{red}{x}",
+            r"\colorbox{nosuchcolor}{x}",
+            r"\color{red} x + y",
+            r"\textcolor{blue}{x} + y",
+            // Delimiters
+            r"\left( \frac{a}{b} \middle| c \right)",
+            // Infix forms
+            r"{n \atop k}",
+            r"{n \brace k}",
+            r"{n \brack k}",
+            // Fonts and text
+            r"\cal{F} + \frak{g} + \tt{x}",
+            r"\textsf{sans} \texttt{mono} \textup{up} \textmd{md} \textnormal{normal}",
+            // Operators and symbols
+            r"\argmax_{x \in X} f(x) + \argmin_{y} g(y)",
+            r"\injlim_{i} A_i \projlim_{j} B_j \plim_{n} X_n",
+            r"\sh x + \ch x + \th x + \cth x + \arctg x + \arcctg x + \cosec x + \cotg x",
+            r"\varGamma \varDelta \varTheta \varLambda \varXi \varPi \varSigma \varUpsilon \varPhi \varPsi \varOmega",
+            r"\thickapprox \thicksim \smallint \mho",
+            r"a \enspace b \negthinmedspace c \negmedspace d \negthickspace e",
+            r"\TeX \LaTeX \KaTeX",
+            r"\overbracket{a + b}^{n} \underbracket{c + d}_{m}",
+            r"a \dashrightarrow b \dashleftarrow c",
+            // Extensible arrows
+            r"A \xRightarrow{f} B \xLeftarrow{g} C \xleftrightarrow{h} D \xLeftrightarrow{i} E",
+            r"A \xhookleftarrow{f} B \xhookrightarrow{g} C \xtwoheadleftarrow{h} D \xtwoheadrightarrow{i} E",
+            r"A \xleftharpoonup{f} B \xrightharpoonup{g} C \xleftharpoondown{h} D \xrightharpoondown{i} E",
+            r"A \xleftrightharpoons{f} B \xrightleftharpoons{g} C \xtofrom{h} D \xmapsto{i} E \xlongequal{j} F",
+            // References
+            r"x = y \quad \eqref{eq:1}, \ref{fig:2}, \cite{knuth}",
+            // Environments
+            r"\begin{matrix} a & b \\ c & d \end{matrix}",
+            r"\begin{Vmatrix} a & b \\ c & d \end{Vmatrix}",
+            r"\begin{smallmatrix} a & b \\ c & d \end{smallmatrix}",
+            r"\begin{array}{cc} a & b \\ c & d \end{array}",
+            r"\begin{array}{c} a \end{array}",
+            r"\sum_{\begin{subarray}{l} i < m \\ j < n \end{subarray}} x",
+            r"\begin{rcases} a & x > 0 \\ b & x \le 0 \end{rcases}",
+            r"\begin{alignedat}{2} a &= b \\ c &= d \end{alignedat}",
+        ];
+        for latex in formulas {
+            let rendered = render_display(latex);
+            assert!(rendered.size.x > 0.0 && rendered.size.y > 0.0, "{latex:?}");
+        }
+    }
+
+    /// The ported commands do what their LaTeX counterparts do, measured.
+    #[cfg(feature = "math")]
+    #[test]
+    fn ported_mitex_commands_have_their_latex_sizes() {
+        let width = |latex: &str| render_display(latex).size.x;
+        let height = |latex: &str| render_display(latex).size.y;
+
+        // \hspace takes its argument: one more em is about one more 16 pt.
+        let gap = width(r"a \hspace{2em} b") - width(r"a \hspace{1em} b");
+        assert!(
+            (12.0..20.0).contains(&gap),
+            "\\hspace{{2em}} vs {{1em}}: {gap}"
+        );
+
+        // A phantom takes the space of its content and paints none of it.
+        assert!(width(r"\phantom{xxxx}") > width(r"\phantom{x}") + 10.0);
+        let phantom = render_display(r"\phantom{xxxx}");
+        assert!(
+            phantom
+                .image
+                .pixels
+                .iter()
+                .all(|p| *p == egui::Color32::WHITE),
+            "\\phantom painted ink"
+        );
+
+        // \vphantom takes its content's height on one line, however wide it is.
+        let tall = height(r"a = b = c = d = e = f = g");
+        let phantom = height(r"\vphantom{a = b = c = d = e = f = g} z");
+        assert!(phantom <= tall + 1.0, "\\vphantom: {phantom} vs {tall}");
+        let raised = height(r"\vphantom{\frac{a}{b}} z");
+        assert!(
+            raised > height("z") + 2.0,
+            "\\vphantom adds no height: {raised}"
+        );
+
+        // \dbinom is set in display style, \tbinom in text style.
+        assert!(height(r"\dbinom{n}{k}") > height(r"\tbinom{n}{k}") + 4.0);
+
+        // The infix forms stack their operands, like \choose.
+        for infix in ["atop", "brace", "brack", "choose"] {
+            let stacked = height(&format!(r"{{n \{infix} k}}"));
+            let inline = height(r"{n , k}");
+            assert!(stacked > inline + 8.0, "\\{infix}: {stacked} vs {inline}");
+        }
+
+        // Extensible arrows stretch to their label: the arrow (the lowest band
+        // of ink rows) spans as wide as the label above it.
+        for arrow in [
+            "xrightarrow",
+            "xleftarrow",
+            "xRightarrow",
+            "xLeftarrow",
+            "xleftrightarrow",
+            "xLeftrightarrow",
+            "xhookleftarrow",
+            "xhookrightarrow",
+            "xtwoheadleftarrow",
+            "xtwoheadrightarrow",
+            "xleftharpoonup",
+            "xrightharpoonup",
+            "xleftharpoondown",
+            "xrightharpoondown",
+            "xleftrightharpoons",
+            "xrightleftharpoons",
+            "xtofrom",
+            "xmapsto",
+            "xlongequal",
+        ] {
+            let rendered = render_display(&format!(r"\{arrow}{{\text{{a much longer label}}}}"));
+            let bands = ink_bands(&rendered.image);
+            let (label, shaft) = (bands[0], bands[bands.len() - 1]);
+            let (label_width, arrow_width) = (label.1 - label.0, shaft.1 - shaft.0);
+            assert!(
+                bands.len() >= 2 && arrow_width * 10 >= label_width * 9,
+                "\\{arrow}: arrow {arrow_width} px under a {label_width} px label ({bands:?})"
+            );
+        }
+
+        // \texttt sets its text in a monospace face, where `i` is as wide as `m`.
+        let mono = width(r"\texttt{iiii}") / width(r"\texttt{mmmm}");
+        let roman = width(r"\text{iiii}") / width(r"\text{mmmm}");
+        assert!(mono > 0.9 && roman < 0.6, "texttt {mono}, text {roman}");
+    }
+
     #[cfg(feature = "math")]
     #[test]
     fn math_cache_key_includes_exact_colors() {
@@ -1690,7 +2097,7 @@ const MITEX_PREAMBLE: &str = r#"
 #let bmatrix = math.mat.with(delim: "[")
 #let Bmatrix = math.mat.with(delim: "{")
 #let vmatrix = math.mat.with(delim: "|")
-#let Vmatrix = math.mat.with(delim: "||")
+#let Vmatrix = math.mat.with(delim: "‖")
 #let aligned(..args) = args.pos().first()
 #let gathered(..args) = args.pos().first()
 #let mitexunderbrace(it) = math.underbrace(it)
@@ -1715,9 +2122,239 @@ const MITEX_PREAMBLE: &str = r#"
 #let dfrac(num, denom) = math.display(math.frac(num, denom))
 #let boxed(it) = box(stroke: 0.6pt, inset: (x: 4pt, y: 3pt), $it$)
 #let negthinspace = h(-0.16667em)
-#let xrightarrow(label) = $attach(arrow.r.long, t: #label)$
-#let xleftarrow(label) = $attach(arrow.l.long, t: #label)$
+// The rest of what MiTeX's standard.typ (mitex 0.2.4) defines in its own scope,
+// ported from its handlers; `every_mitex_command_resolves` renders every command
+// in the spec. Deviations from MiTeX are noted where they are made.
+#let mitex-tex-str(tex) = if tex.has("children") {
+  tex.children
+    .filter(it => it != [ ] and it != [#math.zws])
+    .map(it => it.at("text", default: ""))
+    .sum(default: "")
+} else { tex.at("text", default: "") }
+// Math classes. MiTeX gives \mathop the unary class; LaTeX's \mathop is a large
+// operator, which takes limits in display style.
+#let mathbin(it) = math.class("binary", it)
+#let mathclose(it) = math.class("closing", it)
+#let mathinner(it) = math.class("fence", it)
+#let mathop(it) = math.class("large", it)
+#let mathopen(it) = math.class("opening", it)
+#let mathord(it) = math.class("normal", it)
+#let mathpunct(it) = math.class("punctuation", it)
+#let mathrel(it) = math.class("relation", it)
+// Phantoms and zero-width boxes.
+#let phantom(it) = hide(it)
+#let hphantom(it) = box(height: 0pt, hide(it))
+// A zero-width box gives its content no room, so MiTeX's \vphantom and \mathclap
+// wrapped wide content onto several lines (a \vphantom 279pt tall for one line
+// of 27pt). The hidden content gets a wide box of its own instead; a box lays
+// math out in text style, so in display style \vphantom{\frac{a}{b}} is the
+// height of an inline fraction. Typst cannot centre math over a zero width
+// without such a box, so \mathclap keeps its content at full width.
+#let vphantom(it) = box(width: 0pt, hide(box(width: 10000pt, it)))
+#let mathclap(it) = it
+#let hbox(it) = it
+// LaTeX's \fbox pads its content by \fboxsep (3pt); MiTeX's box has none.
+#let fbox(it) = box(stroke: 0.5pt, inset: 3pt, $it$)
+// Fractions and binomials.
+#let cfrac(num, denom) = math.display(math.frac(num, denom))
+#let dbinom(n, k) = math.display(math.binom(n, k))
+#let tbinom(n, k) = math.inline(math.binom(n, k))
+#let atop(a, b) = math.mat(delim: none, (a,), (b,))
+#let mitexbrace(n, k) = math.mat(delim: "{", (n,), (k,)) // see MITEX_NAME_FIXES
+#let brack(n, k) = math.mat(delim: "[", (n,), (k,))
+// Cancel. LaTeX's \xcancel is a cross; MiTeX draws a single stroke.
+#let xcancel(it) = math.cancel(cross: true, it)
+#let bcancel(it) = math.cancel(inverted: true, it)
+#let sout(it) = math.cancel(angle: 90deg, it)
+// Accents.
+#let mathring(it) = math.circle(it)
+#let overgroup(it) = math.accent(it, "\u{0311}")
+#let undergroup(it) = math.accent(it, "\u{032e}")
+#let overleftharpoon(it) = math.accent(it, "\u{20d0}")
+#let overrightharpoon(it) = math.accent(it, "\u{20d1}")
+#let overleftrightarrow(it) = math.accent(it, "\u{20e1}")
+#let overlinesegment(it) = math.accent(it, "\u{20e9}")
+#let underbar(it) = math.underline(it)
+#let mitexoverbracket(it) = math.limits(math.overbracket(it))
+#let mitexunderbracket(it) = math.limits(math.underbracket(it))
+// Limits and stacking.
+#let underset(sub, base) = math.attach(math.limits(base), b: sub)
+#let substack(it) = it
+#let smallint = math.inline(sym.integral)
+// Modulo, spacing and raising. Lengths arrive as math content (`1 e m`).
+#let pmod(it) = $quad (mod thick it)$
+#let pod(it) = $quad (it)$
+#let hspace(it) = h(eval(mitex-tex-str(it)))
+#let vspace(it) = v(eval(mitex-tex-str(it)))
+#let raisebox(dist, it) = text(baseline: -eval(mitex-tex-str(dist)), it)
+#let enspace = h(0.5em)
+#let negthinmedspace = h(-3/18 * 1em)
+#let negmedspace = h(-4/18 * 1em)
+#let negthickspace = h(-5/18 * 1em)
+// Braket notation and sets (`mitexset`: `set` is a Typst keyword, see MITEX_NAME_FIXES).
+#let bra(it) = $angle.l it|$
+#let Bra(it) = $lr(angle.l it|)$
+#let ket(it) = $|it angle.r$
+#let Ket(it) = $lr(|it angle.r)$
+#let braket(it) = $angle.l it angle.r$
+#let Braket(it) = $lr(angle.l it angle.r)$
+#let mitexset(it) = $\{it\}$
+#let Set(it) = $lr(\{it\})$
+#let middle(it) = math.mid(it)
+// Colour. A formula is drawn as one-colour ink in the theme's text colour
+// (render_math_formula composites by alpha), so a colour cannot show, and a
+// filled \colorbox would cover its own content: keep the content, drop the colour.
+#let mitexcolor(color, ..body) = body.pos().sum(default: none)
+#let colortext(color, body) = body
+#let colorbox(color, body) = body
+// Font styles.
+#let mitexcal(..args) = math.cal(args.pos().sum(default: none))
+#let mitexfrak(..args) = math.frak(args.pos().sum(default: none))
+#let mitexmono(..args) = math.mono(args.pos().sum(default: none))
+#let textsf(it) = math.sans(it)
+#let texttt(it) = math.mono(it)
+#let textup(it) = math.upright(it)
+#let textmd(it) = it
+#let textnormal(it) = it
+// Named operators and symbols.
+#let arctg = math.op("arctg")
+#let arcctg = math.op("arcctg")
+#let ch = math.op("ch")
+#let cosec = math.op("cosec")
+#let cotg = math.op("cotg")
+#let cth = math.op("cth")
+#let sh = math.op("sh")
+#let th = math.op("th")
+#let argmax = math.op("arg\u{2009}max", limits: true)
+#let argmin = math.op("arg\u{2009}min", limits: true)
+#let injlim = math.op("inj\u{2009}lim", limits: true)
+#let projlim = math.op("proj\u{2009}lim", limits: true)
+#let plim = math.op("plim", limits: true)
+#let thickapprox = math.bold(sym.approx)
+#let thicksim = math.bold(sym.tilde.op)
+#let varGamma = math.italic(sym.Gamma)
+#let varDelta = math.italic(sym.Delta)
+#let varTheta = math.italic(sym.Theta)
+#let varLambda = math.italic(sym.Lambda)
+#let varXi = math.italic(sym.Xi)
+#let varPi = math.italic(sym.Pi)
+#let varSigma = math.italic(sym.Sigma)
+#let varUpsilon = math.italic(sym.Upsilon)
+#let varPhi = math.italic(sym.Phi)
+#let varPsi = math.italic(sym.Psi)
+#let varOmega = math.italic(sym.Omega)
+#let TeX = math.upright("TeX")
+#let LaTeX = math.upright("LaTeX")
+#let KaTeX = math.upright("KaTeX")
+// References and citations cannot resolve inside one formula; LaTeX prints the
+// same marks for an undefined label or citation.
+#let mitexref(..args) = "??"
+#let mitexcite(..args) = "[?]"
+// Extensible arrows. MiTeX draws them with the xarrow package, which this
+// engine cannot download; stretch the arrow to its label instead, 1em longer
+// as in LaTeX. Only the short arrows stretch: New Computer Modern Math has no
+// extensible form of the long ones (arrow.r.long stays 22pt under any label).
+#let mitex-xarrow(arrow, label) = math.attach(math.stretch(arrow, size: 100% + 1em), t: label)
+#let xrightarrow(label) = mitex-xarrow(sym.arrow.r, label)
+#let xleftarrow(label) = mitex-xarrow(sym.arrow.l, label)
+#let xLeftarrow(label) = mitex-xarrow(sym.arrow.l.double, label)
+#let xRightarrow(label) = mitex-xarrow(sym.arrow.r.double, label)
+#let xleftrightarrow(label) = mitex-xarrow(sym.arrow.l.r, label)
+#let xLeftrightarrow(label) = mitex-xarrow(sym.arrow.l.r.double, label)
+#let xhookleftarrow(label) = mitex-xarrow(sym.arrow.l.hook, label)
+#let xhookrightarrow(label) = mitex-xarrow(sym.arrow.r.hook, label)
+#let xtwoheadleftarrow(label) = mitex-xarrow(sym.arrow.l.twohead, label)
+#let xtwoheadrightarrow(label) = mitex-xarrow(sym.arrow.r.twohead, label)
+#let xleftharpoonup(label) = mitex-xarrow(sym.harpoon.lt, label)
+#let xrightharpoonup(label) = mitex-xarrow(sym.harpoon.rt, label)
+#let xleftharpoondown(label) = mitex-xarrow(sym.harpoon.lb, label)
+#let xrightharpoondown(label) = mitex-xarrow(sym.harpoon.rb, label)
+#let xleftrightharpoons(label) = mitex-xarrow(sym.harpoons.ltrb, label)
+#let xrightleftharpoons(label) = mitex-xarrow(sym.harpoons.rtlb, label)
+#let xtofrom(label) = mitex-xarrow(sym.arrows.rl, label)
+#let xmapsto(label) = mitex-xarrow(sym.arrow.r.bar, label)
+#let xlongequal(label) = mitex-xarrow(sym.eq, label)
+// Environments. Arguments arrive named (`arg0:`), rows as arrays.
+#let matrix = math.mat.with(delim: none)
+#let smallmatrix(..args) = math.inline(math.mat(delim: none, ..args))
+#let rcases = math.cases.with(reverse: true)
+#let alignedat(arg0: none, ..args) = args.pos().first()
+#let mitexarray(arg0: none, ..args) = {
+  let cols = if arg0 == none { "l" } else { mitex-tex-str(arg0) }
+  let first = cols.clusters().find(c => c in ("l", "c", "r"))
+  let align = (l: left, c: center, r: right).at(if first == none { "l" } else { first })
+  math.mat(delim: none, align: align, ..args)
+}
 "#;
+
+/// Names MiTeX 0.2.4 emits that Typst 0.14 cannot take, as
+/// `(command, emitted, replacement)`. `set` is a Typst keyword, so no `#let`
+/// can define it; `brace` is a Typst symbol, so `\brace` compiled to a stray
+/// `{` before its arguments; the others are symbols Typst renamed. Passing a
+/// spec with fixed aliases does not help: `convert_math` parses with the spec
+/// it is given but names commands from its built-in one (mitex 0.2.4,
+/// `convert_inner`), so the names are rewritten in its output.
+#[cfg(feature = "math")]
+const MITEX_NAME_FIXES: &[(&str, &str, &str)] = &[
+    ("set", "set(", "mitexset("),
+    ("brace", "brace(", "mitexbrace("),
+    ("dashleftarrow", "arrow.l.dash", "arrow.l.dashed"),
+    ("dashrightarrow", "arrow.r.dash", "arrow.r.dashed"),
+    ("mho", "ohm.inv", "Omega.inv"),
+];
+
+/// Applies [`MITEX_NAME_FIXES`] to MiTeX's output. A name is replaced only
+/// where it starts an identifier and is not followed by more of one, and never
+/// inside a text block (`#textmath[...]`), where the words are the user's.
+/// MiTeX escapes `(`, `[` and `]` in text and spaces out letters in math, so
+/// `set(` and `brace(` cannot come from anything but the command itself.
+#[cfg(feature = "math")]
+fn fix_mitex_names(typst: &str) -> std::borrow::Cow<'_, str> {
+    if !MITEX_NAME_FIXES
+        .iter()
+        .any(|(_, from, _)| typst.contains(from))
+    {
+        return std::borrow::Cow::Borrowed(typst);
+    }
+    let is_ident = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+    let mut out = String::with_capacity(typst.len() + 16);
+    let mut text_depth = 0usize;
+    let mut rest = typst;
+    while let Some(c) = rest.chars().next() {
+        let mut take = c.len_utf8();
+        if c == '\\' {
+            // An escaped character, copied with its backslash.
+            take += rest[take..].chars().next().map_or(0, char::len_utf8);
+        } else if text_depth > 0 {
+            match c {
+                '[' => text_depth += 1,
+                ']' => text_depth -= 1,
+                _ => {}
+            }
+        } else if c == '#' {
+            // A code call; `#name[` opens a text block.
+            let name_len = rest[1..]
+                .find(|c: char| !is_ident(c))
+                .unwrap_or(rest.len() - 1);
+            if rest[1 + name_len..].starts_with('[') {
+                take = 1 + name_len + 1;
+                text_depth = 1;
+            }
+        } else if !out.ends_with(is_ident) {
+            if let Some((_, from, to)) = MITEX_NAME_FIXES.iter().find(|(_, from, _)| {
+                rest.starts_with(from)
+                    && !(from.ends_with(is_ident) && rest[from.len()..].starts_with(is_ident))
+            }) {
+                out.push_str(to);
+                rest = &rest[from.len()..];
+                continue;
+            }
+        }
+        out.push_str(&rest[..take]);
+        rest = &rest[take..];
+    }
+    std::borrow::Cow::Owned(out)
+}
 
 /// System fonts, searched and loaded once, then reused for every formula.
 ///
@@ -1881,6 +2518,7 @@ fn render_math_formula(
 
     // 1. Convert LaTeX → Typst math via mitex
     let typst_math = mitex::convert_math(&latex, None).map_err(|e| format!("mitex: {e}"))?;
+    let typst_math = fix_mitex_names(&typst_math);
 
     // 2. Build Typst source — render with transparent background so we get a clean
     // alpha mask, then composite with egui colors in the pixel loop below.
