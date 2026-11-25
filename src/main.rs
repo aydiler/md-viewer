@@ -4957,29 +4957,34 @@ impl MarkdownApp {
                         .file_name()
                         .map(|name| name.to_string_lossy())
                         .unwrap_or_else(|| full_path.clone());
-                    ui.horizontal(|ui| {
-                        let remove_width = ui.spacing().interact_size.y;
-                        let name_width =
-                            (ui.available_width() - ui.spacing().item_spacing.x - remove_width)
-                                .max(0.0);
-                        if ui
-                            .add_sized(
-                                [name_width, remove_width],
-                                egui::Button::new(name.as_ref()).truncate(),
-                            )
-                            .on_hover_text(full_path.as_ref())
-                            .clicked()
-                        {
-                            open = Some(path.clone());
-                        }
-                        if ui
-                            .add_sized([remove_width, remove_width], egui::Button::new("✕"))
-                            .on_hover_text("Remove from history")
-                            .clicked()
-                        {
-                            remove = Some(index);
-                        }
-                    });
+                    let row_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(
+                        row_size,
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            // Reserve the remove button's actual width before laying out the name.
+                            if ui
+                                .small_button("✕")
+                                .on_hover_text("Remove from history")
+                                .clicked()
+                            {
+                                remove = Some(index);
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                                    if ui
+                                        .add(egui::Button::new(name.as_ref()).truncate())
+                                        .on_hover_text(full_path.as_ref())
+                                        .clicked()
+                                    {
+                                        open = Some(path.clone());
+                                    }
+                                },
+                            );
+                        },
+                    );
                 }
             });
         if let Some(index) = remove {
