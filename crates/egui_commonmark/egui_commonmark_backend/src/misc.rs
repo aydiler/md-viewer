@@ -488,6 +488,25 @@ mod tests {
 
     #[cfg(feature = "math")]
     #[test]
+    fn renders_fixed_size_delimiter_aliases() {
+        for size in ["big", "Big", "bigg", "Bigg"] {
+            let latex = format!(r"\{size}l[ x \{size}m| y \{size}r]");
+            let rendered = render_math_formula(
+                &latex,
+                false,
+                egui::Color32::BLACK,
+                egui::Color32::WHITE,
+                16.0,
+            )
+            .unwrap_or_else(|error| panic!("failed to render {latex:?}: {error}"));
+
+            assert!(rendered.size.x > 0.0);
+            assert!(rendered.size.y > 0.0);
+        }
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
     fn math_cache_key_includes_exact_colors() {
         let base = math_cache_hash(
             "x + y",
@@ -1685,6 +1704,11 @@ const MITEX_PREAMBLE: &str = r#"
 // amsmath named operators emitted by mitex's standard command specification.
 #let operatorname(it) = math.op(math.upright(it))
 #let operatornamewithlimits(it) = math.op(limits: true, math.upright(it))
+// Fixed delimiter sizes from MiTeX's standard LaTeX spec, including l/m/r aliases.
+#let big = math.lr.with(size: 1.2em)
+#let Big = math.lr.with(size: 1.8em)
+#let bigg = math.lr.with(size: 2.4em)
+#let Bigg = math.lr.with(size: 3em)
 // amsmath fraction/box/spacing commands mitex emits but does not map to typst:
 //   \tfrac/\dfrac -> tfrac(..)/dfrac(..), \boxed -> boxed(..), \! -> negthinspace
 #let tfrac(num, denom) = math.inline(math.frac(num, denom))
