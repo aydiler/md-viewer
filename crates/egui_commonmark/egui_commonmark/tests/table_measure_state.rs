@@ -79,3 +79,26 @@ fn a_measuring_pass_leaves_the_painted_table_alone() {
         "the frame after the measuring frame changed the table's column widths"
     );
 }
+
+/// A table that fills its pane keeps its column widths from frame to frame
+/// (devlog 123). The separator-drag caps are built from the stored widths;
+/// their bound subtracted the frame's stroke twice, so every cap came out
+/// 2 pt under its column, egui_extras clamped the widths to the caps, and
+/// the third painted frame showed every column 2 pt narrower.
+#[test]
+fn a_table_keeps_its_column_widths_across_frames() {
+    let (md, table_start) = document();
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    let mut widths = Vec::new();
+    for _ in 0..6 {
+        render(&ctx, &mut cache, &md);
+        widths.push(stored_widths(&ctx, table_start).expect("the painted table stores its widths"));
+    }
+    for (frame, frame_widths) in widths.iter().enumerate().skip(1) {
+        assert_eq!(
+            frame_widths, &widths[0],
+            "frame {frame}: column widths changed from the first painted frame"
+        );
+    }
+}
