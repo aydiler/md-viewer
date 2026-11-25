@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_backend_extended"
-version = "0.31.2"
+version = "0.32.0"
 dependencies = [
  "egui",
  "egui_extras",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_extended"
-version = "0.31.2"
+version = "0.32.0"
 dependencies = [
  "egui",
  "egui_commonmark_backend_extended",
@@ -3459,7 +3459,7 @@ dependencies = [
 
 [[package]]
 name = "md-viewer"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "clap",
  "eframe",
