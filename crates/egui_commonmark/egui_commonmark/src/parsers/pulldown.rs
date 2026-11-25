@@ -3937,9 +3937,6 @@ impl CommonMarkViewerInternal {
             // the full pane while prose keeps the reading width. Anchor at
             // the current cursor, not max_rect, or the table would repaint on
             // top of everything above it.
-            let usable_bound_now =
-                (table_bound - table_frame.total_margin().sum().x - table_frame.stroke.width * 2.0)
-                    .max(0.0);
             let last_bound = ui.data(|data| data.get_temp::<f32>(id.with("_last_table_bound")));
             let bound_changed = last_bound.map_or(false, |last| (last - table_bound).abs() > 1.0);
             store_table_bound(ui, id, table_bound);
@@ -3959,13 +3956,21 @@ impl CommonMarkViewerInternal {
             // sidebar. A column may grow only into space the others are not
             // using (floored at its own minimum); with no last frame there
             // is no cap — fresh tables fit their budget anyway.
+            //
+            // The space is the budget the fitted widths fill
+            // (`framed_table_widths`). It used to be computed again here
+            // with the frame's stroke subtracted a second time
+            // (`total_margin()` already includes it), so a table filling its
+            // pane got every cap 2 pt under its column, egui_extras clamped
+            // the widths to them, and every column shrank on the next frame
+            // (devlog 123).
             let column_caps = last_widths.filter(|_| !bound_changed).map(|widths| {
                 let total: f32 = widths.iter().sum();
                 (0..initial_widths.len())
                     .map(|column| {
                         let others = total - widths.get(column).copied().unwrap_or(0.0);
                         let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
-                        (usable_bound_now - others).max(minimum)
+                        (visible_column_budget - others).max(minimum)
                     })
                     .collect::<Vec<f32>>()
             });
@@ -5125,9 +5130,6 @@ impl CommonMarkViewerInternal {
         );
         // Column widths persist across stable panes, but reflow and scale
         // when the display or pane width changes.
-        let usable_bound_now =
-            (table_bound - table_frame.total_margin().sum().x - table_frame.stroke.width * 2.0)
-                .max(0.0);
         let last_bound = ui.data(|data| data.get_temp::<f32>(id.with("_last_table_bound")));
         let bound_changed = last_bound.map_or(false, |last| (last - table_bound).abs() > 1.0);
         store_table_bound(ui, id, table_bound);
@@ -5146,8 +5148,10 @@ impl CommonMarkViewerInternal {
                     let minimum = minimum_widths.get(column).copied().unwrap_or(40.0);
                     // The cap limits growth only: on a shrink the column
                     // keeps its last width (stickiness wins, the overflow
-                    // scrolls), so `at_most` must not shrink it back.
-                    (usable_bound_now - others)
+                    // scrolls), so `at_most` must not shrink it back. The
+                    // space is the fitted widths' budget, as for Markdown
+                    // tables (devlog 123).
+                    (visible_column_budget - others)
                         .max(widths.get(column).copied().unwrap_or(0.0))
                         .max(minimum)
                 })

@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Table columns no longer narrow slightly a moment after a table appears.** Every column of a table that fills the window lost 2 px on the table's third frame, so the table stopped short of the edge and a cell whose text just fit could wrap onto a second line. Whether that happened depended on timing, so the same table could look different from one launch to the next.
+
 ## [0.3.13] - 2026-11-25
 
 Remote images can be loaded automatically, asked for per document or blocked, Expand All no longer freezes the window on large folder trees, the Explorer stays light on large trees, and jumping to a heading near the end of a large document shows it.

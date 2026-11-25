@@ -224,6 +224,12 @@ egui::FontData::from_owned(font_data).into()
 **Now automated (devlog 077):** the release dry run's `crates-package-check` job runs that command after `scripts/prepare-crates-manifest.py`, with the egui_commonmark fork (not epaint) patched in via `--config`. The verify build ignores the manifest's `[patch]` but honours a config-level one, which is what lets it build before a bumped fork is on crates.io.
 **Files:** `Cargo.toml` (`[features]`), `src/system_fonts.rs`, `.github/workflows/release.yml` (`publish-crates`), `docs/devlog/072-crates-color-emoji-gate.md`
 
+### `Frame::total_margin()` already includes the stroke
+**Context:** Devlog 123. Every column of a table that filled its pane shrank by 2 pt on the third painted frame.
+**Root cause:** the separator-drag caps used `table_bound - frame.total_margin().sum().x - frame.stroke.width * 2.0`. `total_margin()` is inner margin + stroke + outer margin, so the stroke was subtracted twice, and the bound came out 2 pt smaller than the budget the fitted widths fill. egui_extras clamps its stored widths to `Column::at_most` on every frame, not only during a drag, so caps a little under the widths shrink the table with nobody touching it.
+**Fix:** compute a budget once (`framed_table_widths`) and use that same value everywhere the widths are compared against it.
+**Files:** `crates/egui_commonmark/egui_commonmark/src/parsers/pulldown.rs` (both table cap sites), `crates/egui_commonmark/egui_commonmark/tests/table_measure_state.rs`, `docs/devlog/123-table-cap-bound.md`
+
 ### egui 0.33 Painter API changes
 **Context:** Implementing minimap with custom drawing
 **Changes:**

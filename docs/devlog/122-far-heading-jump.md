@@ -155,11 +155,10 @@ land 50 pt below the pane top on both builds.
 
 ## Future Improvements
 
-- A table's columns shrink by 2 pt on its second painted frame, on main too
+- ~~A table's columns shrink by 2 pt on its second painted frame, on main too
   (`table_measure_state.rs` fixture, frame 2): the drag caps derived from the
-  stored widths come out 2 pt under each width. Whether the note column then
-  wraps depends on whether a reflow (math images loading) resets the widths
-  first.
+  stored widths come out 2 pt under each width.~~ Fixed in devlog 123: the
+  caps' bound subtracted the frame's stroke twice.
 
 - The renderer's `cargo clippy -D warnings` fails on an empty line after a doc
   comment in `html_table.rs` (on main too).
