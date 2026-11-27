@@ -86,6 +86,17 @@
   </provides>
 
   <releases>
+    <release version="0.3.14" date="2026-11-27">
+      <description>
+        <p>Close Folder and a folder history, and fixes for math formulas and tables.</p>
+        <ul>
+          <li>File → Close Folder, and a Recent Folders list in the empty file explorer</li>
+          <li>Recent files and folders can be removed one by one or cleared</li>
+          <li>Formulas that use less common LaTeX commands render instead of showing an error box</li>
+          <li>Table columns no longer narrow slightly a moment after a table appears</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.13" date="2026-11-25">
       <description>
         <p>Privacy controls for remote images, and fixes for large folder trees and large documents.</p>
