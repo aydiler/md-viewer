@@ -1103,6 +1103,12 @@ broken repository.
 **Context:** Outline-click and search-jump used to be a two-stage scroll: frame 1 lands close (line-ratio estimate via `pending_scroll_offset`), frame 2 snaps precise (via `cache.active_search_y()` recorded during paint). Post-virtualization, blocks *off-screen* don't paint and don't record their y, so the corrective scroll can't fire for far targets.
 **Fix idea (not yet implemented):** When `pending_scroll_offset` is set for a target outside the viewport, also clear `ScrollableCache::split_points` for that frame so the renderer does one full pass, populates positions, then the *next* frame snaps precisely. Same pattern the existing width-change invalidation uses.
 **Files:** TODO if it shows up in practice — flagged in `docs/devlog/020-virtualize-large-docs.md`
+**Resolved differently (devlogs 115, 130):** the full pass this idea describes (`force_full_render`) froze the window for the whole layout on every jump, 1.9 s per find-bar step on 5 MB. Jumps now measure toward their target (`measure_to_source`), whose measuring passes record its position; a target already measured but not laid out is reached by scrolling to its block (`CommonMarkCache::measured_block_top`), after which the viewport slice lays it out.
+
+### Large-document fixtures need unique text
+**Context:** Devlog 130 measured find-bar jumps on a 5 MB fixture built by repeating a 1 MB document five times. A full layout of it took 0.5 s against 1.9 s for 5 MB of unique prose.
+**Cause:** egui's galley cache keys on the text and its format, so each repeated paragraph is shaped once and every copy after it is a cache hit. The fixture measured the cache, not the layout.
+**Fix:** generate large fixtures with random text throughout (`random.seed` for repeatability) and check the unique-block count before trusting a timing.
 
 ### show_rows for the outline drops O(headers) per frame to O(visible)
 **Context:** The outline `ScrollArea::show` iterated all of `tab.outline_headers` every frame; on a 100k-line doc with ~15k headers this dominated the right-panel cost.

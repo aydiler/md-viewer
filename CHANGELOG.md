@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **The find bar no longer freezes the window on a large document.** Opening the find bar, every typed character, Enter and Shift+Enter laid out the whole document in one frame, even when the match had been laid out already: 0.36 s for 1 MB of prose, 1.9 s for 5 MB. md-viewer now lays out toward the match over the next frames while the window keeps responding, and jumps once the match is reached: on 5 MB, after 0.7–0.8 s for a match far down, and at once for one already laid out. The match lands where it did before, about a third of the way down the pane.
+
 ## [0.3.15] - 2026-11-27
 
 Right-to-left paragraphs with inline formulas and right-to-left task lists lay out from the right, `cases` separates its columns, and Recent Folders dims folders that no longer exist.
