@@ -72,7 +72,9 @@ This is a **bare repository** setup. The git database lives in `.bare/` and all 
 - @docs/ARCHITECTURE.md - Core components, libraries, rendering flow
 - @docs/KEYBOARD_SHORTCUTS.md - All keyboard shortcuts
 - @docs/TARGET_METRICS.md - Performance targets and planned features
-- @docs/LESSONS.md - **Check before debugging** - reusable fixes and gotchas
+
+**Searched, not imported** (too large to auto-load; an `@` import is truncated past 150k chars):
+- `docs/LESSONS.md` - **Check before debugging** - reusable fixes and gotchas: `grep -i "keyword" docs/LESSONS.md`
 
 ## Quick Reference
 
