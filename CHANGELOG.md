@@ -4,8 +4,11 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Recent Folders dims a folder that no longer exists, as the welcome page does for files (#303).** Clicking such a folder used to show "Folder is unavailable"; now its entry is greyed out and can't be clicked, and hovering it says "Folder not found" with the path. ✕ still removes it. On the welcome page, a missing file's tooltip now says "File not found" with its path; it showed nothing before.
+
 ### Fixed
-- **The columns of a `cases` environment are a quad apart, as in LaTeX.** In `\begin{cases} 1 & x > 0 \\ 0 & \text{otherwise} \end{cases}` the value and its condition touched, because the formula engine takes `&` as an alignment point only. `rcases` had the same problem.
+- **The columns of a `cases` environment are a quad apart, as in LaTeX (#302).** In `\begin{cases} 1 & x > 0 \\ 0 & \text{otherwise} \end{cases}` the value and its condition touched, because the formula engine takes `&` as an alignment point only. `rcases` had the same problem.
 
 ## [0.3.14] - 2026-11-27
 

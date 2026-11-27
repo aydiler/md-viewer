@@ -4488,7 +4488,15 @@ impl MarkdownApp {
                             ui.set_width(col_w);
                             ui.horizontal_wrapped(|ui| {
                                 ui.strong("Recent Files");
-                                clear_history = ui.small_button("Clear History").clicked();
+                                let clear = ui.small_button("Clear History");
+                                #[cfg(feature = "mcp")]
+                                self.mcp_bridge.register_widget(
+                                    "Recent Files: Clear History",
+                                    "button",
+                                    &clear,
+                                    None,
+                                );
+                                clear_history = clear.clicked();
                             });
                             ui.add_space(2.0);
                             ui.separator();
@@ -4507,11 +4515,17 @@ impl MarkdownApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui
+                                        let remove_button = ui
                                             .small_button("✕")
-                                            .on_hover_text("Remove from history")
-                                            .clicked()
-                                        {
+                                            .on_hover_text("Remove from history");
+                                        #[cfg(feature = "mcp")]
+                                        self.mcp_bridge.register_widget(
+                                            &format!("Remove Recent File: {name}"),
+                                            "button",
+                                            &remove_button,
+                                            None,
+                                        );
+                                        if remove_button.clicked() {
                                             remove_recent = Some(entry.path.clone());
                                         }
                                         ui.with_layout(
@@ -4532,7 +4546,11 @@ impl MarkdownApp {
                                                             .frame(false)
                                                             .truncate(),
                                                     )
-                                                    .on_hover_text(entry.path.to_string_lossy());
+                                                    .on_hover_text(entry.path.to_string_lossy())
+                                                    .on_disabled_hover_text(format!(
+                                                        "File not found: {}",
+                                                        entry.path.display()
+                                                    ));
                                                 if resp.clicked() {
                                                     open_path = Some(entry.path.clone());
                                                 }
@@ -4939,17 +4957,28 @@ impl MarkdownApp {
             return;
         }
 
-        if ui.small_button("Clear History").clicked() {
+        let clear = ui.small_button("Clear History");
+        #[cfg(feature = "mcp")]
+        self.mcp_bridge
+            .register_widget("Recent Folders: Clear History", "button", &clear, None);
+        if clear.clicked() {
             self.recent_folders.clear();
             return;
         }
 
+        // Which folders still exist, checked while the list is shown, as the
+        // welcome page does for recent files.
+        let folders: Vec<(PathBuf, bool)> = self
+            .recent_folders
+            .iter()
+            .map(|path| (path.clone(), path.is_dir()))
+            .collect();
         let mut open = None;
         let mut remove = None;
         egui::ScrollArea::vertical()
             .id_salt("recent_folders")
             .show(ui, |ui| {
-                for (index, path) in self.recent_folders.iter().enumerate() {
+                for (index, (path, exists)) in folders.iter().enumerate() {
                     let full_path = path.to_string_lossy();
                     let name = path
                         .file_name()
@@ -4961,22 +4990,38 @@ impl MarkdownApp {
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             // Reserve the remove button's actual width before laying out the name.
-                            if ui
-                                .small_button("✕")
-                                .on_hover_text("Remove from history")
-                                .clicked()
-                            {
+                            let remove_button =
+                                ui.small_button("✕").on_hover_text("Remove from history");
+                            #[cfg(feature = "mcp")]
+                            self.mcp_bridge.register_widget(
+                                &format!("Remove Recent Folder: {name}"),
+                                "button",
+                                &remove_button,
+                                None,
+                            );
+                            if remove_button.clicked() {
                                 remove = Some(index);
                             }
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
-                                    if ui
-                                        .add(egui::Button::new(name.as_ref()).truncate())
+                                    let label = egui::RichText::new(name.as_ref());
+                                    let label = if *exists { label } else { label.weak() };
+                                    let folder_button = ui
+                                        .add_enabled(*exists, egui::Button::new(label).truncate())
                                         .on_hover_text(full_path.as_ref())
-                                        .clicked()
-                                    {
+                                        .on_disabled_hover_text(format!(
+                                            "Folder not found: {full_path}"
+                                        ));
+                                    #[cfg(feature = "mcp")]
+                                    self.mcp_bridge.register_widget(
+                                        &format!("Recent Folder: {name}"),
+                                        "button",
+                                        &folder_button,
+                                        (!*exists).then_some("missing"),
+                                    );
+                                    if folder_button.clicked() {
                                         open = Some(path.clone());
                                     }
                                 },
