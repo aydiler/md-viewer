@@ -18,6 +18,7 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `watched_paths: HashSet<PathBuf>` - unified watcher for all open tabs
   - `hovered_tab: Option<usize>` - for showing close button on hover
   - `recent_files: Vec<RecentEntry>` - recently opened files for the welcome page
+  - `recent_folders: Vec<PathBuf>` - folders opened explicitly, newest first, capped at `RECENT_FOLDERS_CAP` (#297)
   - `welcome_show_all: bool` - whether the welcome page's recent list is expanded
 
 - **Tab**: Per-tab state for a document. Each tab has:
@@ -38,13 +39,15 @@ Single-file Rust desktop application (`src/main.rs`, ~1300 lines) for viewing ma
   - `show_tab_bar: Option<bool>` - `None` (state written before #208) shows the bar
   - `show_explorer: Option<bool>` - file explorer visibility
   - `explorer_root: Option<PathBuf>` - file explorer root directory
+  - `explorer_closed: Option<bool>` - the user closed the folder; the Explorer then starts empty, even with a file on the command line (#297)
+  - `recent_folders: Option<Vec<PathBuf>>` - Recent Folders history; `None` in older state means empty
   - `expanded_dirs: Option<Vec<PathBuf>>` - expanded directories in explorer
   - `open_tabs: Option<Vec<PathBuf>>` - restore tabs on startup
   - `active_tab: Option<usize>` - restore active tab position
   - `recent_files: Option<Vec<RecentEntry>>` - recently opened files (welcome page)
 
 - **FileExplorer**: Left sidebar showing markdown files in a directory tree:
-  - `root: Option<PathBuf>` - root directory to display
+  - `root: Option<PathBuf>` - root directory to display; `None` after File → Close Folder
   - `tree: Vec<FileTreeNode>` - hierarchical file tree
   - `expanded_dirs: HashSet<PathBuf>` - which directories are expanded
 
@@ -132,8 +135,9 @@ The tab system uses a simple `Vec<Tab>` with an `active_tab` index:
 ## File Explorer
 
 Left sidebar showing all markdown files in a hierarchical directory tree:
-- Root directory determined by: CLI file → persisted state → first open tab → cwd
-- Can be re-pointed at runtime via File → Open Folder… (`open_folder_dialog` → `FileExplorer::set_root`)
+- Root directory determined by `initial_explorer_root`: none if the folder was closed (`explorer_closed`), else CLI file → persisted state → first open tab → cwd
+- Can be re-pointed at runtime via File → Open Folder… or a Recent Folders entry (`open_folder` → `FileExplorer::set_root`, recorded by `push_recent_folder`)
+- File → Close Folder (`close_folder`) clears the root, tree and pending scan (`FileExplorer::close_root`) and reconciles the directory watches; open documents keep their file watches. With no root, `render_empty_explorer` shows Open Folder… and the Recent Folders list (devlog 125)
 - Recursive scanning with 10 level depth limit
 - Filters: .md, .markdown, .txt files only
 - Skip hidden files (starting with .)
