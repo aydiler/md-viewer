@@ -447,6 +447,11 @@ fn block_is_rtl(events: &[(pulldown_cmark::Event<'_>, Range<usize>)]) -> bool {
             // long enough to be cut into rows needs `end_row` between its
             // chunks, which one galley cannot express.
             Event::Code(text) if inline_code_wrap_segments(text).len() > 1 => return false,
+            // A task item's checkbox comes first (after the paragraph start in a
+            // loose list); `render_rtl_item` draws it between text and marker.
+            Event::TaskListMarker(_)
+                if index == 0
+                    || (index == 1 && matches!(events[0].0, Event::Start(Tag::Paragraph))) => {}
             // Widgets that are not text cannot live inside a galley.
             Event::Start(Tag::Image { .. })
             | Event::InlineMath(_)
@@ -469,6 +474,8 @@ struct RtlBlock {
     texts: Vec<egui::RichText>,
     /// Each link with the number of `texts` that precede it.
     links: Vec<(usize, crate::Link)>,
+    /// A task item's checkbox state and the source span of its marker.
+    task: Option<(bool, Range<usize>)>,
 }
 
 /// Draw a right-to-left paragraph or heading as one galley whose rows sit
@@ -488,7 +495,7 @@ fn render_rtl_block(
     column_right: f32,
     max_width: f32,
 ) -> Option<(std::sync::Arc<egui::Galley>, egui::Rect)> {
-    let RtlBlock { texts, links } = block;
+    let RtlBlock { texts, links, .. } = block;
     if texts.is_empty() && links.is_empty() {
         return None;
     }
@@ -595,7 +602,7 @@ fn render_rtl_item(
     column_right: f32,
     max_width: f32,
     options: &CommonMarkOptions,
-) {
+) -> Option<bool> {
     use egui_commonmark_backend_extended::elements::{
         body_spaces_width, list_marker_width, paint_rtl_list_marker,
     };
@@ -610,16 +617,47 @@ fn render_rtl_item(
     let slot_right =
         column_right.min(ui.max_rect().right()) - step * depth.saturating_sub(1) as f32;
     let slot_left = slot_right - marker;
-    let Some((galley, rect)) =
-        render_rtl_block(ui, cache, block, slot_left - MARKER_GAP, max_width)
-    else {
-        return;
+    let mut block = block;
+    let mut text_right = slot_left - MARKER_GAP;
+    let mut toggled = None;
+    if let Some((mut checked, _)) = block.task.take() {
+        // Mirror the left-to-right row: marker, gap, checkbox, text, with the
+        // checkbox at the bottom of the item's first line. The checkbox
+        // allocates at least the interact height in width and paints its square
+        // at the allocation's left; left to right the rest is a pad before the
+        // text. Shift the allocation right by that pad so the square ends at
+        // the marker's gap and the pad falls between square and text. A child
+        // ui leaves the parent's cursor alone, so the text still starts the row.
+        let icon = ui.spacing().icon_width;
+        let pad = ui.spacing().interact_size.y.max(icon) - icon;
+        let row_top = ui.cursor().top();
+        let area = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left(), row_top),
+            egui::pos2(text_right + pad, row_top + body_line_height(ui, options)),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(area)
+                .layout(egui::Layout::right_to_left(egui::Align::BOTTOM)),
+        );
+        let response = if options.mutable {
+            child.add(egui::Checkbox::without_text(&mut checked))
+        } else {
+            child.add(ImmutableCheckbox::without_text(&mut checked))
+        };
+        if options.mutable && response.clicked() {
+            toggled = Some(checked);
+        }
+        text_right = response.rect.left() - pad;
+    }
+    let Some((galley, rect)) = render_rtl_block(ui, cache, block, text_right, max_width) else {
+        return toggled;
     };
     let (Some(row), Some(section)) = (galley.rows.first(), galley.job.sections.first()) else {
-        return;
+        return toggled;
     };
     let Some(glyph) = row.glyphs.first() else {
-        return;
+        return toggled;
     };
     let baseline_y = rect.top() + row.pos.y + glyph.pos.y;
     let format = section.format.clone();
@@ -636,6 +674,7 @@ fn render_rtl_item(
         .and_then(|row| row.glyphs.first())
         .map_or(0.0, |glyph| glyph.uv_rect.size.y);
     paint_rtl_list_marker(ui, slot_left, kind, baseline_y, x_height, font);
+    toggled
 }
 
 /// Whether `tag` opens inline content that can live inside an RTL galley, as
@@ -4323,7 +4362,17 @@ impl CommonMarkViewerInternal {
                 rule(ui, self.line.can_insert_end());
             }
             pulldown_cmark::Event::TaskListMarker(mut checkbox) => {
-                if options.mutable {
+                let rtl_lead = self
+                    .rtl_item
+                    .is_some()
+                    .then_some(())
+                    .and(self.rtl_paragraph.as_mut())
+                    .filter(|block| {
+                        block.texts.is_empty() && block.links.is_empty() && block.task.is_none()
+                    });
+                if let Some(block) = rtl_lead {
+                    block.task = Some((checkbox, src_span));
+                } else if options.mutable {
                     if ui
                         .add(egui::Checkbox::without_text(&mut checkbox))
                         .clicked()
@@ -4501,7 +4550,8 @@ impl CommonMarkViewerInternal {
             return;
         };
         let block = self.rtl_paragraph.take().unwrap_or_default();
-        render_rtl_item(
+        let span = block.task.as_ref().map(|(_, span)| span.clone());
+        let toggled = render_rtl_item(
             ui,
             cache,
             block,
@@ -4511,6 +4561,10 @@ impl CommonMarkViewerInternal {
             max_width,
             options,
         );
+        if let (Some(checked), Some(span)) = (toggled, span) {
+            self.checkbox_events
+                .push(CheckboxClickEvent { checked, span });
+        }
     }
 
     fn finish_link(&mut self, link: crate::Link, ui: &mut Ui, cache: &mut CommonMarkCache) {
@@ -4806,6 +4860,7 @@ impl CommonMarkViewerInternal {
                     let block = RtlBlock {
                         texts: std::mem::take(&mut self.current_heading_rich_texts),
                         links: std::mem::take(&mut self.current_heading_links),
+                        task: None,
                     };
                     render_rtl_block(ui, cache, block, self.column_right, max_width);
                 } else if !self.current_heading_rich_texts.is_empty()
@@ -5453,8 +5508,14 @@ mod tests {
         // The lead ends at the nested list: the outer item is English, the
         // nested one Hebrew.
         assert_eq!(rtl_items_and_cells("- English\n  - שלום\n"), vec!["- שלום"]);
-        // Task items keep their checkbox on the left.
-        assert!(rtl_items_and_cells("- [ ] שלום\n").is_empty());
+        // A task item's checkbox is part of its lead, tight or loose; the
+        // direction comes from the text after it.
+        assert_eq!(rtl_items_and_cells("- [ ] שלום\n"), vec!["- [ ] שלום"]);
+        assert_eq!(
+            rtl_items_and_cells("- [x] שלום\n\n- [ ] English\n"),
+            vec!["- [x] שלום"]
+        );
+        assert!(rtl_items_and_cells("- [ ] English\n").is_empty());
         assert!(rtl_items_and_cells("- שלום ![x](a.png)\n").is_empty());
     }
 
