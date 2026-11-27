@@ -2825,15 +2825,99 @@ pub fn render_math_in_table(
     render_math_with_layout(ui, cache, latex, true, false, options);
 }
 
+/// What a right-to-left paragraph needs to place an inline formula inside its
+/// galley (#108): the texture and the box the left-to-right path would
+/// allocate for it, or why there is none yet.
 #[cfg(feature = "math")]
-fn render_math_with_layout(
-    ui: &mut egui::Ui,
+pub enum InlineMathPiece {
+    /// Paint `texture` at `draw_size` at the top of a box `draw_size.y + lift`
+    /// tall whose bottom sits on the line's bottom, as the left-to-right path
+    /// does.
+    Ready {
+        texture: egui::TextureId,
+        draw_size: egui::Vec2,
+        lift: f32,
+    },
+    /// Still rendering; a repaint is scheduled.
+    Pending,
+    /// The formula failed to render, with the error.
+    Error(String),
+}
+
+/// Poll and schedule an inline formula like [`render_math`] does, without
+/// allocating anything, and report how to place it. `max_width` is the width
+/// the formula is fitted to: the galley's wrap width, which the measuring and
+/// painting passes share.
+#[cfg(feature = "math")]
+pub fn inline_math_piece(
+    ui: &egui::Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    options: &CommonMarkOptions,
+    max_width: f32,
+) -> InlineMathPiece {
+    let hash = prepare_math(ui, cache, latex, true, options);
+    match cache.math_states.get(&hash) {
+        Some(MathState::Ready {
+            texture,
+            size,
+            baseline_ratio,
+        }) => {
+            let (draw_size, lift) =
+                inline_math_geometry(ui, *size, *baseline_ratio, max_width.max(1.0));
+            InlineMathPiece::Ready {
+                texture: texture.id(),
+                draw_size,
+                lift,
+            }
+        }
+        Some(MathState::Error(err)) => InlineMathPiece::Error(err.clone()),
+        _ => {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            InlineMathPiece::Pending
+        }
+    }
+}
+
+/// The size an inline formula is painted at and how far its box reaches below
+/// it so that its baseline meets the text's (see the comment in
+/// `render_math_with_layout`).
+#[cfg(feature = "math")]
+fn inline_math_geometry(
+    ui: &egui::Ui,
+    size: egui::Vec2,
+    baseline_ratio: f32,
+    avail_w: f32,
+) -> (egui::Vec2, f32) {
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let font_size = body_font.size;
+    let line_height = font_size * 1.5;
+    let ref_galley = ui
+        .painter()
+        .layout_no_wrap("x".to_owned(), body_font, egui::Color32::WHITE);
+    let font_ascent = ref_galley
+        .rows
+        .first()
+        .and_then(|r| r.row.glyphs.first())
+        .map_or(font_size * 0.8, |g| g.font_ascent);
+    let text_descent = line_height - font_ascent;
+    let image_descent = (1.0 - baseline_ratio) * size.y;
+    let lift = (text_descent - image_descent).max(0.0);
+    let fit_scale = (avail_w / size.x).min(1.0);
+    (egui::vec2(size.x * fit_scale, size.y * fit_scale), lift)
+}
+
+/// Collect finished renders and start this formula's render if it is new.
+/// Returns its cache key.
+#[cfg(feature = "math")]
+fn prepare_math(
+    ui: &egui::Ui,
     cache: &mut CommonMarkCache,
     latex: &str,
     is_inline: bool,
-    align_to_text_baseline: bool,
     options: &CommonMarkOptions,
-) {
+) -> u64 {
     let bg = ui.visuals().panel_fill;
     let fg = ui.visuals().text_color();
     let size_pt = math_size_pt(ui, options);
@@ -2895,6 +2979,19 @@ fn render_math_with_layout(
                 .request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
+    hash
+}
+
+#[cfg(feature = "math")]
+fn render_math_with_layout(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    is_inline: bool,
+    align_to_text_baseline: bool,
+    options: &CommonMarkOptions,
+) {
+    let hash = prepare_math(ui, cache, latex, is_inline, options);
 
     // Display based on current state
     match cache.math_states.get(&hash) {
@@ -2954,20 +3051,8 @@ fn render_math_with_layout(
                 // `line_height: Multiplier(1.5)`); `text_style_height` returns the
                 // font's *natural* height (≈1.2× size), which is why using it
                 // left formulas ~1px low.
-                let body_font = egui::TextStyle::Body.resolve(ui.style());
-                let font_size = body_font.size;
-                let line_height = font_size * 1.5;
-                let ref_galley =
-                    ui.painter()
-                        .layout_no_wrap("x".to_owned(), body_font, egui::Color32::WHITE);
-                let font_ascent = ref_galley
-                    .rows
-                    .first()
-                    .and_then(|r| r.row.glyphs.first())
-                    .map_or(font_size * 0.8, |g| g.font_ascent);
-                let text_descent = line_height - font_ascent;
-                let image_descent = (1.0 - *baseline_ratio) * size.y;
-                let lift = (text_descent - image_descent).max(0.0);
+                // `inline_math_geometry` computes this.
+                //
                 // Wide formulas must not lay out past the reading column: an
                 // unwrapped inline image wider than the remaining space expands
                 // the enclosing ui's max_rect to the pane, which lets later
@@ -2980,8 +3065,7 @@ fn render_math_with_layout(
                 // the slice's tail drifts from the measured extent and the
                 // scroll bottom flickers.
                 let avail_w = options.max_width(ui).max(1.0);
-                let fit_scale = (avail_w / size.x).min(1.0);
-                let draw_size = egui::vec2(size.x * fit_scale, size.y * fit_scale);
+                let (draw_size, lift) = inline_math_geometry(ui, *size, *baseline_ratio, avail_w);
                 let sized_texture = egui::load::SizedTexture::new(texture.id(), draw_size);
                 let img = egui::Image::new(egui::ImageSource::Texture(sized_texture));
                 let (rect, _) = ui.allocate_exact_size(

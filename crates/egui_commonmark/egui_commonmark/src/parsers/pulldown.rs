@@ -386,14 +386,16 @@ fn rtl_block_starts(
                 containers = containers.saturating_sub(1)
             }
             Event::Start(Tag::Paragraph | Tag::Heading { .. })
-                if containers == 0 && lists == 0 && block_is_rtl(rest) =>
+                if containers == 0 && lists == 0 && block_is_rtl(rest, true) =>
             {
                 starts.insert(span.start);
             }
-            Event::Start(Tag::Item) if containers == 0 && block_is_rtl(rest) => {
+            Event::Start(Tag::Item) if containers == 0 && block_is_rtl(rest, true) => {
                 starts.insert(span.start);
             }
-            Event::Start(Tag::TableCell) if block_is_rtl(rest) => {
+            // An inline formula is painted over a patch of the page background,
+            // and table rows are striped.
+            Event::Start(Tag::TableCell) if block_is_rtl(rest, false) => {
                 starts.insert(span.start);
             }
             _ => {}
@@ -404,13 +406,22 @@ fn rtl_block_starts(
 
 /// Whether the block whose content starts at `events[0]` is right to left and
 /// can be merged into one galley. Stops where the block's inline content ends:
-/// its end tag, or, for a list item, the first nested block.
-fn block_is_rtl(events: &[(pulldown_cmark::Event<'_>, Range<usize>)]) -> bool {
+/// its end tag, or, for a list item, the first nested block. `allow_math` lets
+/// inline formulas into the galley (`render_rtl_block` reserves their box).
+fn block_is_rtl(events: &[(pulldown_cmark::Event<'_>, Range<usize>)], allow_math: bool) -> bool {
     use pulldown_cmark::{Event, Tag, TagEnd};
     use unicode_bidi::BidiClass;
     let mut first_strong_rtl = None;
+    let mut links = 0usize;
     for (index, (event, _)) in events.iter().enumerate() {
         match event {
+            Event::Start(Tag::Link { .. }) => links += 1,
+            Event::End(TagEnd::Link) => links = links.saturating_sub(1),
+            // `$5` and the like render as text.
+            Event::InlineMath(tex) if is_likely_currency(tex) => {}
+            // A formula is painted over the box its placeholder reserves; a
+            // `math_fn` callback draws widgets, which a galley cannot hold.
+            Event::InlineMath(_) if allow_math && links == 0 && cfg!(feature = "math") => {}
             Event::End(
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::TableCell,
             ) => break,
@@ -476,6 +487,198 @@ struct RtlBlock {
     links: Vec<(usize, crate::Link)>,
     /// A task item's checkbox state and the source span of its marker.
     task: Option<(bool, Range<usize>)>,
+    /// Inline formulas, in order.
+    math: Vec<RtlMath>,
+}
+
+/// An inline formula inside a right-to-left block, with how many texts and
+/// links precede it, so it keeps its place among them.
+struct RtlMath {
+    texts: usize,
+    links: usize,
+    latex: String,
+}
+
+/// The character that reserves an inline formula's box in a right-to-left
+/// galley (#108). It has no glyph in the fonts, so epaint draws a replacement
+/// box for it; the formula's patch covers that, and it is transparent anyway
+/// until selected.
+const RTL_MATH_PLACEHOLDER: char = '\u{FFFC}';
+
+/// A formula's placeholder glyphs in a right-to-left galley and what to paint
+/// over them.
+struct RtlMathSlot {
+    /// Number of placeholder glyphs, in galley order.
+    count: usize,
+    size: egui::Vec2,
+    lift: f32,
+    /// `None` while the formula is still rendering: a spinner is painted.
+    texture: Option<egui::TextureId>,
+}
+
+// Without `math` every formula shows its source.
+#[cfg_attr(not(feature = "math"), allow(dead_code))]
+enum RtlMathPiece {
+    /// Reserve `size` plus `lift` below it, as the left-to-right path does.
+    Box {
+        size: egui::Vec2,
+        lift: f32,
+        texture: Option<egui::TextureId>,
+    },
+    /// Show the source: the formula failed, or math is not compiled in.
+    Source,
+}
+
+#[cfg(feature = "math")]
+fn rtl_math_piece(
+    ui: &Ui,
+    cache: &mut CommonMarkCache,
+    latex: &str,
+    options: &CommonMarkOptions,
+    width: f32,
+) -> RtlMathPiece {
+    use egui_commonmark_backend_extended::misc::InlineMathPiece;
+    match egui_commonmark_backend_extended::misc::inline_math_piece(
+        ui, cache, latex, options, width,
+    ) {
+        InlineMathPiece::Ready {
+            texture,
+            draw_size,
+            lift,
+        } => RtlMathPiece::Box {
+            size: draw_size,
+            lift,
+            texture: Some(texture),
+        },
+        // `ui.spinner()`'s size, as the left-to-right path shows while rendering.
+        InlineMathPiece::Pending => RtlMathPiece::Box {
+            size: egui::Vec2::splat(ui.spacing().interact_size.y),
+            lift: 0.0,
+            texture: None,
+        },
+        InlineMathPiece::Error(_) => RtlMathPiece::Source,
+    }
+}
+
+#[cfg(not(feature = "math"))]
+fn rtl_math_piece(
+    _ui: &Ui,
+    _cache: &mut CommonMarkCache,
+    _latex: &str,
+    _options: &CommonMarkOptions,
+    _width: f32,
+) -> RtlMathPiece {
+    RtlMathPiece::Source
+}
+
+/// A formula that cannot be drawn, as its source.
+fn rtl_math_source(ui: &Ui, latex: &str) -> egui::RichText {
+    egui::RichText::new(format!("${latex}$"))
+        .monospace()
+        .color(ui.visuals().warn_fg_color)
+}
+
+/// Reserve a `width` × `height` box in `job` with transparent placeholder
+/// glyphs, bottom-aligned on the line like the text (`valign`). A glyph's
+/// advance grows with its font size, so the size sets the width; the size is
+/// capped at twice the body size, and a wider formula gets more glyphs,
+/// because epaint rasterizes the replacement glyph at every size it is laid
+/// out at. Letter spacing cannot do this: epaint adds it before every glyph
+/// but a paragraph's first, so it does not stay with one glyph. Returns the
+/// number of glyphs, or `None` if the placeholder has no advance to scale.
+fn append_math_placeholder(
+    ui: &Ui,
+    job: &mut egui::text::LayoutJob,
+    height: f32,
+    width: f32,
+    valign: egui::Align,
+) -> Option<usize> {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let probe = ui.fonts_mut(|fonts| {
+        fonts.layout_job(egui::text::LayoutJob::single_section(
+            RTL_MATH_PLACEHOLDER.to_string(),
+            egui::TextFormat::simple(body.clone(), egui::Color32::TRANSPARENT),
+        ))
+    });
+    let advance = probe
+        .rows
+        .first()
+        .and_then(|row| row.glyphs.first())
+        .map(|glyph| glyph.advance_width)
+        .filter(|advance| *advance > 0.0)?;
+    let width = width.max(1.0);
+    let count = (width / (2.0 * advance)).ceil().max(1.0) as usize;
+    let size = body.size * width / (count as f32 * advance);
+    let mut format = egui::TextFormat::simple(
+        egui::FontId::new(size, body.family),
+        egui::Color32::TRANSPARENT,
+    );
+    format.line_height = Some(height);
+    format.valign = valign;
+    job.append(&RTL_MATH_PLACEHOLDER.to_string().repeat(count), 0.0, format);
+    Some(count)
+}
+
+/// Paint each formula over its placeholder glyphs: first a patch of the page
+/// background over the whole box, because egui recolours selected glyphs and
+/// the placeholders would show; then the image at the top of the box, whose
+/// bottom is the row's bottom, as `render_math_with_layout` places it.
+fn paint_rtl_math(ui: &Ui, galley: &egui::Galley, galley_pos: egui::Pos2, slots: Vec<RtlMathSlot>) {
+    // Placeholder glyphs in galley (logical) order: (left, right, top, bottom,
+    // ink). The ink is the replacement box epaint draws for the glyph, which
+    // can reach below the row.
+    let mut glyphs = galley.rows.iter().flat_map(|row| {
+        let top = galley_pos.y + row.pos.y;
+        let bottom = top + row.size.y;
+        let x = galley_pos.x + row.pos.x;
+        row.glyphs
+            .iter()
+            .filter(|glyph| glyph.chr == RTL_MATH_PLACEHOLDER)
+            .map(move |glyph| {
+                let ink = egui::Rect::from_min_size(
+                    egui::pos2(x + glyph.pos.x, top + glyph.pos.y) + glyph.uv_rect.offset,
+                    glyph.uv_rect.size,
+                );
+                (
+                    x + glyph.pos.x,
+                    x + glyph.pos.x + glyph.advance_width,
+                    top,
+                    bottom,
+                    ink,
+                )
+            })
+    });
+    for slot in slots {
+        let run: Vec<_> = glyphs.by_ref().take(slot.count).collect();
+        let Some(&(_, _, top, bottom, _)) = run.first() else {
+            return;
+        };
+        // A formula fits its galley's width, so its glyphs share a row.
+        let on_row: Vec<_> = run.iter().filter(|glyph| glyph.2 == top).collect();
+        let (left, right) = on_row.iter().fold((f32::MAX, f32::MIN), |(l, r), glyph| {
+            (l.min(glyph.0), r.max(glyph.1))
+        });
+        let patch = run.iter().fold(
+            egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom)),
+            |patch, glyph| patch.union(glyph.4),
+        );
+        if !ui.is_rect_visible(patch) {
+            continue;
+        }
+        ui.painter()
+            .rect_filled(patch, 0.0, ui.visuals().panel_fill);
+        let image = egui::Rect::from_min_size(
+            egui::pos2(left, bottom - (slot.size.y + slot.lift)),
+            slot.size,
+        );
+        match slot.texture {
+            Some(texture) => egui::Image::new(egui::ImageSource::Texture(
+                egui::load::SizedTexture::new(texture, slot.size),
+            ))
+            .paint_at(ui, image),
+            None => egui::Spinner::new().paint_at(ui, image),
+        }
+    }
 }
 
 /// Draw a right-to-left paragraph or heading as one galley whose rows sit
@@ -494,41 +697,13 @@ fn render_rtl_block(
     block: RtlBlock,
     column_right: f32,
     max_width: f32,
+    options: &CommonMarkOptions,
 ) -> Option<(std::sync::Arc<egui::Galley>, egui::Rect)> {
-    let RtlBlock { texts, links, .. } = block;
-    if texts.is_empty() && links.is_empty() {
+    let RtlBlock {
+        texts, links, math, ..
+    } = block;
+    if texts.is_empty() && links.is_empty() && math.is_empty() {
         return None;
-    }
-
-    let valign = ui.text_valign();
-    let link_color = ui.visuals().hyperlink_color;
-    let mut job = egui::text::LayoutJob::default();
-    // Character range of each link inside `job.text`, with its destination.
-    let mut link_spans: Vec<(Range<usize>, String)> = Vec::new();
-    let mut push_link = |job: &mut egui::text::LayoutJob, link: crate::Link| {
-        let start = job.text.chars().count();
-        // Same look as `Link::end`. Styled before appending: `append_to` merges
-        // a piece into the previous section when the formats are equal, so
-        // restyling sections afterwards can miss the link entirely.
-        for text in link.text {
-            text.color(link_color).underline().append_to(
-                job,
-                ui.style(),
-                egui::FontSelection::Default,
-                valign,
-            );
-        }
-        link_spans.push((start..job.text.chars().count(), link.destination));
-    };
-    let mut links = links.into_iter().peekable();
-    for (index, text) in texts.into_iter().enumerate() {
-        while let Some((_, link)) = links.next_if(|(at, _)| *at <= index) {
-            push_link(&mut job, link);
-        }
-        text.append_to(&mut job, ui.style(), egui::FontSelection::Default, valign);
-    }
-    for (_, link) in links {
-        push_link(&mut job, link);
     }
 
     // Paragraphs and headings already start on a fresh row (`try_insert_start`,
@@ -537,6 +712,87 @@ fn render_rtl_block(
     let left = ui.cursor().left();
     let right = column_right.min(ui.max_rect().right());
     let width = (right - left).min(max_width).max(0.0);
+
+    let valign = ui.text_valign();
+    let link_color = ui.visuals().hyperlink_color;
+    let mut job = egui::text::LayoutJob::default();
+    // Every U+FFFC in the galley must be a formula's placeholder, so the
+    // formulas can be matched to their glyphs in order. U+FFFD has the same
+    // UTF-8 length, so swapping it in keeps the sections' byte ranges.
+    let append = |job: &mut egui::text::LayoutJob, text: egui::RichText| {
+        let from = job.text.len();
+        text.append_to(job, ui.style(), egui::FontSelection::Default, valign);
+        if job.text[from..].contains(RTL_MATH_PLACEHOLDER) {
+            let tail = job.text[from..].replace(RTL_MATH_PLACEHOLDER, "\u{FFFD}");
+            job.text.replace_range(from.., &tail);
+        }
+    };
+    // Character range of each link inside `job.text`, with its destination.
+    let mut link_spans: Vec<(Range<usize>, String)> = Vec::new();
+    let mut push_link = |job: &mut egui::text::LayoutJob, link: crate::Link| {
+        let start = job.text.chars().count();
+        // Same look as `Link::end`. Styled before appending: `append_to` merges
+        // a piece into the previous section when the formats are equal, so
+        // restyling sections afterwards can miss the link entirely.
+        for text in link.text {
+            append(job, text.color(link_color).underline());
+        }
+        link_spans.push((start..job.text.chars().count(), link.destination));
+    };
+    let mut slots: Vec<RtlMathSlot> = Vec::new();
+    let mut push_math = |job: &mut egui::text::LayoutJob, m: RtlMath| match rtl_math_piece(
+        ui, cache, &m.latex, options, width,
+    ) {
+        RtlMathPiece::Box {
+            size,
+            lift,
+            texture,
+        } => {
+            if let Some(count) = append_math_placeholder(ui, job, size.y + lift, size.x, valign) {
+                slots.push(RtlMathSlot {
+                    count,
+                    size,
+                    lift,
+                    texture,
+                });
+            } else {
+                append(job, rtl_math_source(ui, &m.latex));
+            }
+        }
+        RtlMathPiece::Source => append(job, rtl_math_source(ui, &m.latex)),
+    };
+    // Texts, links and formulas in source order: a formula follows the texts
+    // and links that preceded it.
+    let mut links = links.into_iter().enumerate().peekable();
+    let mut math = math.into_iter().peekable();
+    let text_count = texts.len();
+    let mut texts = texts.into_iter();
+    for index in 0..=text_count {
+        loop {
+            let link_ready = links.peek().is_some_and(|(_, (at, _))| *at <= index);
+            let math_ready = math.peek().is_some_and(|m| m.texts <= index);
+            let emitted_links = links.peek().map_or(usize::MAX, |(i, _)| *i);
+            if math_ready && math.peek().is_some_and(|m| m.links <= emitted_links) {
+                push_math(&mut job, math.next().unwrap());
+            } else if link_ready {
+                push_link(&mut job, links.next().unwrap().1 .1);
+            } else if math_ready {
+                push_math(&mut job, math.next().unwrap());
+            } else {
+                break;
+            }
+        }
+        if let Some(text) = texts.next() {
+            append(&mut job, text);
+        }
+    }
+    for (_, (_, link)) in links {
+        push_link(&mut job, link);
+    }
+    for m in math {
+        push_math(&mut job, m);
+    }
+
     job.wrap.max_width = width;
     job.halign = egui::Align::RIGHT;
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
@@ -555,12 +811,16 @@ fn render_rtl_block(
         )
         .inner;
 
+    // The label placed the galley's origin at its right edge (Align::RIGHT).
+    let galley_pos = response.rect.right_top();
+    if !slots.is_empty() {
+        paint_rtl_math(ui, &galley, galley_pos, slots);
+    }
+
     let placed = Some((galley.clone(), response.rect));
     if link_spans.is_empty() {
         return placed;
     }
-    // The label placed the galley's origin at its right edge (Align::RIGHT).
-    let galley_pos = response.rect.right_top();
     let hovered_link = response.hover_pos().and_then(|pointer| {
         let local = pointer - galley_pos;
         // Only a pointer over a row's glyphs can be on a link.
@@ -650,7 +910,8 @@ fn render_rtl_item(
         }
         text_right = response.rect.left() - pad;
     }
-    let Some((galley, rect)) = render_rtl_block(ui, cache, block, text_right, max_width) else {
+    let Some((galley, rect)) = render_rtl_block(ui, cache, block, text_right, max_width, options)
+    else {
         return toggled;
     };
     let (Some(row), Some(section)) = (galley.rows.first(), galley.job.sections.first()) else {
@@ -2197,6 +2458,8 @@ pub struct CommonMarkViewerInternal {
     current_heading_links: Vec<(usize, crate::Link)>,
     /// The current heading is right to left (`rtl_block_starts`).
     current_heading_rtl: bool,
+    /// Inline formulas of the current right-to-left heading.
+    current_heading_math: Vec<RtlMath>,
     /// `Some` while inside a right-to-left paragraph.
     rtl_paragraph: Option<RtlBlock>,
     /// The marker and depth of the right-to-left list item whose lead text is
@@ -2258,6 +2521,7 @@ impl CommonMarkViewerInternal {
             current_heading_rich_texts: Vec::new(),
             current_heading_links: Vec::new(),
             current_heading_rtl: false,
+            current_heading_math: Vec::new(),
             rtl_paragraph: None,
             rtl_item: None,
             next_item_rtl: false,
@@ -4202,6 +4466,7 @@ impl CommonMarkViewerInternal {
                                                                         render_rtl_block(
                                                                             ui, cache, block,
                                                                             cell_right, col_w,
+                                                                            options,
                                                                         );
                                                                     }
                                                                 });
@@ -4391,6 +4656,20 @@ impl CommonMarkViewerInternal {
                     // Render as plain text with $ prefix instead of math
                     let text: CowStr = format!("${tex}").into();
                     self.event_text(text, ui, options);
+                } else if self.text_style.heading.is_some() && self.current_heading_rtl {
+                    // Placed inside the heading's galley at its end.
+                    self.current_heading_math.push(RtlMath {
+                        texts: self.current_heading_rich_texts.len(),
+                        links: self.current_heading_links.len(),
+                        latex: tex.to_string(),
+                    });
+                } else if let Some(block) = self.rtl_paragraph.as_mut() {
+                    // Placed inside the block's galley (`render_rtl_block`).
+                    block.math.push(RtlMath {
+                        texts: block.texts.len(),
+                        links: block.links.len(),
+                        latex: tex.to_string(),
+                    });
                 } else {
                     #[cfg(feature = "math")]
                     {
@@ -4848,7 +5127,7 @@ impl CommonMarkViewerInternal {
                 if self.rtl_item.is_some() {
                     self.finish_rtl_item(ui, cache, options, max_width);
                 } else if let Some(block) = self.rtl_paragraph.take() {
-                    render_rtl_block(ui, cache, block, self.column_right, max_width);
+                    render_rtl_block(ui, cache, block, self.column_right, max_width, options);
                 }
                 self.line.try_insert_end(ui);
                 // Add extra paragraph spacing if configured
@@ -4861,8 +5140,9 @@ impl CommonMarkViewerInternal {
                         texts: std::mem::take(&mut self.current_heading_rich_texts),
                         links: std::mem::take(&mut self.current_heading_links),
                         task: None,
+                        math: std::mem::take(&mut self.current_heading_math),
                     };
-                    render_rtl_block(ui, cache, block, self.column_right, max_width);
+                    render_rtl_block(ui, cache, block, self.column_right, max_width, options);
                 } else if !self.current_heading_rich_texts.is_empty()
                     || !self.current_heading_links.is_empty()
                 {
@@ -5525,6 +5805,67 @@ mod tests {
             rtl_items_and_cells("| א | b |\n|---|---|\n| c | ב |\n"),
             vec!["א", "ב"]
         );
+    }
+
+    /// A wide formula's placeholder is split into several glyphs no larger
+    /// than twice the body size: epaint rasterizes the replacement glyph at
+    /// every size it lays out, so one glyph scaled to 300 px would take
+    /// 240×450 px of the font atlas.
+    #[test]
+    fn wide_formula_placeholders_stay_small_and_exactly_as_wide() {
+        let ctx = egui::Context::default();
+        let mut checked = false;
+        let mut pass = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show_ctx(ctx, |ui| {
+                let body = egui::TextStyle::Body.resolve(ui.style()).size;
+                for width in [12.0_f32, 60.0, 300.0] {
+                    let mut job = egui::text::LayoutJob::default();
+                    let count =
+                        append_math_placeholder(ui, &mut job, 30.0, width, egui::Align::BOTTOM)
+                            .expect("the placeholder has an advance");
+                    assert!(
+                        job.sections
+                            .iter()
+                            .all(|s| s.format.font_id.size <= 2.0 * body + 0.01),
+                        "{width}: a placeholder glyph is larger than twice the body size"
+                    );
+                    assert!(width < 4.0 * body || count > 1, "{width}: one glyph");
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
+                    let row = &galley.rows[0];
+                    assert_eq!(row.glyphs.len(), count);
+                    assert!(
+                        (galley.rect.width() - width).abs() <= 1.0,
+                        "{width}: the placeholder is {} wide",
+                        galley.rect.width()
+                    );
+                    assert!((row.size.y - 30.0).abs() < 0.01, "row {}", row.size.y);
+                }
+                checked = true;
+            });
+        });
+        pass.textures_delta.clear();
+        assert!(checked);
+    }
+
+    #[test]
+    fn rtl_blocks_take_inline_math_only_over_the_page_background() {
+        let math = cfg!(feature = "math");
+        let marked = |markdown: &str| !rtl_blocks(markdown).is_empty();
+        // A formula's box is reserved in the galley (`render_rtl_block`)…
+        assert_eq!(marked("שלום $x^2$ עולם\n"), math);
+        assert_eq!(marked("# שלום $x^2$\n"), math);
+        assert_eq!(
+            rtl_items_and_cells("- שלום $x^2$\n").len(),
+            usize::from(math)
+        );
+        // …and painted over a patch of the page background. Blockquotes and
+        // alerts only draw a bar; table rows are striped; a link would need its
+        // click target to cover the formula.
+        assert_eq!(marked("> שלום $x^2$ עולם\n"), math);
+        assert!(!marked("[שלום $x^2$](a.md) עולם\n"));
+        assert!(rtl_items_and_cells("| a |\n|---|\n| שלום $x^2$ |\n").is_empty());
+        // Currency is text, with or without math.
+        assert!(marked("שלום $5 ו-$10\n"));
     }
 
     #[test]

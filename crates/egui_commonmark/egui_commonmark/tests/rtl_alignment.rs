@@ -608,3 +608,155 @@ fn clicking_an_rtl_task_checkbox_toggles_it_in_the_source() {
     let _ = run(pointer(false), &mut text, &mut cache);
     assert_eq!(text, "- [x] שלום עולם\n");
 }
+
+/// A paint step of a frame, in order: text galleys, filled rectangles and
+/// textured rectangles (images).
+#[cfg(feature = "math")]
+#[derive(Debug)]
+enum Step {
+    Text(String, Rect, Vec<Rect>),
+    Fill(Rect, egui::Color32),
+    Image(Rect),
+}
+
+/// Render with `$x^2$` seeded as a rendered formula of `size`, then return the
+/// paint steps of the last frame.
+#[cfg(feature = "math")]
+fn math_frames(markdown: &str, size: egui::Vec2) -> (Vec<Step>, egui::Color32) {
+    fn walk(shape: &Shape, out: &mut Vec<Step>) {
+        match shape {
+            Shape::Text(t) => {
+                // The ink of the formula placeholders (U+FFFC), in screen space.
+                let mut ink = Vec::new();
+                for row in &t.galley.rows {
+                    for g in row.glyphs.iter().filter(|g| g.chr == '\u{FFFC}') {
+                        let min = t.pos + row.pos.to_vec2() + g.pos.to_vec2() + g.uv_rect.offset;
+                        ink.push(Rect::from_min_size(min, g.uv_rect.size));
+                    }
+                }
+                out.push(Step::Text(
+                    t.galley.job.text.clone(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                    ink,
+                ))
+            }
+            Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() => {
+                out.push(Step::Image(r.rect))
+            }
+            Shape::Rect(r) => out.push(Step::Fill(r.rect, r.fill)),
+            Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let ctx = context();
+    let mut cache = CommonMarkCache::default();
+    let mut steps = Vec::new();
+    let mut panel_fill = egui::Color32::TRANSPARENT;
+    for _ in 0..3 {
+        let full = ctx.run_frame(input(), |ctx| {
+            egui::CentralPanel::default().show_ctx(ctx, |ui| {
+                panel_fill = ui.visuals().panel_fill;
+                egui_commonmark_extended::seed_inline_math_size_for_test(
+                    ui,
+                    &mut cache,
+                    "x^2",
+                    &egui_commonmark_backend_extended::CommonMarkOptions::default(),
+                    size,
+                );
+                CommonMarkViewer::new()
+                    .default_width(Some(COLUMN_WIDTH))
+                    .show_scrollable("rtl-doc", ui, &mut cache, markdown);
+            });
+        });
+        steps.clear();
+        for clipped in full.shapes {
+            walk(&clipped.shape, &mut steps);
+        }
+    }
+    (steps, panel_fill)
+}
+
+#[cfg(feature = "math")]
+#[test]
+fn rtl_paragraph_with_inline_math_sits_at_the_right_edge() {
+    let doc = format!("{ENGLISH}\n\nשלום $x^2$ עולם\n");
+    let (steps, _) = math_frames(&doc, vec2(30.0, 20.0));
+    let english = steps
+        .iter()
+        .find_map(|s| match s {
+            Step::Text(t, r, _) if t.contains("Reference paragraph") => Some(*r),
+            _ => None,
+        })
+        .expect("reference paragraph");
+    let (left, right) = (english.left(), english.left() + COLUMN_WIDTH as f32);
+    let rtl = steps
+        .iter()
+        .find_map(|s| match s {
+            Step::Text(t, r, _) if t.contains("שלום") => Some(*r),
+            _ => None,
+        })
+        .expect("the RTL paragraph");
+    assert!(
+        rtl.right() > right - 4.0 && rtl.right() <= right + 0.5 && rtl.left() > left + 100.0,
+        "RTL paragraph with a formula at {:.1}..{:.1}, column {left:.1}..{right:.1}",
+        rtl.left(),
+        rtl.right()
+    );
+    let image = steps
+        .iter()
+        .find_map(|s| match s {
+            Step::Image(r) => Some(*r),
+            _ => None,
+        })
+        .expect("the formula's image");
+    assert!(
+        rtl.contains_rect(image.shrink(0.5)) && (image.width() - 30.0).abs() < 0.5,
+        "formula image {image:?} should lie inside the paragraph {rtl:?} at 30 px wide"
+    );
+    assert!(
+        rtl.height() >= 20.0,
+        "the paragraph's row ({:.1}) is lower than the formula",
+        rtl.height()
+    );
+}
+
+#[cfg(feature = "math")]
+#[test]
+fn rtl_inline_math_is_painted_over_a_patch_after_its_text() {
+    let doc = format!("{ENGLISH}\n\nשלום $x^2$ עולם\n");
+    let (steps, panel_fill) = math_frames(&doc, vec2(30.0, 20.0));
+    let text_at = steps
+        .iter()
+        .position(|s| matches!(s, Step::Text(t, _, _) if t.contains("שלום")))
+        .expect("the RTL paragraph");
+    let image_at = steps
+        .iter()
+        .position(|s| matches!(s, Step::Image(_)))
+        .expect("the formula's image");
+    let Step::Image(image) = &steps[image_at] else {
+        unreachable!()
+    };
+    // The patch hides the placeholder glyphs, which turn visible when selected.
+    let patch_at = steps
+        .iter()
+        .position(|s| {
+            matches!(s, Step::Fill(r, fill) if *fill == panel_fill
+                && r.contains_rect(image.shrink(0.5))
+                && (r.width() - image.width()).abs() < 1.0)
+        })
+        .unwrap_or_else(|| panic!("no patch under the formula; steps {steps:#?}"));
+    assert!(
+        text_at < patch_at && patch_at < image_at,
+        "paint order text {text_at}, patch {patch_at}, image {image_at}"
+    );
+    let (Step::Text(_, _, ink), Step::Fill(patch, _)) = (&steps[text_at], &steps[patch_at]) else {
+        unreachable!()
+    };
+    assert!(!ink.is_empty(), "no placeholder glyphs in the paragraph");
+    for glyph in ink {
+        assert!(
+            patch.expand(0.5).contains_rect(*glyph),
+            "placeholder ink {glyph:?} is not under the patch {patch:?}: it shows when selected"
+        );
+    }
+}
