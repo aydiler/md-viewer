@@ -86,6 +86,17 @@
   </provides>
 
   <releases>
+    <release version="0.3.15" date="2026-11-27">
+      <description>
+        <p>Better right-to-left layout and a math fix.</p>
+        <ul>
+          <li>Inline formulas in Hebrew and Arabic paragraphs, headings and list items sit in their place in right-to-left text</li>
+          <li>Right-to-left task lists put the checkbox and marker on the right</li>
+          <li>The columns of a cases environment are spaced as in LaTeX</li>
+          <li>Recent Folders dims folders that no longer exist</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.14" date="2026-11-27">
       <description>
         <p>Close Folder and a folder history, and fixes for math formulas and tables.</p>
