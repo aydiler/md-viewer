@@ -704,12 +704,26 @@ mod tests {
     /// rows that hold ink, top to bottom, in an image rendered on white.
     #[cfg(feature = "math")]
     fn ink_bands(image: &egui::ColorImage) -> Vec<(usize, usize)> {
+        ink_bands_from(image, 0)
+    }
+
+    /// [`ink_bands`] over the columns from `from` on, with extents measured
+    /// from the image's left edge.
+    #[cfg(feature = "math")]
+    fn ink_bands_from(image: &egui::ColorImage, from: usize) -> Vec<(usize, usize)> {
         let [width, _] = image.size;
         let mut bands: Vec<(usize, usize)> = Vec::new();
         let mut in_band = false;
         for row in image.pixels.chunks(width) {
-            let first = row.iter().position(|p| *p != egui::Color32::WHITE);
-            let last = row.iter().rposition(|p| *p != egui::Color32::WHITE);
+            let row = &row[from..];
+            let first = row
+                .iter()
+                .position(|p| *p != egui::Color32::WHITE)
+                .map(|x| x + from);
+            let last = row
+                .iter()
+                .rposition(|p| *p != egui::Color32::WHITE)
+                .map(|x| x + from);
             match (first, last, in_band) {
                 (Some(first), Some(last), true) => {
                     let band = bands.last_mut().unwrap();
@@ -721,6 +735,31 @@ mod tests {
             in_band = first.is_some();
         }
         bands
+    }
+
+    /// The vertical ink extent `(first, last)` of each run of consecutive
+    /// columns that hold ink, left to right, in an image rendered on white.
+    #[cfg(feature = "math")]
+    fn ink_columns(image: &egui::ColorImage) -> Vec<(usize, usize)> {
+        let [width, height] = image.size;
+        let inked =
+            |x: usize| (0..height).any(|y| image.pixels[y * width + x] != egui::Color32::WHITE);
+        let mut runs = Vec::new();
+        let mut start = None;
+        for x in 0..width {
+            match (inked(x), start) {
+                (true, None) => start = Some(x),
+                (false, Some(first)) => {
+                    runs.push((first, x - 1));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(first) = start {
+            runs.push((first, width - 1));
+        }
+        runs
     }
 
     /// The commands ported from MiTeX's `standard.typ`, with real arguments
@@ -819,6 +858,9 @@ mod tests {
             r"\begin{array}{c} a \end{array}",
             r"\sum_{\begin{subarray}{l} i < m \\ j < n \end{subarray}} x",
             r"\begin{rcases} a & x > 0 \\ b & x \le 0 \end{rcases}",
+            r"\begin{cases} a \\ b \end{cases}",
+            r"\begin{cases} a & b & c \\ d & e & f \end{cases}",
+            r"\begin{cases} 1 & \text{if } x > 0 \\ 0 & \text{otherwise} \end{cases}",
             r"\begin{alignedat}{2} a &= b \\ c &= d \end{alignedat}",
         ];
         for latex in formulas {
@@ -910,6 +952,51 @@ mod tests {
         let mono = width(r"\texttt{iiii}") / width(r"\texttt{mmmm}");
         let roman = width(r"\text{iiii}") / width(r"\text{mmmm}");
         assert!(mono > 0.9 && roman < 0.6, "texttt {mono}, text {roman}");
+    }
+
+    /// amsmath's `cases` is an array of two left-aligned columns a quad apart
+    /// (`@{}l@{\quad}l@{}`). Typst's `cases` takes `&` as an alignment point
+    /// only, which puts the columns side by side.
+    #[cfg(feature = "math")]
+    #[test]
+    fn cases_separate_their_columns_by_a_quad() {
+        // Rendered at 3 px per pt and 16 pt, so 1em is 48 px; without the quad
+        // the ink gap is the side bearings alone (3 px).
+        for (latex, brace_first) in [
+            (r"\begin{cases} a & b \\ c & d \end{cases}", true),
+            (r"\begin{rcases} a & b \\ c & d \end{rcases}", false),
+        ] {
+            let runs = ink_columns(&render_display(latex).image);
+            assert_eq!(
+                runs.len(),
+                3,
+                "brace and two columns in {latex:?}: {runs:?}"
+            );
+            let (first, second) = if brace_first {
+                (runs[1], runs[2])
+            } else {
+                (runs[0], runs[1])
+            };
+            let gap = second.0 - first.1 - 1;
+            assert!(
+                (40..=60).contains(&gap),
+                "{latex:?}: {gap} px between the columns ({runs:?})"
+            );
+        }
+    }
+
+    #[cfg(feature = "math")]
+    #[test]
+    fn cases_align_their_first_column_left() {
+        let latex = r"\begin{cases} 1 & x \\ 1000 & y \end{cases}";
+        let image = render_display(latex).image;
+        let brace = ink_columns(&image)[0];
+        let rows = ink_bands_from(&image, brace.1 + 1);
+        assert_eq!(rows.len(), 2, "two rows right of the brace: {rows:?}");
+        assert!(
+            rows[0].0.abs_diff(rows[1].0) <= 1,
+            "left edges of `1` and `1000`: {rows:?}"
+        );
     }
 
     #[cfg(feature = "math")]
@@ -2149,7 +2236,10 @@ const MITEX_PREAMBLE: &str = r#"
 // of 27pt). The hidden content gets a wide box of its own instead; a box lays
 // math out in text style, so in display style \vphantom{\frac{a}{b}} is the
 // height of an inline fraction. Typst cannot centre math over a zero width
-// without such a box, so \mathclap keeps its content at full width.
+// without such a box, so \mathclap keeps its content at full width. A zero
+// width would also be wrong here: a clapped subscript at a formula's edge would
+// put ink outside the frame, and the rasterized image (no horizontal padding
+// for inline formulas) would cut it off.
 #let vphantom(it) = box(width: 0pt, hide(box(width: 10000pt, it)))
 #let mathclap(it) = it
 #let hbox(it) = it
@@ -2277,7 +2367,13 @@ const MITEX_PREAMBLE: &str = r#"
 // Environments. Arguments arrive named (`arg0:`), rows as arrays.
 #let matrix = math.mat.with(delim: none)
 #let smallmatrix(..args) = math.inline(math.mat(delim: none, ..args))
-#let rcases = math.cases.with(reverse: true)
+// amsmath's cases puts a quad between its columns (`@{}l@{\quad}l@{}`); Typst's
+// cases takes `&` as an alignment point only, so the columns touched.
+#let mitex-cases-row(row) = if repr(row.func()) == "sequence" {
+  row.children.map(c => if repr(c.func()) == "align-point" { c + h(1em) } else { c }).join()
+} else { row }
+#let cases(..args) = math.cases(..args.named(), ..args.pos().map(mitex-cases-row))
+#let rcases(..args) = math.cases(reverse: true, ..args.named(), ..args.pos().map(mitex-cases-row))
 #let alignedat(arg0: none, ..args) = args.pos().first()
 #let mitexarray(arg0: none, ..args) = {
   let cols = if arg0 == none { "l" } else { mitex-tex-str(arg0) }

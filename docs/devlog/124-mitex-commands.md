@@ -149,9 +149,12 @@ and `\mho` included, with the arrows stretched under "long label".
 
 ## Future Improvements
 
-- [ ] `cases`/`rcases` put no gap between `a & x > 0`'s columns (Typst's
+- [x] `cases`/`rcases` put no gap between `a & x > 0`'s columns (Typst's
   `cases` treats `&` as an alignment point only); LaTeX puts a quad there.
-- [ ] `\mathclap` overlap, and display-style `\vphantom`, if Typst gets a way
-  to lay math out in a zero-width box without wrapping.
+  Fixed in devlog 126.
+- [ ] Display-style `\vphantom`, if Typst gets a way to lay math out in a
+  zero-width box without wrapping. `\mathclap` stays at full width even then:
+  zero width would put a clapped subscript's ink outside the formula's frame
+  at its edges, and the rasterized image cuts that off (devlog 126).
 - [ ] Report upstream (mitex 0.2.4): the ignored spec argument, `\set` as a
   keyword, `\xcancel` as a single stroke, and the symbols Typst 0.14 renamed.
