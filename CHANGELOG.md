@@ -4,6 +4,9 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **The columns of a `cases` environment are a quad apart, as in LaTeX.** In `\begin{cases} 1 & x > 0 \\ 0 & \text{otherwise} \end{cases}` the value and its condition touched, because the formula engine takes `&` as an alignment point only. `rcases` had the same problem.
+
 ## [0.3.14] - 2026-11-27
 
 Folders can be closed and reopened from a history list, formulas that use less common LaTeX commands render, and table columns no longer narrow after a table appears.
