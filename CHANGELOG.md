@@ -4,9 +4,13 @@ All notable changes to markdown-viewer will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-11-27
+
+Right-to-left paragraphs with inline formulas and right-to-left task lists lay out from the right, `cases` separates its columns, and Recent Folders dims folders that no longer exist.
+
 ### Added
-- **Inline formulas in right-to-left text.** A Hebrew or Arabic paragraph, heading or list item with `$…$` in it used to fall back to the left-to-right layout: left-aligned, with its words in typed order. It now sits at the right edge with the formula in its place among the words, on the same baseline as in left-to-right text. Two things differ from left-to-right paragraphs: copying such a paragraph gives a placeholder character (U+FFFC) per piece of formula, and the selection highlight leaves the formula out. Formulas in table cells and inside links still use the left-to-right layout.
-- **Right-to-left task-list items sit at the right edge like other right-to-left items.** `- [ ] مهمة` used to sit at the left edge, with its text drawn over its own checkbox. Now the marker is at the right edge, the checkbox just left of it and the text left of that, mirroring a left-to-right task item; in an editable view a click still toggles the box. Paragraphs with an inline formula, image or HTML in right-to-left text still lay out left to right.
+- **Inline formulas in right-to-left text (#305).** A Hebrew or Arabic paragraph, heading or list item with `$…$` in it used to fall back to the left-to-right layout: left-aligned, with its words in typed order. It now sits at the right edge with the formula in its place among the words, on the same baseline as in left-to-right text. Two things differ from left-to-right paragraphs: copying such a paragraph gives a placeholder character (U+FFFC) per piece of formula, and the selection highlight leaves the formula out. Formulas in table cells and inside links still use the left-to-right layout.
+- **Right-to-left task-list items sit at the right edge like other right-to-left items (#304).** `- [ ] مهمة` used to sit at the left edge, with its text drawn over its own checkbox. Now the marker is at the right edge, the checkbox just left of it and the text left of that, mirroring a left-to-right task item; in an editable view a click still toggles the box. Paragraphs with an inline image or HTML in right-to-left text still lay out left to right.
 
 ### Changed
 - **Recent Folders dims a folder that no longer exists, as the welcome page does for files (#303).** Clicking such a folder used to show "Folder is unavailable"; now its entry is greyed out and can't be clicked, and hovering it says "Folder not found" with the path. ✕ still removes it. On the welcome page, a missing file's tooltip now says "File not found" with its path; it showed nothing before.
