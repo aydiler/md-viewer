@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_backend_extended"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "data-url",
  "egui",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_extended"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "document-features",
  "eframe",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "egui_commonmark_macros_extended"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "document-features",
  "egui",
