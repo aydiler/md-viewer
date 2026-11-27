@@ -425,3 +425,186 @@ fn rtl_table_cell_aligns_its_text_right() {
         );
     }
 }
+
+/// Square rectangles of checkbox size: the boxes of task-list checkboxes.
+fn checkboxes(ctx: &Context, cache: &mut CommonMarkCache, markdown: &str) -> Vec<Rect> {
+    fn walk(shape: &Shape, out: &mut Vec<Rect>) {
+        match shape {
+            Shape::Rect(r)
+                if (8.0..=24.0).contains(&r.rect.width())
+                    && (r.rect.width() - r.rect.height()).abs() < 1.0 =>
+            {
+                out.push(r.rect)
+            }
+            Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let full = ctx.run_frame(input(), |ctx| {
+        egui::CentralPanel::default().show_ctx(ctx, |ui| {
+            CommonMarkViewer::new()
+                .default_width(Some(COLUMN_WIDTH))
+                .show_scrollable("rtl-doc", ui, cache, markdown);
+        });
+    });
+    let mut out = Vec::new();
+    for clipped in full.shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// Horizontal extent of the glyphs on a label's first row. A wrapping label's
+/// galley starts at the row's left edge, before any widget on that row, so its
+/// rect says nothing about where the text begins.
+fn first_row_glyphs(text: &Painted) -> (f32, f32) {
+    let row = text.galley.rows.first().expect("a row");
+    let x = text.pos.x + row.pos.x;
+    let left = row.glyphs.iter().map(|g| g.pos.x).fold(f32::MAX, f32::min);
+    let right = row
+        .glyphs
+        .iter()
+        .map(|g| g.pos.x + g.advance_width)
+        .fold(f32::MIN, f32::max);
+    (x + left, x + right)
+}
+
+fn on_row<'a>(rects: &'a [Rect], text: &Painted) -> &'a Rect {
+    let mid = text.pos.y + text.galley.rect.center().y;
+    rects
+        .iter()
+        .find(|r| (r.center().y - mid).abs() < 12.0)
+        .unwrap_or_else(|| panic!("no checkbox on {:?}'s row; checkboxes {rects:?}", text.text))
+}
+
+#[test]
+fn rtl_task_item_mirrors_the_ltr_task_item() {
+    let doc = format!("{ENGLISH}\n\n- [ ] English task\n\n---\n\n- [x] שלום עולם\n");
+    let ctx = context();
+    let mut cache = CommonMarkCache::default();
+    let _ = frame(&ctx, &mut cache, &doc, input());
+    let painted = frame(&ctx, &mut cache, &doc, input());
+    let boxes = checkboxes(&ctx, &mut cache, &doc);
+    let bullets = circles(&ctx, &mut cache, &doc);
+    let (left, right) = column(&painted);
+
+    let ltr = find(&painted, "English task");
+    let ltr_box = on_row(&boxes, ltr);
+    let ltr_gap = first_row_glyphs(ltr).0 - ltr_box.right();
+
+    let rtl = find(&painted, "שלום");
+    let rtl_box = on_row(&boxes, rtl);
+    let rtl_mid = rtl.pos.y + rtl.galley.rect.center().y;
+    let marker = bullets
+        .iter()
+        .find(|c| (c.y - rtl_mid).abs() < 12.0)
+        .unwrap_or_else(|| panic!("no bullet on the RTL task's row; bullets {bullets:?}"));
+    assert!(
+        rtl.left() > left + 100.0 && rtl.right() > right - 100.0,
+        "RTL task text at {:.1}..{:.1} is not at the right of the column {left:.1}..{right:.1}",
+        rtl.left(),
+        rtl.right()
+    );
+    let rtl_text_right = first_row_glyphs(rtl).1;
+    assert!(
+        rtl_text_right <= rtl_box.left() && rtl_box.right() < marker.x && marker.x <= right,
+        "expected text {rtl_text_right:.1} <= checkbox {:.1}..{:.1} < marker {:.1} <= right \
+         edge {right:.1}",
+        rtl_box.left(),
+        rtl_box.right(),
+        marker.x
+    );
+    let rtl_gap = rtl_box.left() - rtl_text_right;
+    assert!(
+        (rtl_gap - ltr_gap).abs() <= 2.0,
+        "checkbox-to-text gap: RTL {rtl_gap:.1} px, LTR {ltr_gap:.1} px"
+    );
+    assert!(
+        (rtl_box.center().y - ltr_box.center().y - (rtl.pos.y - ltr.pos.y)).abs() <= 2.0,
+        "RTL checkbox sits {:.1} px from its text's row top, LTR {:.1} px",
+        rtl_box.center().y - rtl.pos.y,
+        ltr_box.center().y - ltr.pos.y
+    );
+}
+
+#[test]
+fn loose_rtl_task_items_put_their_checkboxes_right_of_the_text() {
+    let doc = format!("{ENGLISH}\n\n- [ ] שלום עולם\n\n- [x] עוד פריט\n");
+    let ctx = context();
+    let mut cache = CommonMarkCache::default();
+    let _ = frame(&ctx, &mut cache, &doc, input());
+    let painted = frame(&ctx, &mut cache, &doc, input());
+    let boxes = checkboxes(&ctx, &mut cache, &doc);
+    let (_, right) = column(&painted);
+    for marker in ["שלום", "עוד"] {
+        let item = find(&painted, marker);
+        let checkbox = on_row(&boxes, item);
+        let text_right = first_row_glyphs(item).1;
+        assert!(
+            text_right <= checkbox.left() && checkbox.right() < right,
+            "{marker}: text ends {text_right:.1}, checkbox {:.1}..{:.1}, right edge {right:.1}",
+            checkbox.left(),
+            checkbox.right()
+        );
+    }
+}
+
+#[test]
+fn clicking_an_rtl_task_checkbox_toggles_it_in_the_source() {
+    let ctx = context();
+    let mut cache = CommonMarkCache::default();
+    let mut text = "- [ ] שלום עולם\n".to_owned();
+    let run = |input: RawInput, text: &mut String, cache: &mut CommonMarkCache| {
+        let full = ctx.run_frame(input, |ctx| {
+            egui::CentralPanel::default().show_ctx(ctx, |ui| {
+                CommonMarkViewer::new()
+                    .default_width(Some(COLUMN_WIDTH))
+                    .show_mut(ui, cache, text);
+            });
+        });
+        let mut boxes = Vec::new();
+        fn walk(shape: &Shape, out: &mut Vec<Rect>) {
+            match shape {
+                Shape::Rect(r)
+                    if (8.0..=24.0).contains(&r.rect.width())
+                        && (r.rect.width() - r.rect.height()).abs() < 1.0 =>
+                {
+                    out.push(r.rect)
+                }
+                Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        for clipped in full.shapes {
+            walk(&clipped.shape, &mut boxes);
+        }
+        boxes
+    };
+    let _ = run(input(), &mut text, &mut cache);
+    let boxes = run(input(), &mut text, &mut cache);
+    // egui's checkbox paints two concentric squares; one checkbox means one centre.
+    let at = boxes.first().expect("a checkbox").center();
+    assert!(
+        boxes.iter().all(|b| (b.center() - at).length() < 3.0),
+        "one checkbox: {boxes:?}"
+    );
+    assert!(
+        at.x > PANE_WIDTH / 2.0,
+        "the RTL checkbox is not on the right half: {at:?}"
+    );
+    let pointer = |pressed: bool| RawInput {
+        events: vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            },
+        ],
+        ..input()
+    };
+    let _ = run(pointer(true), &mut text, &mut cache);
+    let _ = run(pointer(false), &mut text, &mut cache);
+    assert_eq!(text, "- [x] שלום עולם\n");
+}
