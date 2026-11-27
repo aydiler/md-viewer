@@ -3603,6 +3603,43 @@ impl CommonMarkCache {
             .map(|frontier| frontier.src_end)
     }
 
+    /// Content y of the top of the top-level block that holds
+    /// `source_offset` in a scrollable viewer's measured layout, or `None`
+    /// when the viewer has no measured layout or has not measured that far
+    /// (see [`measured_source_end`](Self::measured_source_end)).
+    ///
+    /// A block is the stretch between two of the viewer's split points, so a
+    /// list, table or blockquote counts as one block. Scrolling there makes
+    /// the viewport slice lay out that block, which records the positions
+    /// inside it, such as the active search match's
+    /// ([`active_search_y`](Self::active_search_y)).
+    pub fn measured_block_top(
+        &self,
+        source_id: impl std::hash::Hash + std::fmt::Debug,
+        source_offset: usize,
+    ) -> Option<f32> {
+        let sc = self.scroll.get(&egui::Id::unique(source_id))?;
+        sc.page_size?;
+        if sc
+            .measure_frontier
+            .is_some_and(|frontier| source_offset >= frontier.src_end)
+        {
+            return None;
+        }
+        // A split point records the event that starts the next block and the
+        // position after the block it closes, which is where the next one
+        // starts.
+        let before = sc.split_points.partition_point(|(event_index, _, _)| {
+            sc.events
+                .get(*event_index)
+                .is_some_and(|(_, span)| span.start <= source_offset)
+        });
+        Some(match before.checked_sub(1) {
+            Some(i) => sc.split_points[i].2.y,
+            None => 0.0,
+        })
+    }
+
     /// If the user clicks on a link in the markdown render that has `name` as a link. The hook
     /// specified with this method will be set to true. It's status can be acquired
     /// with [`get_link_hook`](Self::get_link_hook). Be aware that all hook state is reset once
@@ -3738,6 +3775,14 @@ impl CommonMarkCache {
             self.active_search_y = None;
         }
         self.active_search_range = range;
+    }
+
+    /// Forget the active match's recorded position, keeping the match. The
+    /// scrollable viewer calls this when it drops its measured layout (new
+    /// content, width, zoom or theme), so a position from the old layout is
+    /// not mistaken for the current one.
+    pub fn forget_active_search_y(&mut self) {
+        self.active_search_y = None;
     }
 
     /// Clear all search-match state.

@@ -530,7 +530,8 @@ impl<'f> CommonMarkViewer<'f> {
 
     /// With [`progressive_measure`](Self::progressive_measure): the caller
     /// needs the document measured up to this source byte offset, typically
-    /// a heading it wants to scroll to. Measurement continues with a larger
+    /// a heading or a search match it wants to scroll to. Measurement
+    /// continues with a larger
     /// per-frame time budget until the measured part reaches the offset, so
     /// the target's position is recorded within a few frames without laying
     /// out the whole document in one frame the way

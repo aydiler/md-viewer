@@ -545,3 +545,127 @@ fn measuring_toward_a_target_records_it_at_the_one_shot_position() {
         "target heading at {got:.1}, one-shot {want:.1}"
     );
 }
+
+/// The byte range of the first `needle` at or after `from` in `md`.
+fn find_from(md: &str, from: usize, needle: &str) -> std::ops::Range<usize> {
+    let start = from + md[from..].find(needle).expect("needle in the document");
+    start..start + needle.len()
+}
+
+/// Make `range` the only, and active, search match.
+fn set_active_match(cache: &mut CommonMarkCache, range: &std::ops::Range<usize>) {
+    cache.set_search_ranges(vec![range.clone()]);
+    cache.set_active_search_range(Some(range.clone()));
+}
+
+/// The active match's position after a one-frame bootstrap at `width`.
+fn one_shot_active_y(md: &str, width: f32, range: &std::ops::Range<usize>) -> f32 {
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    set_active_match(&mut cache, range);
+    for _ in 0..3 {
+        render(&ctx, &mut cache, md, width, ONE_SHOT);
+    }
+    cache
+        .active_search_y()
+        .expect("a one-shot bootstrap lays the match out")
+}
+
+/// A find-bar jump measures toward its match like a heading jump (devlog
+/// 130): the measuring pass that lays the match out records its position,
+/// where a full layout would, before the rest of the document is measured.
+#[test]
+fn measuring_toward_an_active_match_records_it_at_the_one_shot_position() {
+    let md = document();
+    let range = find_from(&md, 0, "words of section 20.");
+    let want = one_shot_active_y(&md, 600.0, &range);
+
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    set_active_match(&mut cache, &range);
+    let mut frames = 0;
+    while cache.active_search_y().is_none() {
+        frames += 1;
+        assert!(frames < 2000, "the match never got a position");
+        render(
+            &ctx,
+            &mut cache,
+            &md,
+            600.0,
+            Mode {
+                target: Some(range.start),
+                ..PROGRESSIVE
+            },
+        );
+    }
+    assert!(
+        frontier(&mut cache).is_some(),
+        "the match was found by measuring the whole document"
+    );
+    let got = cache.active_search_y().unwrap();
+    assert!(
+        (got - want).abs() <= 1.0,
+        "match recorded at {got:.1} after {frames} frames, one-shot {want:.1}"
+    );
+}
+
+/// `measured_block_top` names the top of the block holding an offset: below
+/// the heading before a paragraph and at or above a match inside it, so
+/// scrolling there brings the match's block into the viewport slice.
+#[test]
+fn measured_block_top_points_at_the_block_holding_an_offset() {
+    let md = document();
+    let section = md.find("Section 20 opens").unwrap();
+    let range = find_from(&md, section, "measurement depends");
+    let match_y = one_shot_active_y(&md, 600.0, &range);
+    let heading_y = one_shot_geometry(&md, 600.0).headers[19].expect("heading 20 position");
+
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    run_to_completion(&ctx, &mut cache, &md, 600.0);
+    let top = cache
+        .measured_block_top("doc", range.start)
+        .expect("a fully measured document has every block");
+    assert!(
+        heading_y < top && top <= match_y,
+        "block top {top:.1} is not between heading {heading_y:.1} and match {match_y:.1}"
+    );
+    assert_eq!(cache.measured_block_top("doc", 0), Some(0.0));
+
+    // Past the frontier there is no layout to point at.
+    let mut cache = CommonMarkCache::default();
+    render(&ctx, &mut cache, &md, 600.0, PROGRESSIVE);
+    let measured_end = frontier(&mut cache).expect("still measuring").src_end;
+    assert_eq!(cache.measured_block_top("doc", measured_end), None);
+    assert_eq!(cache.measured_block_top("doc", 0), Some(0.0));
+    assert_eq!(
+        CommonMarkCache::default().measured_block_top("doc", 0),
+        None,
+        "a viewer that was never shown has no layout"
+    );
+}
+
+/// A position recorded in an old layout is not the match's position in the
+/// new one: after a width change, a match the new layout has not reached
+/// has no position, instead of the old one (devlog 130).
+#[test]
+fn a_layout_change_forgets_the_active_match_position() {
+    let md = document();
+    let range = find_from(&md, 0, "words of section 30.");
+    let ctx = Context::default();
+    let mut cache = CommonMarkCache::default();
+    set_active_match(&mut cache, &range);
+    for _ in 0..3 {
+        render(&ctx, &mut cache, &md, 600.0, ONE_SHOT);
+    }
+    assert!(cache.active_search_y().is_some());
+
+    render(&ctx, &mut cache, &md, 400.0, PROGRESSIVE);
+    let measured_end = frontier(&mut cache).expect("the new layout is measured progressively");
+    assert!(measured_end.src_end < range.start);
+    assert_eq!(
+        cache.active_search_y(),
+        None,
+        "the position from the 600 px layout survived the width change"
+    );
+}
