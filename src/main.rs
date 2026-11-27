@@ -3226,11 +3226,9 @@ impl MarkdownApp {
 
     fn close_folder(&mut self) {
         self.file_explorer.close_root();
-        if self.tabs.is_empty() {
-            self.stop_watching();
-        } else {
-            self.reconcile_explorer_watches();
-        }
+        // Keep the watcher even with no tab open: a file opened next is then
+        // watched directly, not through the failed-watcher recovery path.
+        self.reconcile_explorer_watches();
     }
 
     fn open_in_new_tab(&mut self, path: PathBuf) {
@@ -7308,6 +7306,16 @@ mod tests {
             PathBuf::from(format!("folder-{RECENT_FOLDERS_CAP}"))
         );
         assert!(!folders.contains(&PathBuf::from("folder-0")));
+    }
+
+    #[test]
+    fn recent_folders_move_a_repeated_folder_to_the_front() {
+        let mut folders = Vec::new();
+        push_recent_folder(&mut folders, Path::new("a"));
+        push_recent_folder(&mut folders, Path::new("b"));
+        push_recent_folder(&mut folders, Path::new("a"));
+
+        assert_eq!(folders, vec![PathBuf::from("a"), PathBuf::from("b")]);
     }
 
     #[test]
