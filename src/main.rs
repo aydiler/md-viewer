@@ -692,6 +692,80 @@ fn resolve_header_jump(
     }
 }
 
+/// A find-bar jump to a match whose position may not be recorded yet
+/// (devlog 130).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingSearchJump {
+    /// The match's source byte offset: the renderer measures toward it.
+    source_start: usize,
+    /// For the line-ratio estimate when there is no measured layout.
+    line_number: usize,
+    /// The view was moved to the block holding the match. From then on the
+    /// viewport slice lays the match out, so a missing position means the
+    /// match has nothing to draw.
+    located: bool,
+}
+
+impl PendingSearchJump {
+    fn new(found: &SearchMatch) -> Self {
+        Self {
+            source_start: found.byte_start,
+            line_number: found.line_number,
+            located: false,
+        }
+    }
+}
+
+/// What the post-render step does with a pending find-bar jump.
+#[derive(Debug, PartialEq)]
+enum SearchJumpStep {
+    /// The match's position is recorded: bring it into view.
+    Reveal(f32),
+    /// The measured part has not reached the match yet: keep measuring.
+    Wait,
+    /// The match's block is measured, but the match was not laid out this
+    /// frame: scroll to that block (its top here), so the next frame's
+    /// viewport slice lays the match out and records its position.
+    Locate(f32),
+    /// The block was brought into view and the match still has no position
+    /// (a match with nothing to draw): leave the view at its block.
+    Stop,
+    /// There is no measured layout to search: use the line-ratio estimate.
+    Estimate,
+}
+
+/// Decide a pending find-bar jump after a frame. `measured_source_end` is
+/// `None` once the whole document is measured; `block_top` is the top of the
+/// measured block holding the match.
+fn resolve_search_jump(
+    jump: PendingSearchJump,
+    position: Option<f32>,
+    measured_source_end: Option<usize>,
+    block_top: Option<f32>,
+) -> SearchJumpStep {
+    if let Some(y) = position {
+        return SearchJumpStep::Reveal(y);
+    }
+    if measured_source_end.is_some_and(|end| end <= jump.source_start) {
+        return SearchJumpStep::Wait;
+    }
+    match block_top {
+        _ if jump.located => SearchJumpStep::Stop,
+        Some(top) => SearchJumpStep::Locate(top),
+        None => SearchJumpStep::Estimate,
+    }
+}
+
+/// Where a find-bar jump puts its target: about a third of the way down the
+/// pane, so the lines before the match stay visible.
+fn search_target_inset(viewport_height: f32) -> f32 {
+    if viewport_height > 0.0 {
+        viewport_height * 0.35
+    } else {
+        100.0
+    }
+}
+
 /// Represents a markdown header for the outline
 #[derive(Clone)]
 struct Header {
@@ -1410,14 +1484,14 @@ struct Tab {
     /// "Load images" was clicked for this tab while remote images are set to
     /// Ask (#289). Session only.
     remote_images_allowed: bool,
-    /// One-shot permission for the post-render corrective scroll that snaps
-    /// the active search match into view. Set by `scroll_to_active_match`
-    /// (jump_match / search-open / tab-switch / query-rebuild) and cleared
-    /// after the corrective block runs once. Without this gate, the block
-    /// would re-fire every frame while `active_search_y` remains populated,
-    /// fighting the user's wheel input and locking the view to the active
-    /// match — see issue #19 / docs/devlog/031-search-scroll-lock.md.
-    correct_active_search_pending: bool,
+    /// A find-bar jump in progress, armed by `scroll_to_active_match`
+    /// (jump_match / search-open / tab-switch / query-rebuild). The renderer
+    /// measures toward the match, and the post-render step scrolls once its
+    /// position is recorded (`resolve_search_jump`, devlog 130). The jump is
+    /// consumed by its last scroll: a correction that re-fired every frame
+    /// while `active_search_y` stays populated fought the user's wheel input
+    /// and locked the view to the match (issue #19, devlog 031).
+    pending_search_jump: Option<PendingSearchJump>,
     last_content_height: f32,
     last_viewport_height: f32,
     content_lines: usize,
@@ -1489,7 +1563,7 @@ impl Tab {
             pending_scroll_offset: None,
             pending_header_jump: None,
             remote_images_allowed: false,
-            correct_active_search_pending: false,
+            pending_search_jump: None,
             last_content_height: 0.0,
             last_viewport_height: 0.0,
             content_lines,
@@ -1567,6 +1641,17 @@ impl Tab {
     /// Rebuild `search_matches` for `query`. Empty query clears matches.
     fn rebuild_search(&mut self, query: &str) {
         self.search_matches = find_matches(&self.content, query);
+    }
+
+    /// Start a find-bar jump to match `index`. Nothing scrolls yet: the
+    /// post-render step scrolls once the match's position or block is known
+    /// (`resolve_search_jump`). Jumping to a line-ratio estimate first asked
+    /// for an offset the renderer could only honour by measuring the whole
+    /// document in one frame (devlog 130).
+    fn start_search_jump(&mut self, index: usize) {
+        if let Some(found) = self.search_matches.get(index) {
+            self.pending_search_jump = Some(PendingSearchJump::new(found));
+        }
     }
 
     fn load_file(&mut self, path: &Path) -> io::Result<()> {
@@ -2332,10 +2417,6 @@ fn find_matches(content: &str, query: &str) -> Vec<SearchMatch> {
     }
 
     matches
-}
-
-fn take_search_correction_request(pending: &mut bool) -> bool {
-    std::mem::take(pending)
 }
 
 /// Check if header at `index` should be hidden because an ancestor is collapsed
@@ -3884,38 +3965,17 @@ impl MarkdownApp {
         self.scroll_to_active_match();
     }
 
-    /// Request a scroll-to-line for the current `active_match_index`. No-op when
-    /// there's no active tab, no matches, or content height hasn't been measured yet.
-    /// Used both by `jump_match` (cycling) and by `maybe_rebuild_search` (so typing a
-    /// fresh query or switching tabs lands the view on the first match instead of
-    /// leaving the view at wherever the user previously scrolled).
+    /// Bring the current `active_match_index` into view. No-op when there's no
+    /// active tab or no matches. Used both by `jump_match` (cycling) and by
+    /// `maybe_rebuild_search` (so typing a fresh query or switching tabs lands
+    /// the view on the first match instead of leaving the view at wherever the
+    /// user previously scrolled). The scroll itself happens after rendering
+    /// (`resolve_search_jump`).
     fn scroll_to_active_match(&mut self) {
         let idx = self.search.active_match_index;
-        let tab = match self.tabs.get_mut(self.active_tab) {
-            Some(t) => t,
-            None => return,
-        };
-        let Some(m) = tab.search_matches.get(idx) else {
-            return;
-        };
-        if tab.last_content_height <= 0.0 || tab.content_lines == 0 {
-            return;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.start_search_jump(idx);
         }
-        // Line-ratio estimate gets the view roughly in the right area. The renderer
-        // records the actual y of the active match during paint; render_tab_content
-        // schedules a corrective scroll next frame if this estimate was off.
-        let estimated_y =
-            (m.line_number as f32 / tab.content_lines as f32) * tab.last_content_height;
-        let margin = if tab.last_viewport_height > 0.0 {
-            tab.last_viewport_height * 0.35
-        } else {
-            100.0
-        };
-        tab.pending_scroll_offset = Some((estimated_y - margin).max(0.0));
-        // Grant the next render one full-paint attempt to record an exact Y.
-        // The request is consumed before that render even when the source
-        // match has no visible glyph, so later frames return to clipping.
-        tab.correct_active_search_pending = true;
     }
 
     /// Rebuild the active tab's search matches if the query or active tab has changed.
@@ -4647,13 +4707,6 @@ impl MarkdownApp {
             tab.cache.clear_search_ranges();
         }
 
-        // A search correction grants exactly one full-paint attempt. Some
-        // source matches (for example Markdown syntax markers) have no
-        // rendered glyph and therefore never record a Y; do not let those
-        // matches disable viewport clipping forever.
-        let correct_search_this_frame =
-            take_search_correction_request(&mut tab.correct_active_search_pending);
-
         // Ask mode: offer to load the remote images this document skipped
         // (#289). The count grows as more of the document is laid out.
         let blocked_remote = tab.cache.blocked_remote_image_count();
@@ -4775,9 +4828,16 @@ impl MarkdownApp {
                         ui.ctx().request_repaint();
                     }
                 } else {
-                    // A heading jump no longer forces a full layout: the
-                    // renderer measures toward it instead (devlog 115).
-                    let force_full_render = correct_search_this_frame;
+                    // Heading and find-bar jumps never force a full layout:
+                    // the renderer measures toward their target instead
+                    // (devlogs 115, 130).
+                    let measure_target = [
+                        tab.pending_header_jump.map(|jump| jump.source_start),
+                        tab.pending_search_jump.map(|jump| jump.source_start),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .min();
                     let pending = tab.pending_scroll_offset.take();
                     let default_width = content_default_width(self.full_width_content);
                     let content_width =
@@ -4819,10 +4879,7 @@ impl MarkdownApp {
                             .heading_spacing_below(0.75)
                             .content_version(tab.content_version)
                             .pending_scroll_offset(pending)
-                            .force_full_render(force_full_render)
-                            .measure_to_source(
-                                tab.pending_header_jump.map(|jump| jump.source_start),
-                            )
+                            .measure_to_source(measure_target)
                             .scroll_source(egui::scroll_area::ScrollSource {
                                 scroll_bar: true,
                                 drag: egui::scroll_area::DragScroll::Never,
@@ -4838,34 +4895,63 @@ impl MarkdownApp {
                     }
                 }
 
-                // If the renderer recorded an exact y for the active match, check
-                // whether the current scroll position keeps it visible. If not,
-                // schedule a corrective scroll using the recorded y — this fixes
-                // line-ratio overshoot/undershoot in image-heavy documents.
-                // Corrective scroll for search-match jump. Gated by the
-                // one-shot `correct_active_search_pending` flag (set by
-                // `scroll_to_active_match`) so it fires at most once per
-                // jump — without this gate the block would re-trigger every
-                // frame the active match is off-screen, fighting the user's
-                // wheel input and locking the view (issue #19).
-                if correct_search_this_frame {
-                    if let Some(actual_y) = tab.cache.active_search_y() {
-                        // View-mode only: scroll_output is None while editing.
-                        if let Some(so) = scroll_output.as_ref() {
+                // Pending find-bar jump: bring the match into view once its
+                // position is recorded. Until then, measure toward it, or move
+                // the view to its measured block so the viewport slice lays
+                // it out (devlog 130). The jump is consumed by its last
+                // scroll, so it never fights the wheel afterwards (#19).
+                if let Some(jump) = tab.pending_search_jump {
+                    match scroll_output.as_ref() {
+                        // Edit mode renders no document; drop the jump.
+                        None => tab.pending_search_jump = None,
+                        Some(so) => {
                             let current_scroll = so.state.unclamped_offset().y;
-                            let viewport_top = current_scroll;
-                            let viewport_bottom = current_scroll + tab.last_viewport_height;
-                            // Consider "not visible" if outside the viewport with a small margin
-                            let margin_outside = 20.0_f32;
-                            let needs_correction = actual_y < viewport_top + margin_outside
-                                || actual_y > viewport_bottom - margin_outside;
-                            if needs_correction && tab.last_viewport_height > 0.0 {
-                                // Place the active match ~35% from the top of the viewport
-                                let inset = tab.last_viewport_height * 0.35;
-                                let want_scroll = (actual_y - inset).max(0.0);
-                                // Avoid stomping if we're already at the target (within a frame)
-                                if (want_scroll - current_scroll).abs() > 2.0 {
-                                    tab.pending_scroll_offset = Some(want_scroll);
+                            let viewport_height = tab.last_viewport_height;
+                            let inset = search_target_inset(viewport_height);
+                            match resolve_search_jump(
+                                jump,
+                                tab.cache.active_search_y(),
+                                tab.cache.measured_source_end(tab.id),
+                                tab.cache.measured_block_top(tab.id, jump.source_start),
+                            ) {
+                                SearchJumpStep::Reveal(actual_y) => {
+                                    tab.pending_search_jump = None;
+                                    // Scroll only when the match is outside the
+                                    // view, with a small margin.
+                                    let margin_outside = 20.0_f32;
+                                    let needs_scroll = actual_y < current_scroll + margin_outside
+                                        || actual_y
+                                            > current_scroll + viewport_height - margin_outside;
+                                    let want_scroll = (actual_y - inset).max(0.0);
+                                    if needs_scroll
+                                        && viewport_height > 0.0
+                                        && (want_scroll - current_scroll).abs() > 2.0
+                                    {
+                                        tab.pending_scroll_offset = Some(want_scroll);
+                                    }
+                                }
+                                SearchJumpStep::Wait => ui.ctx().request_repaint(),
+                                SearchJumpStep::Locate(block_top) => {
+                                    tab.pending_search_jump = Some(PendingSearchJump {
+                                        located: true,
+                                        ..jump
+                                    });
+                                    let want_scroll = (block_top - inset).max(0.0);
+                                    if (want_scroll - current_scroll).abs() > 2.0 {
+                                        tab.pending_scroll_offset = Some(want_scroll);
+                                    }
+                                    ui.ctx().request_repaint();
+                                }
+                                SearchJumpStep::Stop => tab.pending_search_jump = None,
+                                SearchJumpStep::Estimate => {
+                                    tab.pending_search_jump = None;
+                                    if tab.last_content_height > 0.0 && tab.content_lines > 0 {
+                                        let estimated_y = (jump.line_number as f32
+                                            / tab.content_lines as f32)
+                                            * tab.last_content_height;
+                                        tab.pending_scroll_offset =
+                                            Some((estimated_y - inset).max(0.0));
+                                    }
                                 }
                             }
                         }
@@ -7594,12 +7680,94 @@ mod tests {
     }
 
     #[test]
-    fn search_correction_request_is_consumed_even_without_a_rendered_match() {
-        let mut pending = true;
+    fn a_pending_search_jump_reveals_waits_locates_or_stops() {
+        let jump = PendingSearchJump {
+            source_start: 900,
+            line_number: 40,
+            located: false,
+        };
+        let located = PendingSearchJump {
+            located: true,
+            ..jump
+        };
+        // Recorded: reveal it, whatever else is known.
+        assert_eq!(
+            resolve_search_jump(jump, Some(1200.0), Some(500), None),
+            SearchJumpStep::Reveal(1200.0)
+        );
+        assert_eq!(
+            resolve_search_jump(located, Some(1200.0), None, Some(1100.0)),
+            SearchJumpStep::Reveal(1200.0)
+        );
+        // Not recorded and not measured that far: keep measuring.
+        assert_eq!(
+            resolve_search_jump(jump, None, Some(500), None),
+            SearchJumpStep::Wait
+        );
+        assert_eq!(
+            resolve_search_jump(jump, None, Some(900), None),
+            SearchJumpStep::Wait
+        );
+        // Measured, but not laid out this frame: go to its block first.
+        assert_eq!(
+            resolve_search_jump(jump, None, Some(901), Some(1100.0)),
+            SearchJumpStep::Locate(1100.0)
+        );
+        assert_eq!(
+            resolve_search_jump(jump, None, None, Some(1100.0)),
+            SearchJumpStep::Locate(1100.0)
+        );
+        // Its block was brought into view and it still has no position: a
+        // match with nothing to draw must not leave the jump pending.
+        assert_eq!(
+            resolve_search_jump(located, None, None, Some(1100.0)),
+            SearchJumpStep::Stop
+        );
+        // No measured layout at all: estimate.
+        assert_eq!(
+            resolve_search_jump(jump, None, None, None),
+            SearchJumpStep::Estimate
+        );
+    }
 
-        assert!(take_search_correction_request(&mut pending));
-        assert!(!pending);
-        assert!(!take_search_correction_request(&mut pending));
+    #[test]
+    fn a_search_jump_measures_toward_its_match_instead_of_guessing() {
+        let root = std::env::temp_dir().join(format!(
+            "md-viewer-130-search-jump-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let document = root.join("long.md");
+        fs::write(&document, "# Title\n\ntext\n\n## Far Away\n\nthe needle\n").unwrap();
+        let mut tab = Tab::new(document).unwrap();
+        // As after a first frame: a measured height exists, but the match
+        // has no recorded position yet.
+        tab.last_content_height = 50_000.0;
+        tab.last_viewport_height = 800.0;
+        tab.rebuild_search("needle");
+        let needle = tab.content.find("needle").unwrap();
+
+        tab.start_search_jump(0);
+        assert_eq!(
+            tab.pending_scroll_offset, None,
+            "jumping to a line-ratio estimate first asks for an offset the \
+             renderer can only honour by laying out the whole document"
+        );
+        assert_eq!(
+            tab.pending_search_jump,
+            Some(PendingSearchJump {
+                source_start: needle,
+                line_number: 7,
+                located: false,
+            })
+        );
+
+        // An index past the matches arms nothing.
+        tab.pending_search_jump = None;
+        tab.start_search_jump(1);
+        assert_eq!(tab.pending_search_jump, None);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

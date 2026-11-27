@@ -3488,9 +3488,12 @@ impl CommonMarkViewerInternal {
         }
         // Header positions are content-keyed; new content means the cached
         // y values point at the wrong headings. Done outside the `sc` borrow
-        // scope above so `cache` is reborrowable.
+        // scope above so `cache` is reborrowable. The active search match's
+        // position belongs to the old layout too: a jump to an unchanged match
+        // would otherwise scroll to where it used to be (devlog 130).
         if layout_invalidated {
             cache.clear_header_positions();
+            cache.forget_active_search_y();
         }
 
         // Helper: build the renderer-owned ScrollArea with caller config.
