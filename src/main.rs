@@ -35,6 +35,7 @@ const APP_KEY: &str = "md-viewer-state";
 
 // Welcome page recent-files: how many to keep, and how many to show before "Show more".
 const RECENT_FILES_CAP: usize = 20;
+const RECENT_FOLDERS_CAP: usize = 20;
 const RECENT_SHOWN: usize = 6;
 
 const MAX_WATCHER_RETRIES: u32 = 3;
@@ -543,6 +544,29 @@ fn push_recent(list: &mut Vec<RecentEntry>, path: &Path, now: u64) {
     list.truncate(RECENT_FILES_CAP);
 }
 
+fn push_recent_folder(folders: &mut Vec<PathBuf>, path: &Path) {
+    folders.retain(|folder| folder != path);
+    folders.insert(0, path.to_path_buf());
+    folders.truncate(RECENT_FOLDERS_CAP);
+}
+
+fn initial_explorer_root(
+    closed: bool,
+    cli_file: Option<&Path>,
+    saved_root: Option<PathBuf>,
+    first_tab: Option<&Path>,
+) -> Option<PathBuf> {
+    if closed {
+        return None;
+    }
+    cli_file
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(|| saved_root.filter(|path| path.exists()))
+        .or_else(|| first_tab.and_then(Path::parent).map(Path::to_path_buf))
+        .or_else(|| std::env::current_dir().ok())
+}
+
 /// Format an epoch-seconds timestamp as a short relative time ("3m ago").
 fn format_relative_time(epoch_secs: u64, now: u64) -> String {
     let diff = now.saturating_sub(epoch_secs);
@@ -606,11 +630,14 @@ struct PersistedState {
     // File explorer state
     show_explorer: Option<bool>,
     explorer_root: Option<PathBuf>,
+    /// Missing in older sessions, which may infer a root from an open file.
+    explorer_closed: Option<bool>,
     expanded_dirs: Option<Vec<PathBuf>>,
     explorer_sort_order: Option<SortOrder>,
     explorer_width: Option<f32>,
     outline_width: Option<f32>,
     recent_files: Option<Vec<RecentEntry>>,
+    recent_folders: Option<Vec<PathBuf>>,
 }
 
 fn restored_sidebar_width(width: Option<f32>, default: f32) -> f32 {
@@ -944,6 +971,13 @@ impl FileExplorer {
             self.tree = Self::scan_directory_shallow(&path, self.sort_order);
             Self::restore_expanded_children(&mut self.tree, &self.expanded_dirs, self.sort_order);
         }
+    }
+
+    fn close_root(&mut self) {
+        self.root = None;
+        self.tree.clear();
+        self.expanded_dirs.clear();
+        self.pending_scan = None;
     }
 
     fn start_root_scan(&mut self, path: PathBuf, expands_all: bool) -> bool {
@@ -2771,6 +2805,7 @@ struct MarkdownApp {
     search: SearchState,
     // Recently opened files (most-recent first), shown on the welcome page
     recent_files: Vec<RecentEntry>,
+    recent_folders: Vec<PathBuf>,
     // Welcome page: whether the recent list is expanded ("Show more")
     welcome_show_all: bool,
     // MCP bridge for E2E testing
@@ -2937,33 +2972,25 @@ impl MarkdownApp {
             file_explorer.sort_order = sort_order;
         }
 
-        // Determine explorer root:
-        // 1. From CLI file path
-        // 2. From persisted state
-        // 3. From first open tab
-        // 4. Current working directory as fallback
-        let explorer_root = file
-            .as_ref()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .or(persisted.explorer_root.filter(|p| p.exists()))
-            .or_else(|| {
-                tabs.first()
-                    .and_then(|t| t.path.parent().map(|p| p.to_path_buf()))
-            })
-            .or_else(|| std::env::current_dir().ok());
+        let explorer_root = initial_explorer_root(
+            persisted.explorer_closed.unwrap_or(false),
+            file.as_deref(),
+            persisted.explorer_root,
+            tabs.first().map(|tab| tab.path.as_path()),
+        );
 
         // Bound the expansion set before the background scan or watcher sees it.
-        if let Some(expanded) = persisted.expanded_dirs {
-            if file_explorer.restore_expansion(expanded, explorer_root.as_deref()) {
-                let message = format!(
-                    "Explorer restored only the first {} saved expanded directories.",
-                    FileExplorer::BULK_EXPANSION_LIMIT
-                );
-                log::warn!("{message}");
-                startup_error.get_or_insert(message);
-            }
-        }
         if let Some(root) = explorer_root {
+            if let Some(expanded) = persisted.expanded_dirs {
+                if file_explorer.restore_expansion(expanded, Some(&root)) {
+                    let message = format!(
+                        "Explorer restored only the first {} saved expanded directories.",
+                        FileExplorer::BULK_EXPANSION_LIMIT
+                    );
+                    log::warn!("{message}");
+                    startup_error.get_or_insert(message);
+                }
+            }
             file_explorer.set_root(root);
         }
 
@@ -3041,6 +3068,7 @@ impl MarkdownApp {
             lightbox_open_count: 0,
             search: SearchState::default(),
             recent_files: persisted.recent_files.unwrap_or_default(),
+            recent_folders: persisted.recent_folders.unwrap_or_default(),
             welcome_show_all: false,
             #[cfg(feature = "mcp")]
             mcp_bridge,
@@ -3174,22 +3202,33 @@ impl MarkdownApp {
     /// directory (issue #28). The chosen root is persisted via `save()`.
     fn open_folder_dialog(&mut self) {
         match pick_folder(self.file_explorer.root.as_deref()) {
-            Ok(Some(path)) => {
-                self.file_explorer.set_root(path);
-                // Make sure the explorer is visible so the result is seen.
-                self.show_explorer = true;
-                // Rebuild the watcher so the new root is watched recursively
-                // (`update_watched_paths` only reconciles tab paths, not the root).
-                if self.watch_enabled {
-                    self.start_watching();
-                }
-            }
+            Ok(Some(path)) => self.open_folder(path),
             Ok(None) => {}
             Err(error) => {
                 log::error!("Unable to open folder picker: {error}");
                 self.error_message = Some(format!("Unable to open folder picker: {error}"));
             }
         }
+    }
+
+    fn open_folder(&mut self, path: PathBuf) {
+        if !path.is_dir() {
+            self.error_message = Some(format!("Folder is unavailable: {}", path.display()));
+            return;
+        }
+        push_recent_folder(&mut self.recent_folders, &path);
+        self.file_explorer.set_root(path);
+        self.show_explorer = true;
+        if self.watch_enabled {
+            self.start_watching();
+        }
+    }
+
+    fn close_folder(&mut self) {
+        self.file_explorer.close_root();
+        // Keep the watcher even with no tab open: a file opened next is then
+        // watched directly, not through the failed-watcher recovery path.
+        self.reconcile_explorer_watches();
     }
 
     fn open_in_new_tab(&mut self, path: PathBuf) {
@@ -4381,6 +4420,8 @@ impl MarkdownApp {
         let mut do_open_file = false;
         let mut do_open_folder = false;
         let mut open_path: Option<PathBuf> = None;
+        let mut remove_recent = None;
+        let mut clear_history = false;
         let mut toggle_show_all = false;
         let now = now_epoch_secs();
 
@@ -4439,13 +4480,16 @@ impl MarkdownApp {
                     ui.add_space(32.0);
                     // Center a fixed-width, left-aligned column for the recent list.
                     let avail = ui.available_width();
-                    let col_w = 560.0_f32.min((avail - 16.0).max(200.0));
+                    let col_w = (avail - 16.0).clamp(0.0, 560.0);
                     let margin = ((avail - col_w) / 2.0).max(0.0);
                     ui.horizontal(|ui| {
                         ui.add_space(margin);
                         ui.vertical(|ui| {
-                            ui.set_max_width(col_w);
-                            ui.label(egui::RichText::new("Recent").strong());
+                            ui.set_width(col_w);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong("Recent Files");
+                                clear_history = ui.small_button("Clear History").clicked();
+                            });
                             ui.add_space(2.0);
                             ui.separator();
                             for (entry, exists) in &recents {
@@ -4460,21 +4504,54 @@ impl MarkdownApp {
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default();
                                 let when = format_relative_time(entry.last_opened, now);
-                                ui.horizontal(|ui| {
-                                    let label = egui::RichText::new(name.as_str()).size(14.0);
-                                    let label = if *exists { label } else { label.weak() };
-                                    let resp = ui
-                                        .add_enabled(*exists, egui::Button::new(label).frame(false))
-                                        .on_hover_text(entry.path.to_string_lossy());
-                                    if resp.clicked() {
-                                        open_path = Some(entry.path.clone());
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(format!("{dir}   ·   {when}"))
-                                            .weak()
-                                            .small(),
-                                    );
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button("✕")
+                                            .on_hover_text("Remove from history")
+                                            .clicked()
+                                        {
+                                            remove_recent = Some(entry.path.clone());
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                // Keep long names out of the remove button's hit area.
+                                                ui.set_clip_rect(
+                                                    ui.clip_rect().intersect(ui.max_rect()),
+                                                );
+                                                let label =
+                                                    egui::RichText::new(name.as_str()).size(14.0);
+                                                let label =
+                                                    if *exists { label } else { label.weak() };
+                                                let resp = ui
+                                                    .add_enabled(
+                                                        *exists,
+                                                        egui::Button::new(label)
+                                                            .frame(false)
+                                                            .truncate(),
+                                                    )
+                                                    .on_hover_text(entry.path.to_string_lossy());
+                                                if resp.clicked() {
+                                                    open_path = Some(entry.path.clone());
+                                                }
+                                                if ui.available_width() > 0.0 {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(format!(
+                                                                "{dir}   ·   {when}"
+                                                            ))
+                                                            .weak()
+                                                            .small(),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    },
+                                );
                             }
                             if total_recent > RECENT_SHOWN {
                                 ui.add_space(6.0);
@@ -4493,6 +4570,12 @@ impl MarkdownApp {
             });
 
         // Deferred actions (run after the borrow on self.recent_files is released).
+        if clear_history {
+            self.recent_files.clear();
+            self.welcome_show_all = false;
+        } else if let Some(path) = remove_recent {
+            self.recent_files.retain(|entry| entry.path != path);
+        }
         if do_open_file {
             self.open_file_dialog();
         }
@@ -4842,6 +4925,74 @@ impl MarkdownApp {
 
     /// Render the file explorer sidebar
     /// Returns actions for files to open or close
+    fn render_empty_explorer(&mut self, ui: &mut egui::Ui) {
+        ui.strong("No folder open");
+        if ui.button("Open Folder…").clicked() {
+            self.open_folder_dialog();
+            return;
+        }
+
+        ui.separator();
+        ui.strong("Recent Folders");
+        if self.recent_folders.is_empty() {
+            ui.label(egui::RichText::new("No recent folders yet.").weak());
+            return;
+        }
+
+        if ui.small_button("Clear History").clicked() {
+            self.recent_folders.clear();
+            return;
+        }
+
+        let mut open = None;
+        let mut remove = None;
+        egui::ScrollArea::vertical()
+            .id_salt("recent_folders")
+            .show(ui, |ui| {
+                for (index, path) in self.recent_folders.iter().enumerate() {
+                    let full_path = path.to_string_lossy();
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_else(|| full_path.clone());
+                    let row_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(
+                        row_size,
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            // Reserve the remove button's actual width before laying out the name.
+                            if ui
+                                .small_button("✕")
+                                .on_hover_text("Remove from history")
+                                .clicked()
+                            {
+                                remove = Some(index);
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                                    if ui
+                                        .add(egui::Button::new(name.as_ref()).truncate())
+                                        .on_hover_text(full_path.as_ref())
+                                        .clicked()
+                                    {
+                                        open = Some(path.clone());
+                                    }
+                                },
+                            );
+                        },
+                    );
+                }
+            });
+        if let Some(index) = remove {
+            self.recent_folders.remove(index);
+        }
+        if let Some(path) = open {
+            self.open_folder(path);
+        }
+    }
+
     fn render_file_explorer(&mut self, ui: &mut egui::Ui) -> ExplorerAction {
         // egui 0.37: panels are shown in the root `Ui`, not on the `Context`.
         let ctx_owned = ui.ctx().clone();
@@ -4873,7 +5024,8 @@ impl MarkdownApp {
                         .unwrap_or_else(|| root.display().to_string());
                     ui.strong(&folder_name);
                 } else {
-                    ui.strong("No folder");
+                    self.render_empty_explorer(ui);
+                    return;
                 }
 
                 // Expand/collapse/refresh buttons - OUTSIDE ScrollArea
@@ -5835,11 +5987,13 @@ impl eframe::App for MarkdownApp {
             active_tab: Some(self.active_tab),
             show_explorer: Some(self.show_explorer),
             explorer_root: self.file_explorer.root.clone(),
+            explorer_closed: Some(self.file_explorer.root.is_none()),
             expanded_dirs: Some(self.file_explorer.expanded_dirs.iter().cloned().collect()),
             explorer_sort_order: Some(self.file_explorer.sort_order),
             explorer_width: Some(self.explorer_width),
             outline_width: Some(self.outline_width),
             recent_files: Some(self.recent_files.clone()),
+            recent_folders: Some(self.recent_folders.clone()),
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -6334,16 +6488,27 @@ impl eframe::App for MarkdownApp {
                         ui.close();
                     }
 
+                    if ui
+                        .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
+                        .clicked()
+                    {
+                        self.close_active_tab();
+                        ui.close();
+                    }
+
                     if ui.button("Open Folder...").clicked() {
                         self.open_folder_dialog();
                         ui.close();
                     }
 
                     if ui
-                        .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
+                        .add_enabled(
+                            self.file_explorer.root.is_some(),
+                            egui::Button::new("Close Folder"),
+                        )
                         .clicked()
                     {
-                        self.close_active_tab();
+                        self.close_folder();
                         ui.close();
                     }
 
@@ -7124,6 +7289,109 @@ mod tests {
             v[0].path,
             PathBuf::from(format!("/f{}.md", RECENT_FILES_CAP + 4))
         );
+    }
+
+    #[test]
+    fn recent_folders_are_deduplicated_and_bounded() {
+        let mut folders = Vec::new();
+        for i in 0..=RECENT_FOLDERS_CAP {
+            push_recent_folder(&mut folders, Path::new(&format!("folder-{i}")));
+        }
+        push_recent_folder(&mut folders, Path::new("folder-1"));
+
+        assert_eq!(folders.len(), RECENT_FOLDERS_CAP);
+        assert_eq!(folders[0], Path::new("folder-1"));
+        assert_eq!(
+            folders[1],
+            PathBuf::from(format!("folder-{RECENT_FOLDERS_CAP}"))
+        );
+        assert!(!folders.contains(&PathBuf::from("folder-0")));
+    }
+
+    #[test]
+    fn recent_folders_move_a_repeated_folder_to_the_front() {
+        let mut folders = Vec::new();
+        push_recent_folder(&mut folders, Path::new("a"));
+        push_recent_folder(&mut folders, Path::new("b"));
+        push_recent_folder(&mut folders, Path::new("a"));
+
+        assert_eq!(folders, vec![PathBuf::from("a"), PathBuf::from("b")]);
+    }
+
+    #[test]
+    fn explicitly_closed_explorer_stays_closed_when_opening_a_document() {
+        let mut storage = MemoryStorage(HashMap::new());
+        let doc = Path::new("project").join("readme.md");
+        eframe::set_value(
+            &mut storage,
+            APP_KEY,
+            &PersistedState {
+                explorer_closed: Some(true),
+                recent_folders: Some(vec![PathBuf::from("project")]),
+                ..Default::default()
+            },
+        );
+        let state: PersistedState = eframe::get_value(&storage, APP_KEY).unwrap();
+        assert_eq!(
+            initial_explorer_root(
+                state.explorer_closed.unwrap_or(false),
+                Some(&doc),
+                state.explorer_root,
+                Some(&doc),
+            ),
+            None
+        );
+        assert_eq!(state.recent_folders, Some(vec![PathBuf::from("project")]));
+
+        let legacy: PersistedState = eframe::get_value(
+            &MemoryStorage(HashMap::from([(
+                APP_KEY.to_owned(),
+                "(explorer_root:None)".to_owned(),
+            )])),
+            APP_KEY,
+        )
+        .unwrap();
+        assert_eq!(
+            initial_explorer_root(
+                legacy.explorer_closed.unwrap_or(false),
+                None,
+                legacy.explorer_root,
+                Some(&doc),
+            ),
+            Some(PathBuf::from("project"))
+        );
+    }
+
+    #[test]
+    fn closing_explorer_drops_the_tree_and_pending_scan() {
+        let root = PathBuf::from("root");
+        let child = root.join("docs");
+        let (tx, receiver) = mpsc::channel();
+        let mut explorer = FileExplorer {
+            root: Some(root.clone()),
+            expanded_dirs: HashSet::from([child]),
+            pending_scan: Some(PendingExplorerScan {
+                receiver,
+                expands_all: false,
+                discarded: false,
+            }),
+            ..Default::default()
+        };
+        explorer.close_root();
+
+        assert!(explorer.root.is_none());
+        assert!(explorer.tree.is_empty());
+        assert!(explorer.expanded_dirs.is_empty());
+        assert!(explorer.poll_pending_scan().is_none());
+        assert!(explorer.watch_directories().0.is_empty());
+        assert!(tx
+            .send(ExplorerScanResult {
+                root,
+                sort_order: SortOrder::NameAsc,
+                tree: Vec::new(),
+                bulk_expansion: None,
+            })
+            .is_err());
     }
 
     #[test]
