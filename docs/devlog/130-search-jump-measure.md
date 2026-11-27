@@ -1,7 +1,7 @@
 # 130: Find-bar jumps without laying out the whole document
 
 **Status:** ✅ Complete
-**Branch:** `perf/search-jump-measure`
+**Branch:** `perf/search-jump-measure` (#307)
 **Date:** 2026-11-27
 
 ## Summary
