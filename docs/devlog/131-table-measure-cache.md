@@ -1,7 +1,7 @@
 # 131: Tables stop re-measuring every row on every frame
 
 **Status:** ✅ Complete
-**Branch:** `perf/table-measure-cache`
+**Branch:** `perf/table-measure-cache` (#308)
 **Date:** 2026-11-28
 
 ## Summary
