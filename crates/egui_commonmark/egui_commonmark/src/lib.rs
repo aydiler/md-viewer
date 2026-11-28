@@ -106,6 +106,9 @@ pub use egui_commonmark_backend_extended::{
     seed_inline_math_size_for_test,
 };
 
+#[doc(hidden)]
+pub use parsers::pulldown::table_cells_measured_for_test;
+
 #[cfg(feature = "macros")]
 pub use egui_commonmark_macros_extended::*;
 
