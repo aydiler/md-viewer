@@ -1110,6 +1110,15 @@ broken repository.
 **Cause:** egui's galley cache keys on the text and its format, so each repeated paragraph is shaped once and every copy after it is a cache hit. The fixture measured the cache, not the layout.
 **Fix:** generate large fixtures with random text throughout (`random.seed` for repeatability) and check the unique-block count before trusting a timing.
 
+### A stale table row height does not show in the document's extent
+**Context:** Devlog 131 cached a table's row heights. A test that compared the document's height after an edit with a fresh layout passed even with the cache's content key removed.
+**Cause:** the cell's text is laid out where it really wraps, and the extent follows the laid-out content, so a row reserved too short still produces the right document height. The defect is visual: the overflowing cell paints over the next row.
+**Fix:** test row geometry, not the extent: every painted row's first cell starts below the text of the row above it (`assert_rows_stacked` in `tests/table_measure_cache.rs`). Pin cache keys with unit tests too: after an edit, the first column's width differs by one ulp between the measuring and the painted pass, which re-measures by coincidence and can hide a missing key from any rendered test.
+
+### Timing comparisons on a shared machine: interleave the builds
+**Context:** Devlog 131's branch run showed the prose control 2.5 times slower than main's earlier run, on code the branch did not touch. Another session was running a dozen CPU-bound jobs (load average 29 on 16 cores).
+**Fix:** check `uptime` before trusting a timing, and compare builds by alternating them run by run on the same fixtures, so both see the same load; report the control alongside. Callgrind instruction counts are unaffected by load.
+
 ### show_rows for the outline drops O(headers) per frame to O(visible)
 **Context:** The outline `ScrollArea::show` iterated all of `tab.outline_headers` every frame; on a 100k-line doc with ~15k headers this dominated the right-panel cost.
 **Fix:** Pre-compute `visible_indices: Vec<usize>` (skip collapsed-ancestor rows) once per frame, then use `ScrollArea::show_rows(ui, row_height, visible_indices.len(), |ui, range| ...)`. Outline rows have uniform height (fold indicator is 20px, others use `interact_size.y` which is also ~20px), so the row-height assumption holds.
