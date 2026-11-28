@@ -1061,6 +1061,19 @@ fn cell_visual_lines_with(
     (completed_lines + usize::from(remaining_width < wrap_width)).max(1)
 }
 
+thread_local! {
+    /// Cells measured by `table_cell_height` on this thread, for tests.
+    static TABLE_CELLS_MEASURED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many table cells this thread has measured. A table on screen measures
+/// its cells once and then reuses the result (devlog 131); tests read this to
+/// check that a settled table measures nothing while it scrolls.
+#[doc(hidden)]
+pub fn table_cells_measured_for_test() -> usize {
+    TABLE_CELLS_MEASURED.with(std::cell::Cell::get)
+}
+
 fn table_cell_height(
     cell: &[(pulldown_cmark::Event, Range<usize>)],
     line_height: f32,
@@ -1069,6 +1082,7 @@ fn table_cell_height(
     column_width: f32,
     options: &CommonMarkOptions,
 ) -> f32 {
+    TABLE_CELLS_MEASURED.with(|count| count.set(count.get() + 1));
     let text = markdown_cell_text(cell);
     let mut height = wrapped_text_height(ui, &text, column_width, line_height).max(
         line_height * cell_visual_lines(cell, ui, column_width) as f32
@@ -1620,6 +1634,102 @@ struct HeightAwareTableLayout {
     widths: Vec<f32>,
 }
 
+/// Row heights measured at one set of column widths, keyed by those widths
+/// and the measuring ui's item spacing.
+type MeasuredRowHeights = (Vec<u32>, std::sync::Arc<Vec<f32>>);
+
+/// A markdown table's measurements, kept across frames so a settled table
+/// does work only for the rows on screen (devlog 131). Every value is a pure
+/// function of the table's content, the text style and the column widths, so
+/// the measuring pass and the painted pass may share it, unlike the stored
+/// column widths (devlog 122).
+#[derive(Clone, Debug, Default)]
+struct TableMeasurements {
+    /// The parsed document's content hash and the table's id. Any change to
+    /// the document text changes it.
+    content_id: u64,
+    /// Fonts, line height, zoom, async layout revision and math scale
+    /// (`table_style_key`).
+    style_key: u64,
+    /// `markdown_table_digest` of the table's own events. It keys the column
+    /// optimizer, so an edit elsewhere in the document recomputes it once and
+    /// gets the same value: the optimizer's widths, and the widths the user
+    /// dragged, survive.
+    digest: Option<u64>,
+    /// Minimum and desired column widths.
+    column_widths: Option<(Vec<f32>, Vec<f32>)>,
+    /// Heights the table reserves its outer height from.
+    reserved_heights: Option<MeasuredRowHeights>,
+    /// Heights the body lays its rows out with (the widths egui_extras
+    /// resolved this frame, which differ from the reserved ones during a
+    /// column drag).
+    body_heights: Option<MeasuredRowHeights>,
+}
+
+impl TableMeasurements {
+    /// The cached measurements for `content_id` and `style_key`, keeping what
+    /// is still valid: the digest survives a style change, nothing survives a
+    /// content change.
+    fn load(ui: &Ui, cache_id: Id, content_id: u64, style_key: u64) -> Self {
+        let cached = ui.data(|data| data.get_temp::<Self>(cache_id));
+        match cached {
+            Some(cached) if cached.content_id == content_id && cached.style_key == style_key => {
+                cached
+            }
+            Some(cached) if cached.content_id == content_id => Self {
+                content_id,
+                style_key,
+                digest: cached.digest,
+                ..Default::default()
+            },
+            _ => Self {
+                content_id,
+                style_key,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Identifies a table's content: the cached parse's content hash (any edit
+/// to the document changes it) and the table's id.
+fn table_content_id(content_hash: u64, table_id: Id) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content_hash.hash(&mut hasher);
+    table_id.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Key for the row heights measured at `widths` in `ui`.
+fn row_heights_key(ui: &Ui, widths: &[f32]) -> Vec<u32> {
+    widths
+        .iter()
+        .map(|width| width.to_bits())
+        .chain(std::iter::once(ui.spacing().item_spacing.y.to_bits()))
+        .collect()
+}
+
+/// The row heights cached in `slot` for `key`, or `measure`d and stored.
+/// Without a slot (no cached parse to key the table by) it measures every
+/// time, as before the cache.
+fn cached_row_heights(
+    slot: Option<&mut Option<MeasuredRowHeights>>,
+    key: Vec<u32>,
+    measure: impl FnOnce() -> Vec<f32>,
+) -> std::sync::Arc<Vec<f32>> {
+    let Some(slot) = slot else {
+        return std::sync::Arc::new(measure());
+    };
+    if let Some((cached_key, heights)) = slot.as_ref() {
+        if *cached_key == key {
+            return std::sync::Arc::clone(heights);
+        }
+    }
+    let heights = std::sync::Arc::new(measure());
+    *slot = Some((key, std::sync::Arc::clone(&heights)));
+    heights
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TableHeightScore {
     row_max_total: f32,
@@ -2147,18 +2257,37 @@ fn table_layout_key(
     // the user had arranged. Column widths persist across pane-width changes
     // and the outer horizontal scroller absorbs any overflow; this key only
     // guards inputs that genuinely change measured heights.
-    line_height.to_bits().hash(&mut hasher);
+    hash_table_style(&mut hasher, ui, line_height, layout_revision, math_scale);
+    content_digest.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Everything besides content and column widths that a table's measurements
+/// depend on: line height, body and monospace fonts, zoom, the async layout
+/// revision (an image or formula that finished loading) and the math scale.
+fn table_style_key(ui: &Ui, line_height: f32, layout_revision: u64, math_scale: f32) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_table_style(&mut hasher, ui, line_height, layout_revision, math_scale);
+    hasher.finish()
+}
+
+fn hash_table_style(
+    hasher: &mut impl Hasher,
+    ui: &Ui,
+    line_height: f32,
+    layout_revision: u64,
+    math_scale: f32,
+) {
+    line_height.to_bits().hash(hasher);
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let monospace_font = egui::TextStyle::Monospace.resolve(ui.style());
-    body_font.size.to_bits().hash(&mut hasher);
-    let _ = write!(HasherWriter(&mut hasher), "{:?}", body_font.family);
-    monospace_font.size.to_bits().hash(&mut hasher);
-    let _ = write!(HasherWriter(&mut hasher), "{:?}", monospace_font.family);
-    ui.ctx().pixels_per_point().to_bits().hash(&mut hasher);
-    content_digest.hash(&mut hasher);
-    layout_revision.hash(&mut hasher);
-    math_scale.to_bits().hash(&mut hasher);
-    hasher.finish()
+    body_font.size.to_bits().hash(hasher);
+    let _ = write!(HasherWriter(&mut *hasher), "{:?}", body_font.family);
+    monospace_font.size.to_bits().hash(hasher);
+    let _ = write!(HasherWriter(&mut *hasher), "{:?}", monospace_font.family);
+    ui.ctx().pixels_per_point().to_bits().hash(hasher);
+    layout_revision.hash(hasher);
+    math_scale.to_bits().hash(hasher);
 }
 
 fn cached_height_aware_widths(
@@ -4176,35 +4305,68 @@ impl CommonMarkViewerInternal {
             } else {
                 table_bound
             };
-            let minimum_widths: Vec<f32> = (0..num_cols)
-                .map(|column| {
-                    let header_floor = header
-                        .get(column)
-                        .map(|cell| unbreakable_text_width(ui, &markdown_cell_text(cell)))
-                        .unwrap_or(40.0);
-                    // Short inline code anywhere in the column is a floor too,
-                    // or a narrow column cuts identifiers mid-word.
-                    std::iter::once(header.get(column))
-                        .chain(rows.iter().map(|row| row.get(column)))
-                        .flatten()
-                        .map(|cell| inline_code_floor(ui, cell))
-                        .fold(header_floor, f32::max)
-                })
-                .collect();
+            // Measurements of every row are kept across frames: a settled
+            // table measures nothing while it scrolls, only the rows on
+            // screen are laid out (devlog 131). Without a cached parse to key
+            // them by, everything is measured every frame as before.
+            let measurements_id = id.with("_measurements");
+            let mut measurements = cache.cached_content_hash().map(|content_hash| {
+                TableMeasurements::load(
+                    ui,
+                    measurements_id,
+                    table_content_id(content_hash, id),
+                    table_style_key(ui, line_h, cache.layout_revision(), options.math_scale),
+                )
+            });
+            let cached_column_widths = measurements
+                .as_ref()
+                .and_then(|measured| measured.column_widths.clone());
+            let (minimum_widths, desired_widths) = match cached_column_widths {
+                Some(widths) => widths,
+                None => {
+                    let minimum_widths: Vec<f32> = (0..num_cols)
+                        .map(|column| {
+                            let header_floor = header
+                                .get(column)
+                                .map(|cell| unbreakable_text_width(ui, &markdown_cell_text(cell)))
+                                .unwrap_or(40.0);
+                            // Short inline code anywhere in the column is a floor too,
+                            // or a narrow column cuts identifiers mid-word.
+                            std::iter::once(header.get(column))
+                                .chain(rows.iter().map(|row| row.get(column)))
+                                .flatten()
+                                .map(|cell| inline_code_floor(ui, cell))
+                                .fold(header_floor, f32::max)
+                        })
+                        .collect();
+                    // Every cell of the column, header included.
+                    let desired_widths: Vec<f32> = (0..num_cols)
+                        .map(|column| {
+                            std::iter::once(header.get(column))
+                                .chain(rows.iter().map(|row| row.get(column)))
+                                .flatten()
+                                .map(|cell| natural_text_width(ui, &markdown_cell_text(cell)))
+                                .fold(40.0, f32::max)
+                        })
+                        .collect();
+                    if let Some(measured) = measurements.as_mut() {
+                        measured.column_widths =
+                            Some((minimum_widths.clone(), desired_widths.clone()));
+                    }
+                    (minimum_widths, desired_widths)
+                }
+            };
             let mut table_rows = Vec::with_capacity(rows.len() + usize::from(!header.is_empty()));
             if !header.is_empty() {
                 table_rows.push(header);
             }
             table_rows.extend(rows);
-            let desired_widths: Vec<f32> = (0..num_cols)
-                .map(|column| {
-                    table_rows
-                        .iter()
-                        .filter_map(|row| row.get(column))
-                        .map(|cell| natural_text_width(ui, &markdown_cell_text(cell)))
-                        .fold(40.0, f32::max)
-                })
-                .collect();
+            let content_digest = match measurements.as_mut() {
+                Some(measured) => *measured
+                    .digest
+                    .get_or_insert_with(|| markdown_table_digest(&table_rows)),
+                None => markdown_table_digest(&table_rows),
+            };
             let (table_frame, baseline_widths, visible_column_budget) =
                 framed_table_widths(ui, &desired_widths, &minimum_widths, table_bound);
             let layout_key = table_layout_key(
@@ -4212,7 +4374,7 @@ impl CommonMarkViewerInternal {
                 &desired_widths,
                 &minimum_widths,
                 line_h,
-                markdown_table_digest(&table_rows),
+                content_digest,
                 cache.layout_revision(),
                 options.math_scale,
             );
@@ -4304,24 +4466,32 @@ impl CommonMarkViewerInternal {
             // while scrolled measures the document shorter — and any position
             // recorded during such a paint (heading y for outline clicks) is
             // compressed by the same factor.
-            let reserved_row_heights: Vec<f32> = table_rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .enumerate()
-                        .map(|(column, cell)| {
-                            table_cell_height(
-                                cell,
-                                line_h,
-                                cache,
-                                ui,
-                                initial_widths.get(column).copied().unwrap_or(40.0),
-                                options,
-                            )
+            let reserved_row_heights = cached_row_heights(
+                measurements
+                    .as_mut()
+                    .map(|measured| &mut measured.reserved_heights),
+                row_heights_key(ui, &initial_widths),
+                || {
+                    table_rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .enumerate()
+                                .map(|(column, cell)| {
+                                    table_cell_height(
+                                        cell,
+                                        line_h,
+                                        cache,
+                                        ui,
+                                        initial_widths.get(column).copied().unwrap_or(40.0),
+                                        options,
+                                    )
+                                })
+                                .fold(cell_h, f32::max)
                         })
-                        .fold(cell_h, f32::max)
-                })
-                .collect();
+                        .collect()
+                },
+            );
             let group_frame = egui::Frame::group(ui.style());
             let reserved_height = reserved_row_heights.iter().sum::<f32>()
                 + ui.spacing().item_spacing.y * reserved_row_heights.len().saturating_sub(1) as f32
@@ -4370,32 +4540,40 @@ impl CommonMarkViewerInternal {
                                     }
                                     builder.body(|mut body| {
                                         let widths = body.widths().to_vec();
-                                        let heights: Vec<f32> = {
+                                        let heights = {
                                             let measure_ui = body.ui_mut();
-                                            table_rows
-                                                .iter()
-                                                .map(|row| {
-                                                    row.iter()
-                                                        .enumerate()
-                                                        .map(|(column, cell)| {
-                                                            table_cell_height(
-                                                                cell,
-                                                                line_h,
-                                                                cache,
-                                                                measure_ui,
-                                                                widths
-                                                                    .get(column)
-                                                                    .copied()
-                                                                    .unwrap_or(40.0),
-                                                                options,
-                                                            )
+                                            cached_row_heights(
+                                                measurements
+                                                    .as_mut()
+                                                    .map(|measured| &mut measured.body_heights),
+                                                row_heights_key(measure_ui, &widths),
+                                                || {
+                                                    table_rows
+                                                        .iter()
+                                                        .map(|row| {
+                                                            row.iter()
+                                                                .enumerate()
+                                                                .map(|(column, cell)| {
+                                                                    table_cell_height(
+                                                                        cell,
+                                                                        line_h,
+                                                                        cache,
+                                                                        measure_ui,
+                                                                        widths
+                                                                            .get(column)
+                                                                            .copied()
+                                                                            .unwrap_or(40.0),
+                                                                        options,
+                                                                    )
+                                                                })
+                                                                .fold(cell_h, f32::max)
                                                         })
-                                                        .fold(cell_h, f32::max)
-                                                })
-                                                .collect()
+                                                        .collect()
+                                                },
+                                            )
                                         };
                                         store_table_column_widths(body.ui_mut(), id, &widths);
-                                        body.heterogeneous_rows(heights.into_iter(), |mut row_ui| {
+                                        body.heterogeneous_rows(heights.iter().copied(), |mut row_ui| {
                                             let row = &table_rows[row_ui.index()];
                                                 for col in row {
                                                     row_ui.col(|ui| {
@@ -4484,6 +4662,9 @@ impl CommonMarkViewerInternal {
                     scroll_out
                 })
                 .inner;
+            if let Some(measured) = measurements {
+                ui.data_mut(|data| data.insert_temp(measurements_id, measured));
+            }
             self.is_table = false;
             if events.peek().is_none() {
                 self.line.should_end_newline_forced = false;
@@ -7118,6 +7299,59 @@ mod tests {
             assert!((optimized.iter().sum::<f32>() - baseline.iter().sum::<f32>()).abs() < 0.01);
         });
         let _ = ctx.end_frame();
+    }
+
+    /// An edit elsewhere in the document changes its content hash, so a
+    /// table's cached measurements are redone, but its digest comes out the
+    /// same: the column optimizer's key is unchanged and the column widths,
+    /// including ones the user dragged, are not reset (devlog 131).
+    #[test]
+    fn an_edit_after_a_table_keeps_its_column_layout_key() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(600.0);
+            ui.set_height(300.0);
+            let source_id = egui::Id::unique("table-digest");
+            let mut cache = CommonMarkCache::default();
+            let options = CommonMarkOptions::default();
+            let table = "| Key | Note |\n|---|---|\n| a | a longer note in the second column |\n";
+            let before = format!("# Doc\n\nIntro.\n\n{table}\nClosing paragraph.\n");
+            let after = format!("# Doc\n\nIntro.\n\n{table}\nA different closing paragraph.\n");
+            let table_id = markdown_table_id(source_id, before.find("| Key").unwrap());
+            // The column optimizer's key and the measurements' content id.
+            let mut keys = |cache: &mut CommonMarkCache, text: &str, version: u64| {
+                CommonMarkViewerInternal::new().show_scrollable(
+                    source_id,
+                    ui,
+                    cache,
+                    &options,
+                    text,
+                    Some(version),
+                    None,
+                    false,
+                    None,
+                    None,
+                );
+                ui.data(|data| {
+                    let layout = data
+                        .get_temp::<HeightAwareTableLayout>(table_id.with("_height_aware_widths"))
+                        .expect("the table cached its column layout");
+                    let measured = data
+                        .get_temp::<TableMeasurements>(table_id.with("_measurements"))
+                        .expect("the table cached its measurements");
+                    (layout.key, measured.content_id)
+                })
+            };
+            let (first, first_content) = keys(&mut cache, &before, 1);
+            let (second, second_content) = keys(&mut cache, &after, 2);
+            assert_ne!(
+                first_content, second_content,
+                "an edit to the document must invalidate the measurements"
+            );
+            assert_eq!(
+                first, second,
+                "an edit after the table reset its column layout"
+            );
+        });
     }
 
     /// The scroll cache and `show()`'s cache hold one parse of the document,

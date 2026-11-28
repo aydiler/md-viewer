@@ -3893,6 +3893,13 @@ impl CommonMarkCache {
         self.active_search_range.as_ref()
     }
 
+    /// Content hash of the text whose parsed events are cached, if any. The
+    /// renderer keys measurements of the document's blocks by it, so they are
+    /// redone after any change to the text.
+    pub fn cached_content_hash(&self) -> Option<u64> {
+        self.cached_events.as_ref().map(|(hash, _)| *hash)
+    }
+
     /// Get cached parsed events if the content hash matches.
     pub fn get_cached_events(
         &self,
