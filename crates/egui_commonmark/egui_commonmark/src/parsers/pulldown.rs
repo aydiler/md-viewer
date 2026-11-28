@@ -7186,6 +7186,71 @@ mod tests {
         });
     }
 
+    /// A table's cached measurements are dropped when anything they were
+    /// measured with changes: the text style, zoom, async layout revision or
+    /// math scale (devlog 131).
+    #[test]
+    fn table_style_key_tracks_the_text_style() {
+        egui::__run_test_ui(|ui| {
+            let key = table_style_key(ui, 20.0, 0, 1.0);
+            assert_eq!(key, table_style_key(ui, 20.0, 0, 1.0));
+            assert_ne!(key, table_style_key(ui, 21.0, 0, 1.0));
+            assert_ne!(key, table_style_key(ui, 20.0, 1, 1.0));
+            assert_ne!(key, table_style_key(ui, 20.0, 0, 1.25));
+
+            // A body or monospace font change at the same line height.
+            for style in [egui::TextStyle::Body, egui::TextStyle::Monospace] {
+                let mut changed = ui.style().as_ref().clone();
+                let font = style.resolve(&changed);
+                changed.text_styles.insert(
+                    style.clone(),
+                    egui::FontId::new(font.size + 4.0, font.family),
+                );
+                let before = ui.style().clone();
+                ui.set_style(changed);
+                assert_ne!(
+                    key,
+                    table_style_key(ui, 20.0, 0, 1.0),
+                    "a larger {style:?} font kept the style key"
+                );
+                ui.set_style(before);
+            }
+        });
+    }
+
+    /// Row heights are reused only for exactly the column widths, and the
+    /// item spacing, they were measured at.
+    #[test]
+    fn cached_row_heights_are_kept_per_column_widths() {
+        egui::__run_test_ui(|ui| {
+            let mut slot = None;
+            let mut measured = 0;
+            let mut heights = |slot: &mut Option<MeasuredRowHeights>, widths: &[f32]| {
+                cached_row_heights(Some(slot), row_heights_key(ui, widths), || {
+                    measured += 1;
+                    vec![widths[0]]
+                })
+            };
+            assert_eq!(*heights(&mut slot, &[100.0, 200.0]), vec![100.0]);
+            assert_eq!(*heights(&mut slot, &[100.0, 200.0]), vec![100.0]);
+            assert_eq!(*heights(&mut slot, &[101.0, 200.0]), vec![101.0]);
+            assert_eq!(*heights(&mut slot, &[101.0, 199.0]), vec![101.0]);
+            assert_eq!(
+                measured, 3,
+                "a width change must measure again, the same widths not"
+            );
+
+            assert_ne!(
+                row_heights_key(ui, &[100.0]),
+                {
+                    ui.spacing_mut().item_spacing.y += 1.0;
+                    row_heights_key(ui, &[100.0])
+                },
+                "the item spacing is part of a row's height"
+            );
+        });
+    }
+
     #[test]
     fn height_aware_columns_reduce_production_wrapped_row_height() {
         let ctx = egui::Context::default();
